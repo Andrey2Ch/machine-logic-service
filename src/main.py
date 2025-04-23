@@ -5,8 +5,8 @@ from typing import Optional, Dict, List
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session, aliased
 from fastapi import Depends, Body
-from src.database import SessionLocal, engine
-from src.models.models import Base, SetupDB, ReadingDB, MachineDB, EmployeeDB, PartDB, LotDB
+from src.database import Base, initialize_database, get_db_session
+from src.models.models import SetupDB, ReadingDB, MachineDB, EmployeeDB, PartDB, LotDB
 from datetime import datetime
 from src.utils.sheets_handler import save_to_sheets
 import asyncio
@@ -22,16 +22,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Создаем таблицы (если их нет)
-Base.metadata.create_all(bind=engine)
-
-# Dependency
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+# Событие startup для инициализации БД
+@app.on_event("startup")
+async def startup_event():
+    initialize_database()
+    # Здесь можно добавить другие действия при старте, если нужно
 
 @app.get("/")
 async def root():
@@ -42,7 +37,7 @@ async def root():
     }
 
 @app.get("/setup/{machine_id}/status")
-async def get_setup_status(machine_id: int, db: Session = Depends(get_db)):
+async def get_setup_status(machine_id: int, db: Session = Depends(get_db_session)):
     """
     Получить текущий статус наладки для станка
     """
@@ -65,7 +60,7 @@ async def get_setup_status(machine_id: int, db: Session = Depends(get_db)):
     }
 
 @app.get("/setup/{machine_id}/all")
-async def get_setup_history(machine_id: int, db: Session = Depends(get_db)):
+async def get_setup_history(machine_id: int, db: Session = Depends(get_db_session)):
     """
     Получить историю наладок для станка
     """
@@ -92,7 +87,7 @@ class ReadingInput(BaseModel):
     value: int
 
 @app.post("/readings")
-async def save_reading(reading: ReadingInput, db: Session = Depends(get_db)):
+async def save_reading(reading: ReadingInput, db: Session = Depends(get_db_session)):
     """
     Сохранить показания счетчика
     """
@@ -158,7 +153,7 @@ async def save_reading(reading: ReadingInput, db: Session = Depends(get_db)):
     }
 
 @app.get("/machines")
-async def get_machines(db: Session = Depends(get_db)):
+async def get_machines(db: Session = Depends(get_db_session)):
     """
     Получить список всех станков
     """
@@ -174,7 +169,7 @@ async def get_machines(db: Session = Depends(get_db)):
     }
 
 @app.get("/readings")
-async def get_readings(db: Session = Depends(get_db)):
+async def get_readings(db: Session = Depends(get_db_session)):
     """
     Получить последние показания
     """
@@ -193,7 +188,7 @@ async def get_readings(db: Session = Depends(get_db)):
     }
 
 @app.get("/readings/{machine_id}")
-async def get_machine_readings(machine_id: int, db: Session = Depends(get_db)):
+async def get_machine_readings(machine_id: int, db: Session = Depends(get_db_session)):
     """
     Получить показания для конкретного станка
     """
@@ -222,7 +217,7 @@ class SetupInput(BaseModel):
     cycle_time_seconds: Optional[int] = 30
 
 @app.post("/setup")
-async def create_setup(setup: SetupInput, db: Session = Depends(get_db)):
+async def create_setup(setup: SetupInput, db: Session = Depends(get_db_session)):
     """
     Create a new setup for a machine
     """
@@ -306,7 +301,7 @@ class QaSetupViewItem(BaseModel):
 
 # Эндпоинт для получения наладок для ОТК
 @app.get("/setups/qa-view", response_model=List[QaSetupViewItem])
-async def get_qa_view(db: Session = Depends(get_db)):
+async def get_qa_view(db: Session = Depends(get_db_session)):
     """
     Получить список АКТИВНЫХ наладок для отображения ОТК.
     Возвращает данные, необходимые для отображения в таблице ОТК на дашборде,
@@ -380,7 +375,7 @@ class ApprovedSetupResponse(QaSetupViewItem): # Наследуемся от QaSe
 async def approve_setup(
     setup_id: int,
     payload: ApproveSetupPayload,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db_session)
 ):
     """
     Утвердить наладку (изменить статус на 'allowed').
