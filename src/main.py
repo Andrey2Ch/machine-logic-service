@@ -10,6 +10,8 @@ from src.models.models import SetupDB, ReadingDB, MachineDB, EmployeeDB, PartDB,
 from datetime import datetime
 from src.utils.sheets_handler import save_to_sheets
 import asyncio
+import httpx
+import os
 
 app = FastAPI(title="Machine Logic Service", debug=True)
 
@@ -370,6 +372,27 @@ class ApprovedSetupResponse(QaSetupViewItem): # Наследуемся от QaSe
         orm_mode = True
         allow_population_by_field_name = True
 
+# Функция для отправки уведомления (можно вынести в utils)
+async def send_telegram_notification(payload: dict):
+    bot_url = os.getenv("TELEGRAM_BOT_URL")
+    if not bot_url:
+        print("Error: TELEGRAM_BOT_URL environment variable not set. Cannot send notification.")
+        return
+    
+    notify_endpoint = f"{bot_url}/notify/setup-approved" # Предполагаемый эндпоинт бота
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(notify_endpoint, json=payload, timeout=10.0)
+            response.raise_for_status() # Вызовет исключение для 4xx/5xx ответов
+            print(f"Successfully sent notification for setup {payload.get('setup_id')}")
+    except httpx.RequestError as exc:
+        print(f"Error sending notification for setup {payload.get('setup_id')}: Request error {exc.request.url!r} - {exc}")
+    except httpx.HTTPStatusError as exc:
+        print(f"Error sending notification for setup {payload.get('setup_id')}: Status error {exc.response.status_code} while requesting {exc.request.url!r}. Response: {exc.response.text}")
+    except Exception as e:
+        print(f"Error sending notification for setup {payload.get('setup_id')}: An unexpected error occurred - {e}")
+
 # Новый эндпоинт для утверждения наладки ОТК
 @app.post("/setups/{setup_id}/approve", response_model=ApprovedSetupResponse)
 async def approve_setup(
@@ -380,6 +403,7 @@ async def approve_setup(
     """
     Утвердить наладку (изменить статус на 'allowed').
     Требует ID сотрудника ОТК в теле запроса.
+    Отправляет уведомление в Telegram бот.
     """
     try:
         # Найти наладку по ID
@@ -388,45 +412,41 @@ async def approve_setup(
         if not setup:
             raise HTTPException(status_code=404, detail=f"Наладка с ID {setup_id} не найдена")
 
-        # Проверить текущий статус
         if setup.status != 'pending_qc':
             raise HTTPException(
                 status_code=400,
                 detail=f"Нельзя разрешить наладку в статусе '{setup.status}'. Ожидался статус 'pending_qc'"
             )
 
-        # Проверить существование сотрудника ОТК
         qa_employee_check = db.query(EmployeeDB).filter(EmployeeDB.id == payload.qa_id).first()
         if not qa_employee_check:
              raise HTTPException(status_code=404, detail=f"Сотрудник ОТК с ID {payload.qa_id} не найден")
-        # Можно добавить проверку роли сотрудника, если нужно
-        # if qa_employee_check.role_id != QA_ROLE_ID: # Заменить QA_ROLE_ID на реальный ID роли ОТК
-        #     raise HTTPException(status_code=403, detail="Указанный сотрудник не является сотрудником ОТК")
-
 
         # Обновить статус, qa_id и qa_date
         setup.status = 'allowed' # Новый статус
         setup.qa_id = payload.qa_id
         setup.qa_date = datetime.now()
 
+        # Сохраняем ID оператора до коммита - ОН НЕ НУЖЕН ЗДЕСЬ?
+        # operator_id = setup.employee_id 
+
         db.commit() # Сохраняем изменения
         db.refresh(setup) # Обновляем объект setup из БД
 
-        # --- ИСПРАВЛЕННЫЙ ЗАПРОС ДЛЯ ФОРМИРОВАНИЯ ОТВЕТА --- 
-        # Создаем псевдонимы для таблицы EmployeeDB
+        # --- ЗАПРОС ДЛЯ ФОРМИРОВАНИЯ ОТВЕТА И УВЕДОМЛЕНИЯ --- 
         OperatorEmployee = aliased(EmployeeDB, name="operator")
         QAEmployee = aliased(EmployeeDB, name="qa_approver")
 
-        # Получаем связанные данные для ответа
         result_data = db.query(
             SetupDB.id,
             MachineDB.name.label('machine_name'),
             PartDB.drawing_number.label('drawing_number'),
             LotDB.lot_number.label('lot_number'),
-            OperatorEmployee.full_name.label('machinist_name'), # Используем псевдоним оператора
+            OperatorEmployee.full_name.label('machinist_name'),
+            OperatorEmployee.telegram_id.label('machinist_telegram_id'), # <-- Добавляем telegram_id наладчика
             SetupDB.start_time,
             SetupDB.status,
-            QAEmployee.full_name.label('qa_name'), # Используем псевдоним ОТК
+            QAEmployee.full_name.label('qa_name'),
             SetupDB.qa_date
         ).select_from(SetupDB) \
          .join(MachineDB, SetupDB.machine_id == MachineDB.id)\
@@ -439,16 +459,27 @@ async def approve_setup(
         # ------------------------------------------------------
 
         if not result_data:
-             # Эта ошибка не должна возникать после db.refresh, но оставим проверку
              raise HTTPException(status_code=404, detail=f"Не удалось получить детали для разрешенной наладки {setup_id}")
 
-        # Преобразуем в Pydantic модель
+        # --- Отправка уведомления в фоне --- 
+        notification_payload = {
+            "setup_id": result_data.id,
+            "machinist_telegram_id": result_data.machinist_telegram_id,
+            "machine_name": result_data.machine_name,
+            "drawing_number": result_data.drawing_number,
+            "lot_number": result_data.lot_number,
+            "qa_approver_name": result_data.qa_name
+        }
+        asyncio.create_task(send_telegram_notification(notification_payload))
+        # --------------------------------------
+
+        # Преобразуем в Pydantic модель для ответа API
         response_item = ApprovedSetupResponse(
             id=result_data.id,
             machine_name=result_data.machine_name,
             drawing_number=result_data.drawing_number,
             lot_number=result_data.lot_number,
-            machinist_name=result_data.machinist_name,
+            machinist_name=result_data.machinist_name, # Добавим для полноты ответа
             start_time=result_data.start_time,
             status=result_data.status,
             qa_name=result_data.qa_name, 
@@ -458,8 +489,8 @@ async def approve_setup(
         return response_item
 
     except HTTPException as http_exc:
-        raise http_exc # Пробрасываем HTTP исключения дальше
+        raise http_exc
     except Exception as e:
         print(f"Error approving setup {setup_id}: {e}")
-        db.rollback() # Откатываем транзакцию в случае других ошибок
+        db.rollback()
         raise HTTPException(status_code=500, detail=f"Internal server error while approving setup {setup_id}")
