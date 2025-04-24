@@ -3,6 +3,8 @@ from google.oauth2.service_account import Credentials
 import logging
 from datetime import datetime
 import pytz
+import os
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -13,8 +15,19 @@ SCOPES = [
 
 def init_google_sheets():
     try:
-        credentials = Credentials.from_service_account_file(
-            'civil-hull-441511-n5-c1b57e3e67d1.json',
+        creds_json_str = os.getenv('GOOGLE_CREDENTIALS_JSON')
+        if not creds_json_str:
+            logger.error("Environment variable GOOGLE_CREDENTIALS_JSON is not set.")
+            return None
+
+        try:
+            credentials_dict = json.loads(creds_json_str)
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse GOOGLE_CREDENTIALS_JSON: {e}")
+            return None
+
+        credentials = Credentials.from_service_account_info(
+            credentials_dict,
             scopes=SCOPES
         )
         
@@ -22,7 +35,7 @@ def init_google_sheets():
         SPREADSHEET_ID = '1aHjKbs4v6wgdqDpHP7_JWxY8pbVNW5betIXlt1GK2y8'
         worksheet = gc.open_by_key(SPREADSHEET_ID).sheet1
         
-        logger.info("Successfully connected to Google Sheets")
+        logger.info("Successfully connected to Google Sheets using environment variable")
         return worksheet
     except Exception as e:
         logger.error(f"Error connecting to Google Sheets: {e}")
