@@ -19,13 +19,13 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Machine Logic Service", debug=True)
 
-# ИЗМЕНЯЕМ НАСТРОЙКУ CORS
+# Возвращаем универсальное разрешение CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"], # <-- Явно разрешаем дашборд
+    allow_origins=["*"], # <-- Снова разрешаем все источники
     allow_credentials=True,
-    allow_methods=["*"], # Оставляем все методы разрешенными
-    allow_headers=["*"], # Оставляем все заголовки разрешенными
+    allow_methods=["*"], 
+    allow_headers=["*"], 
 )
 
 # Событие startup для инициализации БД
