@@ -11,7 +11,7 @@ class MachineDB(Base):
     name = Column(String(255))
     type = Column(String(50))
     created_at = Column(DateTime, default=datetime.now)
-    is_active = Column(Boolean, default=True)
+    # is_active = Column(Boolean, default=True)
 
 class EmployeeDB(Base):
     __tablename__ = "employees"
@@ -32,7 +32,7 @@ class PartDB(Base):
     drawing_number = Column(String(255))
     description = Column(String)
     created_at = Column(DateTime, default=datetime.now)
-    is_active = Column(Boolean, default=True)
+    # is_active = Column(Boolean, default=True)
 
 class LotDB(Base):
     __tablename__ = "lots"
@@ -41,7 +41,7 @@ class LotDB(Base):
     lot_number = Column(String(255))
     part_id = Column(Integer, ForeignKey("parts.id"))
     created_at = Column(DateTime, default=datetime.now)
-    is_active = Column(Boolean, default=True)
+    # is_active = Column(Boolean, default=True)
 
 class SetupDB(Base):
     __tablename__ = "setup_jobs"
