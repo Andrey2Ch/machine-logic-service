@@ -1,3 +1,4 @@
+import logging
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from src.models.setup import SetupStatus
@@ -14,15 +15,17 @@ import httpx
 import os
 from src.services.notification_service import send_setup_approval_notifications
 
+logger = logging.getLogger(__name__)
+
 app = FastAPI(title="Machine Logic Service", debug=True)
 
-# Добавляем CORS middleware
+# ИЗМЕНЯЕМ НАСТРОЙКУ CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  
+    allow_origins=["http://localhost:3000"], # <-- Явно разрешаем дашборд
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["*"], # Оставляем все методы разрешенными
+    allow_headers=["*"], # Оставляем все заголовки разрешенными
 )
 
 # Событие startup для инициализации БД
@@ -486,3 +489,81 @@ async def approve_setup(
         print(f"Error approving setup {setup_id}: {e}")
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Internal server error while approving setup {setup_id}")
+
+# Обновляем модель ответа
+class OperatorMachineViewItem(BaseModel):
+    id: int # Machine ID
+    name: Optional[str] = None # Machine name
+    reading: Optional[str] = '' # Поле для ввода на фронте
+    lastReading: Optional[int] = Field(None, alias='last_reading')
+    lastReadingTime: Optional[datetime] = Field(None, alias='last_reading_time')
+    setupId: Optional[int] = Field(None, alias='setup_id')
+    drawingNumber: Optional[str] = Field(None, alias='drawing_number')
+    plannedQuantity: Optional[int] = Field(None, alias='planned_quantity')
+    additionalQuantity: Optional[int] = Field(None, alias='additional_quantity')
+    status: Optional[str] = None # <-- Добавляем статус
+
+    class Config:
+        from_attributes = True
+        allow_population_by_field_name = True
+
+@app.get("/machines/operator-view/{operator_id}", response_model=List[OperatorMachineViewItem])
+async def get_operator_machines_view(operator_id: int, db: Session = Depends(get_db_session)):
+    """
+    Получает список станков, доступных оператору, с информацией
+    о последней активной наладке и последнем показании.
+    Предполагается, что оператор имеет доступ ко всем активным станкам.
+    """
+    logger.info(f"Fetching operator machine view for operator_id: {operator_id}")
+    try:
+        # 1. Получаем все активные станки
+        machines = db.query(MachineDB).filter(MachineDB.is_active == True).order_by(MachineDB.name).all()
+        logger.debug(f"Found {len(machines)} active machines.")
+
+        result_list = []
+        active_setup_statuses = ['created', 'pending_qc', 'allowed', 'started']
+
+        for machine in machines:
+            logger.debug(f"Processing machine: {machine.name} (ID: {machine.id})")
+            # 2. Находим последнее показание для станка
+            last_reading_data = db.query(ReadingDB.reading, ReadingDB.created_at)\
+                .filter(ReadingDB.machine_id == machine.id)\
+                .order_by(ReadingDB.created_at.desc())\
+                .first()
+            logger.debug(f"Last reading data for machine {machine.id}: {last_reading_data}")
+
+            # 3. Находим последнюю активную наладку и ее СТАТУС
+            active_setup = db.query(
+                    SetupDB.id, 
+                    SetupDB.planned_quantity,
+                    SetupDB.additional_quantity,
+                    PartDB.drawing_number,
+                    SetupDB.status # <-- Добавляем статус
+                )\
+                .join(PartDB, SetupDB.part_id == PartDB.id)\
+                .filter(SetupDB.machine_id == machine.id)\
+                .filter(SetupDB.status.in_(active_setup_statuses))\
+                .filter(SetupDB.end_time == None)\
+                .order_by(SetupDB.created_at.desc())\
+                .first()
+            
+            # Формируем элемент ответа
+            machine_view = OperatorMachineViewItem(
+                id=machine.id,
+                name=machine.name,
+                last_reading=last_reading_data.reading if last_reading_data else None,
+                last_reading_time=last_reading_data.created_at if last_reading_data else None,
+                setup_id=active_setup.id if active_setup else None,
+                drawing_number=active_setup.drawing_number if active_setup else None,
+                planned_quantity=active_setup.planned_quantity if active_setup else None,
+                additional_quantity=active_setup.additional_quantity if active_setup else None,
+                status=active_setup.status if active_setup else 'idle' # <-- Добавляем статус или 'idle'
+            )
+            result_list.append(machine_view)
+
+        logger.info(f"Successfully prepared operator machine view for operator_id: {operator_id}")
+        return result_list
+
+    except Exception as e:
+        logger.error(f"Error fetching operator machine view for operator_id {operator_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error fetching operator machine view")

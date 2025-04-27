@@ -11,7 +11,7 @@ class MachineDB(Base):
     name = Column(String(255))
     type = Column(String(50))
     created_at = Column(DateTime, default=datetime.now)
-    # is_active = Column(Boolean, default=True)
+    is_active = Column(Boolean, default=True)
 
 class EmployeeDB(Base):
     __tablename__ = "employees"
