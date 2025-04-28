@@ -179,19 +179,32 @@ async def get_readings(db: Session = Depends(get_db_session)):
     """
     Получить последние показания
     """
-    readings = db.query(ReadingDB).order_by(ReadingDB.created_at.desc()).limit(100).all()
-    
-    return {
-        "readings": [
-            {
-                "id": r.id,
-                "machine_id": r.machine_id,
-                "employee_id": r.employee_id,
-                "reading": r.reading,
-                "created_at": r.created_at
-            } for r in readings
-        ]
-    }
+    logger.info("--- Запрос GET /readings получен ---") # Лог начала
+    try:
+        logger.info("Выполняется запрос к ReadingDB...")
+        readings = db.query(ReadingDB).order_by(ReadingDB.created_at.desc()).limit(100).all()
+        logger.info(f"Запрос к ReadingDB выполнен, получено {len(readings)} записей.")
+        
+        # Формируем ответ
+        response_data = {
+            "readings": [
+                {
+                    "id": r.id,
+                    "machine_id": r.machine_id,
+                    "employee_id": r.employee_id,
+                    "reading": r.reading,
+                    # Преобразуем дату в строку ISO, чтобы избежать проблем сериализации
+                    "created_at": r.created_at.isoformat() if r.created_at else None 
+                } for r in readings
+            ]
+        }
+        logger.info("--- Ответ для GET /readings сформирован успешно --- ")
+        return response_data # Возвращаем словарь, FastAPI сам сделает JSON
+        
+    except Exception as e:
+        logger.error(f"!!! Ошибка в GET /readings: {e}", exc_info=True) # Логируем ошибку
+        # Поднимаем HTTPException, чтобы FastAPI вернул корректный JSON ошибки 500
+        raise HTTPException(status_code=500, detail="Internal server error processing readings")
 
 @app.get("/readings/{machine_id}")
 async def get_machine_readings(machine_id: int, db: Session = Depends(get_db_session)):
