@@ -503,31 +503,28 @@ async def approve_setup(
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Internal server error while approving setup {setup_id}")
 
-# Обновляем модель ответа
+# Модель ответа остается прежней
 class OperatorMachineViewItem(BaseModel):
-    id: int # Machine ID
-    name: Optional[str] = None # Machine name
-    reading: Optional[str] = '' # Поле для ввода на фронте
+    id: int 
+    name: Optional[str] = None
+    reading: Optional[str] = '' 
     lastReading: Optional[int] = Field(None, alias='last_reading')
     lastReadingTime: Optional[datetime] = Field(None, alias='last_reading_time')
     setupId: Optional[int] = Field(None, alias='setup_id')
     drawingNumber: Optional[str] = Field(None, alias='drawing_number')
     plannedQuantity: Optional[int] = Field(None, alias='planned_quantity')
     additionalQuantity: Optional[int] = Field(None, alias='additional_quantity')
-    status: Optional[str] = None # <-- Добавляем статус
+    status: Optional[str] = None
+    class Config: from_attributes = True; allow_population_by_field_name = True
 
-    class Config:
-        from_attributes = True
-        allow_population_by_field_name = True
-
-@app.get("/machines/operator-view/{operator_id}", response_model=List[OperatorMachineViewItem])
-async def get_operator_machines_view(operator_id: int, db: Session = Depends(get_db_session)):
+# Изменяем путь и убираем operator_id из аргументов
+@app.get("/machines/operator-view", response_model=List[OperatorMachineViewItem])
+async def get_operator_machines_view(db: Session = Depends(get_db_session)):
     """
-    Получает список станков, доступных оператору, с информацией
+    Получает список ВСЕХ активных станков с информацией
     о последней активной наладке и последнем показании.
-    Предполагается, что оператор имеет доступ ко всем активным станкам.
     """
-    logger.info(f"Fetching operator machine view for operator_id: {operator_id}")
+    logger.info(f"Fetching operator machine view for ALL operators") # Обновляем лог
     try:
         # 1. Получаем все активные станки
         machines = db.query(MachineDB).filter(MachineDB.is_active == True).order_by(MachineDB.name).all()
@@ -570,13 +567,13 @@ async def get_operator_machines_view(operator_id: int, db: Session = Depends(get
                 drawing_number=active_setup.drawing_number if active_setup else None,
                 planned_quantity=active_setup.planned_quantity if active_setup else None,
                 additional_quantity=active_setup.additional_quantity if active_setup else None,
-                status=active_setup.status if active_setup else 'idle' # <-- Добавляем статус или 'idle'
+                status=active_setup.status if active_setup else 'idle'
             )
             result_list.append(machine_view)
 
-        logger.info(f"Successfully prepared operator machine view for operator_id: {operator_id}")
+        logger.info(f"Successfully prepared operator machine view")
         return result_list
 
     except Exception as e:
-        logger.error(f"Error fetching operator machine view for operator_id {operator_id}: {e}", exc_info=True)
+        logger.error(f"Error fetching operator machine view: {e}", exc_info=True) # Обновляем лог
         raise HTTPException(status_code=500, detail="Internal server error fetching operator machine view")
