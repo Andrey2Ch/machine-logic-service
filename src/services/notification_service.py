@@ -7,9 +7,9 @@ from src.models.models import SetupDB, EmployeeDB, MachineDB, LotDB, PartDB
 logger = logging.getLogger(__name__)
 
 # Предполагаемые ID ролей (!!! УТОЧНИТЬ РЕАЛЬНЫЕ ЗНАЧЕНИЯ !!!)
-ADMIN_ROLE_ID = 4 # Пример
-OPERATOR_ROLE_ID = 1 # Пример
-MACHINIST_ROLE_ID = 2 # Пример (на всякий случай)
+ADMIN_ROLE_ID = 3 # Was 4
+OPERATOR_ROLE_ID = 1 # Correct
+MACHINIST_ROLE_ID = 2 # Correct
 
 async def send_setup_approval_notifications(db: Session, setup_id: int):
     """Отправляет уведомления об одобрении наладки разным ролям, используя SQLAlchemy."""
