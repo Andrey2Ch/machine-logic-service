@@ -383,14 +383,14 @@ class ApproveSetupPayload(BaseModel):
 # Модель для ответа после утверждения (можно вернуть обновленную наладку)
 class ApprovedSetupResponse(BaseModel): # Используем Pydantic, т.к. он уже есть
     id: int
-    machine_name: Optional[str] = Field(None, alias='machineName')
-    drawing_number: Optional[str] = Field(None, alias='drawingNumber')
-    lot_number: Optional[str] = Field(None, alias='lotNumber')
-    machinist_name: Optional[str] = Field(None, alias='machinistName')
-    start_time: Optional[datetime] = Field(None, alias='startTime')
+    machineName: Optional[str] = Field(None, alias='machineName')
+    drawingNumber: Optional[str] = Field(None, alias='drawingNumber')
+    lotNumber: Optional[str] = Field(None, alias='lotNumber')
+    machinistName: Optional[str] = Field(None, alias='machinistName')
+    startTime: Optional[datetime] = Field(None, alias='startTime')
     status: Optional[str]
-    qa_name: Optional[str] = Field(None, alias='qaName')
-    qa_date: Optional[datetime] = Field(None, alias='qaDate')
+    qaName: Optional[str] = Field(None, alias='qaName')
+    qaDate: Optional[datetime] = Field(None, alias='qaDate')
 
     class Config:
         # orm_mode = True # Это для SQLAlchemy < 2.0
@@ -577,3 +577,109 @@ async def get_operator_machines_view(db: Session = Depends(get_db_session)):
     except Exception as e:
         logger.error(f"Error fetching operator machine view: {e}", exc_info=True) # Обновляем лог
         raise HTTPException(status_code=500, detail="Internal server error fetching operator machine view")
+
+@app.post("/setups/{setup_id}/complete")
+async def complete_setup(setup_id: int, db: Session = Depends(get_db_session)):
+    """
+    Завершить наладку (изменить статус на 'completed').
+    """
+    logger.info(f"=== Starting setup completion for setup_id: {setup_id} ===")
+    try:
+        # Найти наладку по ID
+        setup = db.query(SetupDB).filter(SetupDB.id == setup_id).first()
+        logger.info(f"Found setup: {setup}")
+
+        if not setup:
+            logger.error(f"Setup {setup_id} not found")
+            raise HTTPException(status_code=404, detail=f"Наладка с ID {setup_id} не найдена")
+
+        logger.info(f"Current setup status: {setup.status}")
+        if setup.status not in ['started', 'allowed']:
+            logger.error(f"Invalid setup status for completion: {setup.status}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Нельзя завершить наладку в статусе '{setup.status}'. Ожидался статус 'started' или 'allowed'"
+            )
+
+        # Получаем информацию о станке и детали
+        machine = db.query(MachineDB).filter(MachineDB.id == setup.machine_id).first()
+        part = db.query(PartDB).filter(PartDB.id == setup.part_id).first()
+        lot = db.query(LotDB).filter(LotDB.id == setup.lot_id).first()
+        operator = db.query(EmployeeDB).filter(EmployeeDB.id == setup.employee_id).first()
+
+        logger.info(f"Related data - Machine: {machine.name if machine else 'Not found'}, "
+                   f"Part: {part.drawing_number if part else 'Not found'}, "
+                   f"Lot: {lot.lot_number if lot else 'Not found'}, "
+                   f"Operator: {operator.full_name if operator else 'Not found'}")
+
+        # Обновить статус и время завершения
+        setup.status = 'completed'
+        setup.end_time = datetime.now()
+        logger.info(f"Updated setup status to 'completed' and set end_time to {setup.end_time}")
+
+        # Проверяем, есть ли наладка в очереди
+        queued_setup = db.query(SetupDB).filter(
+            SetupDB.machine_id == setup.machine_id,
+            SetupDB.status == 'queued',
+            SetupDB.end_time == None
+        ).order_by(SetupDB.created_at.asc()).first()
+
+        if queued_setup:
+            logger.info(f"Found queued setup {queued_setup.id}, activating it")
+            # Активируем следующую наладку
+            queued_setup.status = 'created'
+
+        try:
+            db.commit()
+            logger.info("Successfully committed changes to database")
+            db.refresh(setup)
+        except Exception as db_error:
+            logger.error(f"Database error during commit: {db_error}")
+            db.rollback()
+            raise HTTPException(status_code=500, detail="Database error while completing setup")
+
+        # Отправляем уведомление администраторам
+        try:
+            admin_notification = {
+                "type": "setup_completed",
+                "data": {
+                    "machine_name": machine.name if machine else "Unknown",
+                    "drawing_number": part.drawing_number if part else "Unknown",
+                    "lot_number": lot.lot_number if lot else "Unknown",
+                    "operator_name": operator.full_name if operator else "Unknown",
+                    "completion_time": setup.end_time.isoformat() if setup.end_time else None,
+                    "planned_quantity": setup.planned_quantity,
+                    "additional_quantity": setup.additional_quantity
+                }
+            }
+            logger.info(f"Prepared admin notification: {admin_notification}")
+
+            # Отправляем уведомление через notification_service
+            asyncio.create_task(send_setup_approval_notifications(
+                db=db, 
+                setup_id=setup.id, 
+                notification_type="completion"
+            ))
+            logger.info("Notification task created")
+        except Exception as notification_error:
+            logger.error(f"Error preparing notification: {notification_error}")
+            # Не прерываем выполнение, если уведомление не удалось отправить
+
+        logger.info("=== Setup completion successful ===")
+        return {
+            "success": True,
+            "message": "Наладка успешно завершена",
+            "setup": {
+                "id": setup.id,
+                "status": setup.status,
+                "end_time": setup.end_time
+            }
+        }
+
+    except HTTPException as http_exc:
+        logger.error(f"HTTP Exception in complete_setup: {http_exc}")
+        raise http_exc
+    except Exception as e:
+        logger.error(f"Unexpected error in complete_setup: {e}", exc_info=True)
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Internal server error while completing setup {setup_id}: {str(e)}")
