@@ -1,5 +1,12 @@
 import logging
-from fastapi import FastAPI, HTTPException
+from dotenv import load_dotenv
+import os
+
+# Загружаем переменные окружения из .env файла
+# Это должно быть В САМОМ НАЧАЛЕ, до других импортов, использующих env vars
+load_dotenv()
+
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from src.models.setup import SetupStatus
 from typing import Optional, Dict, List
@@ -7,13 +14,13 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session, aliased
 from fastapi import Depends, Body
 from src.database import Base, initialize_database, get_db_session
-from src.models.models import SetupDB, ReadingDB, MachineDB, EmployeeDB, PartDB, LotDB
+from src.models.models import SetupDB, ReadingDB, MachineDB, EmployeeDB, PartDB, LotDB, BatchDB
 from datetime import datetime
 from src.utils.sheets_handler import save_to_sheets
 import asyncio
 import httpx
-import os
-from src.services.notification_service import send_setup_approval_notifications
+from src.services.notification_service import send_setup_approval_notifications, send_batch_discrepancy_alert
+from sqlalchemy import func, desc, case
 
 logger = logging.getLogger(__name__)
 
@@ -93,70 +100,164 @@ class ReadingInput(BaseModel):
     value: int
 
 @app.post("/readings")
-async def save_reading(reading: ReadingInput, db: Session = Depends(get_db_session)):
+async def save_reading(reading_input: ReadingInput, db: Session = Depends(get_db_session)):
     """
-    Сохранить показания счетчика
+    Сохранить показания счетчика, обновить статус наладки и создать/обновить батч.
     """
-    # Добавляем логирование
-    print(f"Получен запрос на сохранение: {reading}")
+    logger.info(f"Received reading save request: {reading_input}")
+    # Используем reading_input вместо reading для ясности
     
-    # Получаем последнюю наладку для станка
-    setup = db.query(SetupDB).filter(
-        SetupDB.machine_id == reading.machine_id
-    ).order_by(SetupDB.created_at.desc()).first()
-    
-    print(f"Найдена наладка: {setup}")
-    
-    if not setup:
-        raise HTTPException(status_code=404, detail="Наладка не найдена")
-    
-    # Проверяем статус и значение показаний
-    if reading.value == 0:
-        # Для нулевых показаний разрешаем только в статусах created или allowed
-        if setup.status not in ["created", "allowed"]:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Нельзя вводить нулевые показания в статусе {setup.status}"
-            )
-        setup.status = "started"
-        setup.start_time = datetime.now()
-    else:
-        # Для ненулевых показаний разрешаем только в статусе started
-        if setup.status != "started":
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Нельзя вводить показания в статусе {setup.status}"
-            )
-    
-    # Получаем информацию о станке и операторе
-    machine = db.query(MachineDB).filter(MachineDB.id == reading.machine_id).first()
-    operator = db.query(EmployeeDB).filter(EmployeeDB.id == reading.operator_id).first()
-    
-    if not machine or not operator:
-        raise HTTPException(status_code=404, detail="Станок или оператор не найдены")
-    
-    # Создаем запись о показаниях
-    reading_db = ReadingDB(
-        machine_id=reading.machine_id,
-        employee_id=reading.operator_id,
-        reading=reading.value
-    )
-    db.add(reading_db)
-    db.commit()
-    
-    # Сохраняем в Google Sheets асинхронно
-    asyncio.create_task(save_to_sheets(
-        operator=operator.full_name or "Unknown",
-        machine=machine.name or "Unknown",
-        reading=reading.value
-    ))
-    
-    return {
-        "success": True,
-        "message": "Показания сохранены",
-        "reading": reading,
-        "new_status": setup.status
-    }
+    # Начинаем транзакцию
+    trans = db.begin_nested() if db.in_transaction() else db.begin()
+    try:
+        # 1. Получаем последнюю активную наладку для станка
+        setup = db.query(SetupDB)\
+            .filter(SetupDB.machine_id == reading_input.machine_id)\
+            .filter(SetupDB.status.in_(['created', 'pending_qc', 'allowed', 'started']))\
+            .filter(SetupDB.end_time.is_(None))\
+            .order_by(SetupDB.created_at.desc())\
+            .first()
+
+        logger.info(f"Found active setup: {setup.id if setup else None}, status: {setup.status if setup else None}")
+
+        if not setup:
+            raise HTTPException(status_code=404, detail="Активная наладка не найдена для этого станка")
+
+        # 2. Сохраняем сами показания
+        reading_db = ReadingDB(
+            employee_id=reading_input.operator_id,
+            machine_id=reading_input.machine_id,
+            reading=reading_input.value,
+            created_at=datetime.now() # Фиксируем время явно
+        )
+        db.add(reading_db)
+        db.flush() # Чтобы получить ID и время, если нужно
+        logger.info(f"Reading record created: ID {reading_db.id}")
+
+        # --- Логика обновления статуса наладки и работы с батчами ---
+        new_setup_status = setup.status
+        batch_message = ""
+
+        # 3. Обновляем статус наладки, если нужно
+        if reading_input.value == 0:
+            if setup.status in ['created', 'allowed']:
+                logger.info(f"Updating setup {setup.id} status from {setup.status} to started (reading is 0)")
+                setup.status = 'started'
+                setup.start_time = reading_db.created_at # Используем время показаний
+                new_setup_status = 'started'
+                batch_message = "Наладка активирована"
+            elif setup.status != 'started':
+                 raise HTTPException(
+                     status_code=400, 
+                     detail=f"Нельзя вводить нулевые показания в статусе {setup.status}"
+                 )
+            # Для статуса 'started' нулевые показания просто сохраняются, батч не создается
+        
+        elif reading_input.value > 0:
+            # Для ненулевых показаний
+            if setup.status in ['created', 'allowed']:
+                # Случай пропуска нуля
+                logger.info(f"Updating setup {setup.id} status from {setup.status} to started (reading > 0, zero skipped)")
+                setup.status = 'started'
+                setup.start_time = reading_db.created_at
+                new_setup_status = 'started'
+                batch_message = ("⚠️ Внимание! В начале работы необходимо вводить нулевые показания. "
+                                 "Наладка автоматически активирована.")
+                
+                # Ищем существующий батч production (на всякий случай, хотя его не должно быть)
+                existing_batch = db.query(BatchDB)\
+                    .filter(BatchDB.setup_job_id == setup.id)\
+                    .filter(BatchDB.current_location == 'production')\
+                    .first()
+                
+                if not existing_batch:
+                    logger.info(f"Creating initial production batch for setup {setup.id} (zero skipped)")
+                    new_batch = BatchDB(
+                        setup_job_id=setup.id,
+                        lot_id=setup.lot_id,
+                        initial_quantity=0, 
+                        current_quantity=reading_input.value, # Текущее кол-во = показаниям
+                        current_location='production',
+                        batch_time=reading_db.created_at,
+                        operator_id=reading_input.operator_id,
+                        created_at=reading_db.created_at # Используем время показаний
+                    )
+                    db.add(new_batch)
+                else:
+                     logger.warning(f"Found existing production batch {existing_batch.id} when zero was skipped. Updating quantity.")
+                     existing_batch.current_quantity = reading_input.value
+                     existing_batch.operator_id = reading_input.operator_id
+                     existing_batch.batch_time = reading_db.created_at
+
+            elif setup.status == 'started':
+                # Наладка уже была начата, ищем предыдущее показание
+                prev_reading_obj = db.query(ReadingDB.reading)\
+                    .filter(ReadingDB.machine_id == reading_input.machine_id)\
+                    .filter(ReadingDB.created_at < reading_db.created_at)\
+                    .order_by(ReadingDB.created_at.desc())\
+                    .first()
+                
+                prev_reading = prev_reading_obj[0] if prev_reading_obj else 0 # Считаем 0, если нет предыдущего
+                quantity_in_batch = reading_input.value - prev_reading
+                logger.info(f"Prev reading: {prev_reading}, Current: {reading_input.value}, Diff: {quantity_in_batch}")
+
+                if quantity_in_batch > 0:
+                    # --- ИСПРАВЛЕНИЕ: Всегда создаем НОВЫЙ батч --- 
+                    logger.info(f"Creating NEW production batch for setup {setup.id} (started state)")
+                    new_batch = BatchDB(
+                        setup_job_id=setup.id,
+                        lot_id=setup.lot_id,
+                        initial_quantity=prev_reading, # Начальное кол-во = предыдущие показания
+                        current_quantity=quantity_in_batch, # Текущее кол-во = разница
+                        current_location='production',
+                        batch_time=reading_db.created_at,
+                        operator_id=reading_input.operator_id,
+                        created_at=reading_db.created_at # Используем время показаний
+                    )
+                    db.add(new_batch)
+                    # --- Конец исправления ---
+                else:
+                     logger.warning(f"Quantity difference is not positive ({quantity_in_batch}), not creating batch.")
+            else: # Статус не 'created', 'allowed', 'started'
+                 raise HTTPException(
+                     status_code=400, 
+                     detail=f"Нельзя вводить показания в статусе {setup.status}"
+                 )
+        else: # reading_input.value < 0
+             raise HTTPException(status_code=400, detail="Показания не могут быть отрицательными")
+
+        # 4. Фиксируем транзакцию
+        trans.commit()
+        logger.info("Transaction committed successfully")
+
+        # 5. Сохраняем в Google Sheets (вне транзакции)
+        try:
+            operator = db.query(EmployeeDB.full_name).filter(EmployeeDB.id == reading_input.operator_id).scalar() or "Unknown"
+            machine = db.query(MachineDB.name).filter(MachineDB.id == reading_input.machine_id).scalar() or "Unknown"
+            asyncio.create_task(save_to_sheets(
+                operator=operator,
+                machine=machine,
+                reading=reading_input.value
+            ))
+        except Exception as sheet_error:
+             logger.error(f"Error saving to Google Sheets: {sheet_error}", exc_info=True)
+             # Не прерываем выполнение из-за ошибки Sheets
+
+        return {
+            "success": True,
+            "message": batch_message if batch_message else "Показания успешно сохранены",
+            "reading": reading_input.model_dump(), # Используем model_dump для Pydantic v2
+            "new_status": new_setup_status
+        }
+
+    except HTTPException as http_exc:
+        trans.rollback()
+        logger.error(f"HTTPException in save_reading: {http_exc.detail}")
+        raise http_exc
+    except Exception as e:
+        trans.rollback()
+        logger.error(f"Error in save_reading: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error while saving reading")
 
 @app.get("/machines")
 async def get_machines(db: Session = Depends(get_db_session)):
@@ -683,3 +784,554 @@ async def complete_setup(setup_id: int, db: Session = Depends(get_db_session)):
         logger.error(f"Unexpected error in complete_setup: {e}", exc_info=True)
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Internal server error while completing setup {setup_id}: {str(e)}")
+
+# --- BATCH MANAGEMENT ENDPOINTS ---
+
+class BatchViewItem(BaseModel):
+    id: int
+    lot_id: int
+    drawing_number: Optional[str]
+    lot_number: Optional[str]
+    current_quantity: int 
+    current_location: str
+    batch_time: Optional[datetime]
+    warehouse_received_at: Optional[datetime]
+    operator_name: Optional[str]
+
+    class Config:
+        orm_mode = True
+        allow_population_by_field_name = True
+
+class StartInspectionPayload(BaseModel):
+    inspector_id: int
+
+class InspectBatchPayload(BaseModel):
+    inspector_id: int
+    good_quantity: int
+    rejected_quantity: int
+    rework_quantity: int
+    qc_comment: Optional[str] = None
+
+class BatchMergePayload(BaseModel):
+    batch_ids: List[int]
+    target_location: str
+
+@app.get("/lots/{lot_id}/batches", response_model=List[BatchViewItem])
+async def get_batches_for_lot(lot_id: int, db: Session = Depends(get_db_session)):
+    """Вернуть ВСЕ НЕАРХИВНЫЕ батчи для указанного лота (ВРЕМЕННО)."""
+    try:
+        # Убираем фильтр по otk_visible_locations, оставляем только != 'archived'
+        batches = db.query(BatchDB, PartDB, LotDB, EmployeeDB).select_from(BatchDB) \
+            .join(LotDB, BatchDB.lot_id == LotDB.id) \
+            .join(PartDB, LotDB.part_id == PartDB.id) \
+            .outerjoin(EmployeeDB, BatchDB.operator_id == EmployeeDB.id) \
+            .filter(BatchDB.lot_id == lot_id) \
+            .filter(BatchDB.current_location != 'archived') \
+            .all()
+
+        result = []
+        for row in batches:
+            batch_obj, part_obj, lot_obj, emp_obj = row
+            result.append({
+                'id': batch_obj.id,
+                'lot_id': lot_id,
+                'drawing_number': part_obj.drawing_number if part_obj else None,
+                'lot_number': lot_obj.lot_number if lot_obj else None,
+                'current_quantity': batch_obj.current_quantity,
+                'current_location': batch_obj.current_location,
+                'batch_time': batch_obj.batch_time,
+                'warehouse_received_at': batch_obj.warehouse_received_at, 
+                'operator_name': emp_obj.full_name if emp_obj else None, 
+            })
+        return result
+    except Exception as e:
+        logger.error(f"Error fetching batches for lot {lot_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error while fetching batches")
+
+@app.post("/batches/{batch_id}/start-inspection")
+async def start_batch_inspection(batch_id: int, payload: StartInspectionPayload, db: Session = Depends(get_db_session)):
+    """Пометить батч как начатый к инспекции."""
+    try:
+        batch = db.query(BatchDB).filter(BatchDB.id == batch_id).first()
+        if not batch:
+            raise HTTPException(status_code=404, detail="Batch not found")
+        if batch.current_location != 'warehouse_counted':
+            raise HTTPException(status_code=400, detail="Batch cannot be inspected in its current state")
+        batch.current_location = 'inspection'
+        db.commit()
+        db.refresh(batch)
+        return {'success': True, 'batch': batch}
+    except HTTPException as http_exc:
+        raise http_exc
+    except Exception as e:
+        logger.error(f"Error starting inspection for batch {batch_id}: {e}", exc_info=True)
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Internal server error while starting inspection")
+
+@app.post("/batches/{batch_id}/inspect")
+async def inspect_batch(batch_id: int, payload: InspectBatchPayload, db: Session = Depends(get_db_session)):
+    """Разделить батч на good / defect / rework."""
+    try:
+        batch = db.query(BatchDB).filter(BatchDB.id == batch_id).first()
+        if not batch:
+            raise HTTPException(status_code=404, detail="Batch not found")
+        if batch.current_location not in ['inspection', 'warehouse_counted']:
+            raise HTTPException(status_code=400, detail="Batch is not in inspection state")
+
+        total_requested = payload.good_quantity + payload.rejected_quantity + payload.rework_quantity
+        if total_requested > batch.current_quantity:
+            raise HTTPException(status_code=400, detail="Sum of quantities exceeds batch size")
+
+        # Архивируем исходный батч
+        batch.current_location = 'archived'
+
+        created_batches = []
+        def _create_child(qty: int, location: str):
+            if qty <= 0:
+                return None
+            child = BatchDB(
+                setup_job_id=batch.setup_job_id,
+                lot_id=batch.lot_id,
+                initial_quantity=qty,
+                current_quantity=qty,
+                recounted_quantity=None,
+                current_location=location,
+                operator_id=payload.inspector_id,
+                parent_batch_id=batch.id,
+                batch_time=datetime.now(),
+            )
+            db.add(child)
+            db.flush()
+            created_batches.append(child)
+            return child
+
+        _create_child(payload.good_quantity, 'good')
+        _create_child(payload.rejected_quantity, 'defect')
+        _create_child(payload.rework_quantity, 'rework_repair')
+
+        db.commit()
+
+        return {
+            'success': True,
+            'created_batch_ids': [b.id for b in created_batches]
+        }
+    except HTTPException as http_exc:
+        raise http_exc
+    except Exception as e:
+        logger.error(f"Error inspecting batch {batch_id}: {e}", exc_info=True)
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Internal server error while inspecting batch")
+
+@app.post("/batches/merge")
+async def merge_batches(payload: BatchMergePayload, db: Session = Depends(get_db_session)):
+    """Слить несколько батчей в один."""
+    try:
+        if len(payload.batch_ids) < 2:
+            raise HTTPException(status_code=400, detail="Need at least two batches to merge")
+        batches = db.query(BatchDB).filter(BatchDB.id.in_(payload.batch_ids)).all()
+        if len(batches) != len(payload.batch_ids):
+            raise HTTPException(status_code=404, detail="Some batches not found")
+        lot_ids = set(b.lot_id for b in batches)
+        if len(lot_ids) != 1:
+            raise HTTPException(status_code=400, detail="Batches belong to different lots")
+
+        total_qty = sum(b.current_quantity for b in batches)
+        new_batch = BatchDB(
+            setup_job_id=batches[0].setup_job_id,
+            lot_id=batches[0].lot_id,
+            initial_quantity=total_qty,
+            current_quantity=total_qty,
+            current_location=payload.target_location,
+            operator_id=None,
+            parent_batch_id=None,
+            batch_time=datetime.now()
+        )
+        db.add(new_batch)
+        db.flush()
+
+        for b in batches:
+            b.current_location = 'archived'
+        db.commit()
+        return {'success': True, 'new_batch_id': new_batch.id}
+    except HTTPException as http_exc:
+        raise http_exc
+    except Exception as e:
+        logger.error(f"Error merging batches: {e}", exc_info=True)
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Internal server error while merging batches")
+
+# --- NEW BATCH MOVE ENDPOINT ---
+class BatchMovePayload(BaseModel):
+    target_location: str
+    # Можно добавить employee_id, если нужно отслеживать, кто переместил
+    # employee_id: Optional[int] = None
+
+@app.post("/batches/{batch_id}/move", response_model=BatchViewItem) # Используем BatchViewItem для ответа
+async def move_batch(
+    batch_id: int, 
+    payload: BatchMovePayload, 
+    db: Session = Depends(get_db_session)
+):
+    """Переместить батч в новую локацию."""
+    try:
+        batch = db.query(BatchDB).filter(BatchDB.id == batch_id).first()
+        if not batch:
+            raise HTTPException(status_code=404, detail="Batch not found")
+        
+        if batch.current_location == 'archived':
+            raise HTTPException(status_code=400, detail="Cannot move an archived batch")
+
+        target_location = payload.target_location.strip()
+        if not target_location:
+            raise HTTPException(status_code=400, detail="Target location cannot be empty")
+        
+        # TODO: В идеале, здесь нужна валидация target_location по списку допустимых BatchLocation,
+        #       аналогично тому, как это сделано на фронтенде с locationMap.
+        #       Пока что принимаем любую непустую строку.
+
+        logger.info(f"Moving batch {batch_id} from {batch.current_location} to {target_location}")
+
+        batch.current_location = target_location
+        batch.updated_at = datetime.now() # Явно обновляем время изменения
+        
+        # Если нужно отслеживать, кто переместил:
+        # if payload.employee_id:
+        #     # Здесь можно обновить поле вроде batch.last_moved_by_id = payload.employee_id
+        #     pass
+
+        db.commit()
+        db.refresh(batch)
+
+        # Получаем связанные данные для ответа BatchViewItem
+        lot = db.query(LotDB).filter(LotDB.id == batch.lot_id).first()
+        part = db.query(PartDB).filter(PartDB.id == lot.part_id).first() if lot else None
+        operator = db.query(EmployeeDB).filter(EmployeeDB.id == batch.operator_id).first() if batch.operator_id else None
+
+        return BatchViewItem(
+            id=batch.id,
+            lot_id=batch.lot_id,
+            drawing_number=part.drawing_number if part else None,
+            lot_number=lot.lot_number if lot else None,
+            current_quantity=batch.current_quantity,
+            current_location=batch.current_location,
+            batch_time=batch.batch_time,
+            warehouse_received_at=batch.warehouse_received_at,
+            operator_name=operator.full_name if operator else None
+        )
+
+    except HTTPException as http_exc:
+        db.rollback() # Откатываем только если это наша HTTPException, иначе внешний try-except обработает
+        raise http_exc
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error moving batch {batch_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error while moving batch")
+
+# --- END NEW BATCH MOVE ENDPOINT ---
+
+# --- WAREHOUSE ACCEPTANCE ENDPOINTS ---
+
+class WarehousePendingBatchItem(BaseModel):
+    id: int
+    lot_id: int
+    drawing_number: Optional[str]
+    lot_number: Optional[str]
+    # Убираем alias, используем имя поля из БД
+    current_quantity: int 
+    batch_time: Optional[datetime]
+    operator_name: Optional[str]
+
+    class Config:
+        orm_mode = True
+        allow_population_by_field_name = True
+        # populate_by_name больше не нужен для этого поля
+
+class AcceptWarehousePayload(BaseModel):
+    recounted_quantity: int
+    warehouse_employee_id: int
+
+@app.get("/warehouse/batches-pending", response_model=List[WarehousePendingBatchItem])
+async def get_warehouse_pending_batches(db: Session = Depends(get_db_session)):
+    """Получить список батчей, ожидающих приемки на склад (статус 'production')."""
+    try:
+        batches = db.query(BatchDB, PartDB, LotDB, EmployeeDB).select_from(BatchDB) \
+            .join(LotDB, BatchDB.lot_id == LotDB.id) \
+            .join(PartDB, LotDB.part_id == PartDB.id) \
+            .outerjoin(EmployeeDB, BatchDB.operator_id == EmployeeDB.id) \
+            .filter(BatchDB.current_location == 'production') \
+            .order_by(BatchDB.batch_time.asc()) \
+            .all()
+
+        result = []
+        for row in batches:
+            batch_obj, part_obj, lot_obj, emp_obj = row
+            # Собираем данные как есть из БД
+            item_data = {
+                'id': batch_obj.id,
+                'lot_id': batch_obj.lot_id,
+                'drawing_number': part_obj.drawing_number if part_obj else None,
+                'lot_number': lot_obj.lot_number if lot_obj else None,
+                'current_quantity': batch_obj.current_quantity, # Теперь имя совпадает
+                'batch_time': batch_obj.batch_time,
+                'operator_name': emp_obj.full_name if emp_obj else None,
+            }
+            # Валидируем и добавляем
+            result.append(WarehousePendingBatchItem.model_validate(item_data))
+        return result
+    except Exception as e:
+        logger.error(f"Error fetching warehouse pending batches: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error while fetching pending batches")
+
+@app.post("/batches/{batch_id}/accept-warehouse")
+async def accept_batch_on_warehouse(batch_id: int, payload: AcceptWarehousePayload, db: Session = Depends(get_db_session)):
+    """Принять батч на склад: обновить кол-во и статус."""
+    try:
+        # Получаем батч и связанные сущности одним запросом для эффективности
+        batch_data = db.query(BatchDB, LotDB, PartDB)\
+            .join(LotDB, BatchDB.lot_id == LotDB.id)\
+            .join(PartDB, LotDB.part_id == PartDB.id)\
+            .filter(BatchDB.id == batch_id)\
+            .first()
+
+        if not batch_data:
+            raise HTTPException(status_code=404, detail="Batch not found or related Lot/Part missing")
+        
+        batch, lot, part = batch_data
+
+        if batch.current_location != 'production':
+            raise HTTPException(status_code=400, detail=f"Batch is not in production state (current: {batch.current_location})")
+        
+        warehouse_employee = db.query(EmployeeDB).filter(EmployeeDB.id == payload.warehouse_employee_id).first()
+        if not warehouse_employee:
+            raise HTTPException(status_code=404, detail="Warehouse employee not found")
+
+        if warehouse_employee.role_id not in [3, 6]: # Предполагаем ID 3=admin, 6=warehouse
+             logger.warning(f"Employee {payload.warehouse_employee_id} with role {warehouse_employee.role_id} tried to accept batch.")
+             raise HTTPException(status_code=403, detail="Insufficient permissions for warehouse acceptance")
+
+        # Получаем оператора производства ДО перезаписи operator_id
+        original_operator_id = batch.operator_id
+        original_operator = db.query(EmployeeDB).filter(EmployeeDB.id == original_operator_id).first() if original_operator_id else None
+
+        # Сохраняем кол-во от оператора и вводим кол-во кладовщика
+        operator_reported_qty = batch.current_quantity # Это кол-во ДО приемки
+        recounted_clerk_qty = payload.recounted_quantity
+        
+        # Записываем исторические данные
+        batch.operator_reported_quantity = operator_reported_qty
+        batch.recounted_quantity = recounted_clerk_qty
+        
+        # Рассчитываем и сохраняем расхождения
+        batch.discrepancy_absolute = None
+        batch.discrepancy_percentage = None 
+        batch.admin_acknowledged_discrepancy = False
+        notification_task = None
+
+        if operator_reported_qty is not None: # Если было какое-то кол-во от оператора
+            difference = recounted_clerk_qty - operator_reported_qty
+            batch.discrepancy_absolute = difference
+            
+            if operator_reported_qty != 0:
+                percentage_diff = abs(difference / operator_reported_qty) * 100
+                batch.discrepancy_percentage = round(percentage_diff, 2)
+
+                if percentage_diff > 3.0:
+                    logger.warning(
+                        f"Critical discrepancy for batch {batch.id}: "
+                        f"Operator Qty: {operator_reported_qty}, "
+                        f"Clerk Qty: {recounted_clerk_qty}, "
+                        f"Diff: {difference} ({percentage_diff:.2f}%)"
+                    )
+                    
+                    discrepancy_details = {
+                        "batch_id": batch.id,
+                        "drawing_number": part.drawing_number if part else 'N/A',
+                        "lot_number": lot.lot_number if lot else 'N/A',
+                        "operator_name": original_operator.full_name if original_operator else 'Неизвестный оператор',
+                        "warehouse_employee_name": warehouse_employee.full_name,
+                        "original_qty": operator_reported_qty,
+                        "recounted_qty": recounted_clerk_qty,
+                        "discrepancy_abs": difference,
+                        "discrepancy_perc": round(percentage_diff, 2)
+                    }
+                    notification_task = asyncio.create_task(
+                        send_batch_discrepancy_alert(db=db, discrepancy_details=discrepancy_details)
+                    )
+            # Если operator_reported_qty == 0, процент не считаем, но абсолютное расхождение сохраняем
+            # Можно добавить отдельное уведомление если operator=0, а clerk > 0?
+
+        # Обновляем основные поля батча
+        batch.current_quantity = recounted_clerk_qty # Актуальное кол-во теперь = пересчитанному кладовщиком
+        batch.current_location = 'warehouse_counted'
+        batch.warehouse_employee_id = payload.warehouse_employee_id
+        batch.warehouse_received_at = datetime.now()
+        batch.operator_id = payload.warehouse_employee_id # Обновляем оператора на кладовщика
+        batch.updated_at = datetime.now() 
+
+        db.commit()
+        db.refresh(batch)
+
+        # Если была создана задача уведомления, дожидаемся ее (опционально, но безопасно)
+        # Либо можно не ждать, если не критично, что запрос завершится до отправки уведомления
+        # if notification_task:
+        #     await notification_task 
+        
+        logger.info(f"Batch {batch_id} accepted on warehouse by employee {payload.warehouse_employee_id} with quantity {payload.recounted_quantity}")
+        
+        return {'success': True, 'message': 'Batch accepted successfully'}
+
+    except HTTPException as http_exc:
+        # Не откатываем здесь, так как db.commit() еще не было или ошибка до него
+        raise http_exc
+    except Exception as e:
+        logger.error(f"Error accepting batch {batch_id} on warehouse: {e}", exc_info=True)
+        db.rollback() # Откатываем, если ошибка произошла во время расчетов или до commit
+        raise HTTPException(status_code=500, detail="Internal server error while accepting batch")
+
+# --- END WAREHOUSE ACCEPTANCE ENDPOINTS ---
+
+# --- LOTS MANAGEMENT ENDPOINTS ---
+
+class LotInfoItem(BaseModel):
+    id: int
+    drawing_number: str
+    lot_number: str
+    inspector_name: Optional[str] = None
+    planned_quantity: Optional[int] = None
+
+    class Config:
+        orm_mode = True
+        # allow_population_by_field_name = True # Больше не нужен, если нет alias
+        # populate_by_name = True # Больше не нужен
+
+@app.get("/lots/pending-qc", response_model=List[LotInfoItem])
+async def get_lots_pending_qc(db: Session = Depends(get_db_session), current_user_qa_id: Optional[int] = Query(None, alias="qaId")):
+    """Получить ВСЕ лоты, имеющие НЕАРХИВНЫЕ батчи.
+       Для каждого лота также получаем плановое кол-во и имя инспектора из последней наладки.
+       Опционально фильтрует по qaId, если он предоставлен.
+    """
+    try:
+        # Базовый запрос на получение ID лотов с активными (неархивными) батчами
+        active_lot_ids_query = db.query(BatchDB.lot_id)\
+            .filter(BatchDB.current_location != 'archived') \
+            .distinct()
+        
+        lot_ids_with_active_batches_tuples = active_lot_ids_query.all()
+        lot_ids = [item[0] for item in lot_ids_with_active_batches_tuples]
+
+        if not lot_ids:
+            return []
+        
+        # Основной запрос для данных по лотам и деталям
+        lots_query = db.query(LotDB, PartDB).select_from(LotDB)\
+            .join(PartDB, LotDB.part_id == PartDB.id)\
+            .filter(LotDB.id.in_(lot_ids))
+            # .order_by(LotDB.created_at.desc()) # Сортировка здесь может быть избыточной, если результат небольшой или сортируется на фронте
+
+        lots_query_result = lots_query.all()
+        
+        result = []
+        for lot_obj, part_obj in lots_query_result:
+            inspector_name_val = None
+            planned_quantity_val = None
+            is_match_for_qa_filter = False # Флаг для фильтрации по qaId
+
+            # Находим последнюю наладку для данного лота
+            latest_setup_for_lot = db.query(SetupDB.planned_quantity, SetupDB.qa_id, EmployeeDB.full_name)\
+                .outerjoin(EmployeeDB, SetupDB.qa_id == EmployeeDB.id)\
+                .filter(SetupDB.lot_id == lot_obj.id)\
+                .order_by(desc(SetupDB.created_at))\
+                .first()
+
+            if latest_setup_for_lot:
+                planned_quantity_val = latest_setup_for_lot.planned_quantity
+                if latest_setup_for_lot.qa_id:
+                    inspector_name_val = latest_setup_for_lot.full_name # Имя инспектора из JOIN
+                    if current_user_qa_id is not None and latest_setup_for_lot.qa_id == current_user_qa_id:
+                        is_match_for_qa_filter = True
+            
+            # Если фильтр по qaId активен, и лот не соответствует, пропускаем его
+            if current_user_qa_id is not None and not is_match_for_qa_filter:
+                continue
+            
+            item_data = {
+                'id': lot_obj.id,
+                'drawing_number': part_obj.drawing_number,
+                'lot_number': lot_obj.lot_number,
+                'inspector_name': inspector_name_val,
+                'planned_quantity': planned_quantity_val
+            }
+            result.append(LotInfoItem.model_validate(item_data))
+            
+        return result
+    except Exception as e:
+        logger.error(f"Error fetching lots pending QC: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error fetching lots pending QC")
+
+# --- END LOTS MANAGEMENT ENDPOINTS ---
+
+# --- LOT ANALYTICS ENDPOINT ---
+
+class LotAnalyticsResponse(BaseModel):
+    accepted_by_warehouse_quantity: int = 0  # "Принято" (на складе)
+    from_machine_quantity: int = 0           # "Со станка" (сырые)
+
+@app.get("/lots/{lot_id}/analytics", response_model=LotAnalyticsResponse)
+async def get_lot_analytics(lot_id: int, db: Session = Depends(get_db_session)):
+    """
+    Получить сводную аналитику по указанному лоту.
+    "Принято" (accepted_by_warehouse_quantity) - сумма recounted_quantity по всем партиям лота, прошедшим приемку складом.
+    "Со станка" (from_machine_quantity) - сумма current_quantity для "сырых" батчей (до приемки складом).
+    """
+    logger.error(f"DEBUG_ANALYTICS: Fetching simplified analytics for lot_id: {lot_id}")
+    
+    lot = db.query(LotDB).filter(LotDB.id == lot_id).first()
+    if not lot:
+        logger.warning(f"Lot with id {lot_id} not found for analytics.")
+        return LotAnalyticsResponse()
+
+    # accepted_by_warehouse_quantity: Сумма recounted_quantity для партий, обработанных складом.
+    # Это количество, которое склад фактически посчитал.
+    accepted_warehouse_query = db.query(BatchDB.recounted_quantity)\
+        .filter(BatchDB.lot_id == lot_id)\
+        .filter(BatchDB.recounted_quantity != None) # Условие, что партия прошла пересчет складом
+    
+    # Собираем только не-None значения для корректной суммы
+    accepted_quantities_list = [q[0] for q in accepted_warehouse_query.all() if q[0] is not None]
+    logger.error(f"DEBUG_ANALYTICS: For lot_id {lot_id}, recounted_quantities summed for 'accepted_by_warehouse': {accepted_quantities_list}")
+    
+    accepted_by_warehouse_result = sum(accepted_quantities_list)
+
+    # from_machine_quantity: Последнее показание счетчика для машины, связанной с последней наладкой этого лота.
+    from_machine_result = 0 # Значение по умолчанию
+    
+    # 1. Найти последнюю наладку для лота
+    latest_setup_for_lot = db.query(SetupDB.machine_id)\
+        .filter(SetupDB.lot_id == lot_id)\
+        .order_by(SetupDB.created_at.desc())\
+        .first()
+    
+    if latest_setup_for_lot:
+        machine_id_for_lot = latest_setup_for_lot.machine_id
+        # 2. Найти последнее показание для этой машины
+        latest_reading_for_machine = db.query(ReadingDB.reading)\
+            .filter(ReadingDB.machine_id == machine_id_for_lot)\
+            .order_by(ReadingDB.created_at.desc())\
+            .first()
+        
+        if latest_reading_for_machine:
+            from_machine_result = latest_reading_for_machine.reading or 0 # Берем показание или 0, если None
+            logger.error(f"DEBUG_ANALYTICS: For lot_id {lot_id}, found latest reading for machine {machine_id_for_lot}: {from_machine_result}")
+        else:
+            logger.error(f"DEBUG_ANALYTICS: For lot_id {lot_id}, no readings found for machine {machine_id_for_lot} (from latest setup)")
+    else:
+        logger.error(f"DEBUG_ANALYTICS: For lot_id {lot_id}, no setup found to determine machine_id for 'from_machine_quantity'")
+
+    logger.error(f"DEBUG_ANALYTICS: For lot_id {lot_id}, accepted_by_warehouse={accepted_by_warehouse_result}, from_machine={from_machine_result}")
+
+    return LotAnalyticsResponse(
+        accepted_by_warehouse_quantity=accepted_by_warehouse_result,
+        from_machine_quantity=from_machine_result
+    )
+
+# --- END LOT ANALYTICS ENDPOINT ---

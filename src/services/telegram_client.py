@@ -9,6 +9,9 @@ logger = logging.getLogger(__name__)
 
 # Инициализируем бота aiogram
 bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
+# ---- ОТЛАДОЧНЫЙ PRINT ----
+print(f"DEBUG [telegram_client]: Read TELEGRAM_BOT_TOKEN as: '{bot_token}'") 
+# --------------------------
 if not bot_token:
     logger.warning("TELEGRAM_BOT_TOKEN is not set. Telegram notifications will be disabled.")
     bot = None

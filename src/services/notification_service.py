@@ -118,4 +118,51 @@ async def _notify_role_by_id_sqlalchemy(db: Session, role_id: int, message: str,
                  await send_telegram_message(emp.telegram_id, message)
 
     except Exception as e:
-        logger.error(f"Failed to notify role_id '{role_id}': {e}", exc_info=True) 
+        logger.error(f"Failed to notify role_id '{role_id}': {e}", exc_info=True)
+
+async def send_batch_discrepancy_alert(db: Session, discrepancy_details: dict):
+    """
+    Отправляет уведомление администраторам о критическом расхождении при приемке батча.
+    
+    Args:
+        db: Сессия базы данных.
+        discrepancy_details: Словарь с деталями расхождения:
+            {
+                "batch_id": int,
+                "drawing_number": str,
+                "lot_number": str,
+                "operator_name": str,      // Оператор производства
+                "warehouse_employee_name": str, // Кладовщик
+                "original_qty": int,
+                "recounted_qty": int,
+                "discrepancy_abs": int,
+                "discrepancy_perc": float
+            }
+    """
+    try:
+        logger.info(f"Sending discrepancy alert for Batch ID: {discrepancy_details.get('batch_id')}")
+
+        message = (
+            f"<b>🚨 Критическое расхождение при приемке батча!</b>\n\n"
+            f"<b>Батч ID:</b> {discrepancy_details.get('batch_id', 'N/A')}\n"
+            f"<b>Чертёж:</b> {discrepancy_details.get('drawing_number', 'N/A')}\n"
+            f"<b>Партия:</b> {discrepancy_details.get('lot_number', 'N/A')}\n"
+            f"------------------------------------\n"
+            f"<b>Оператор производства:</b> {discrepancy_details.get('operator_name', 'N/A')}\n"
+            f"<b>Кол-во от оператора:</b> {discrepancy_details.get('original_qty', 'N/A')}\n"
+            f"------------------------------------\n"
+            f"<b>Кладовщик:</b> {discrepancy_details.get('warehouse_employee_name', 'N/A')}\n"
+            f"<b>Кол-во (склад):</b> {discrepancy_details.get('recounted_qty', 'N/A')}\n"
+            f"------------------------------------\n"
+            f"<b>Расхождение:</b> {discrepancy_details.get('discrepancy_abs', 'N/A')} шт. "
+            f"({discrepancy_details.get('discrepancy_perc', 0.0):.2f}%)\n\n"
+            f"<i>Требуется проверка и подтверждение администратора.</i>"
+        )
+
+        await _notify_role_by_id_sqlalchemy(db, ADMIN_ROLE_ID, message)
+        logger.info(f"Successfully processed discrepancy alert for Batch ID: {discrepancy_details.get('batch_id')}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error sending discrepancy alert for Batch ID {discrepancy_details.get('batch_id')}: {e}", exc_info=True)
+        return False 

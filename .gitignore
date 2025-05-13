@@ -20,6 +20,7 @@ ENV/
 # Logs
 *.log
 civil-hull-441511-n5-c1b57e3e67d1.json
+
 # Node.js
 node_modules/
 npm-debug.log*
