@@ -1335,3 +1335,7 @@ async def get_lot_analytics(lot_id: int, db: Session = Depends(get_db_session)):
     )
 
 # --- END LOT ANALYTICS ENDPOINT ---
+
+@app.get("/api/morning-report")
+async def morning_report():
+    return {"message": "Morning report is working!"}
