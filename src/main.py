@@ -629,6 +629,7 @@ async def get_operator_machines_view(db: Session = Depends(get_db_session)):
     try:
         # 1. Получаем все активные станки
         machines = db.query(MachineDB).filter(MachineDB.is_active == True).order_by(MachineDB.name).all()
+        print("DEBUG: machines from DB:", machines)
         logger.debug(f"Found {len(machines)} active machines.")
 
         result_list = []
@@ -673,6 +674,7 @@ async def get_operator_machines_view(db: Session = Depends(get_db_session)):
             result_list.append(machine_view)
 
         logger.info(f"Successfully prepared operator machine view")
+        print("DEBUG: result to return:", result_list)
         return result_list
 
     except Exception as e:
