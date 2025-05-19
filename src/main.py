@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from src.models.setup import SetupStatus
 from typing import Optional, Dict, List
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session, aliased
+from sqlalchemy.orm import Session, aliased, selectinload
 from fastapi import Depends, Body
 from src.database import Base, initialize_database, get_db_session
 from src.models.models import SetupDB, ReadingDB, MachineDB, EmployeeDB, PartDB, LotDB, BatchDB
@@ -673,8 +673,8 @@ async def get_operator_machines_view(db: Session = Depends(get_db_session)):
             )
             result_list.append(machine_view)
 
-        print("DEBUG: result to return:", result_list)
         logger.info(f"Successfully prepared operator machine view")
+        print("DEBUG: result to return:", result_list)
         return result_list
 
     except Exception as e:
@@ -988,10 +988,10 @@ async def move_batch(
             raise HTTPException(status_code=400, detail="Target location cannot be empty")
         
         # TODO: В идеале, здесь нужна валидация target_location по списку допустимых BatchLocation,
-        #       аналогично тому, как это сделано на фронтенде с locationMap.
+        #       аналогично тому, как это сделано на фронте с locationMap.
         #       Пока что принимаем любую непустую строку.
 
-        logger.info(f"Moving batch {batch_id} from {batch.current_location} to {target_location}")
+        logger.info(f"Moving batch {batch.id} from {batch.current_location} to {target_location}")
 
         batch.current_location = target_location
         batch.updated_at = datetime.now() # Явно обновляем время изменения
@@ -1200,20 +1200,24 @@ class LotInfoItem(BaseModel):
     lot_number: str
     inspector_name: Optional[str] = None
     planned_quantity: Optional[int] = None
+    machine_name: Optional[str] = None
 
     class Config:
         orm_mode = True
-        # allow_population_by_field_name = True # Больше не нужен, если нет alias
-        # populate_by_name = True # Больше не нужен
+        # from_attributes = True # Pydantic v2, если используется
+        allow_population_by_field_name = True 
 
 @app.get("/lots/pending-qc", response_model=List[LotInfoItem])
 async def get_lots_pending_qc(db: Session = Depends(get_db_session), current_user_qa_id: Optional[int] = Query(None, alias="qaId")):
-    """Получить ВСЕ лоты, имеющие НЕАРХИВНЫЕ батчи.
-       Для каждого лота также получаем плановое кол-во и имя инспектора из последней наладки.
-       Опционально фильтрует по qaId, если он предоставлен.
     """
+    Получить лоты для ОТК на основе "старой" рабочей логики.
+    1. Находит лоты с неархивными батчами.
+    2. Для каждого такого лота извлекает детали из последней наладки, включая имя инспектора, плановое количество и имя станка.
+    3. Опционально фильтрует по qaId, если он предоставлен (на основе qa_id в последней наладке).
+    """
+    logger.info(f"Запрос /lots/pending-qc (старая логика) получен. qaId: {current_user_qa_id}")
     try:
-        # Базовый запрос на получение ID лотов с активными (неархивными) батчами
+        # 1. Базовый запрос на получение ID лотов с активными (неархивными) батчами
         active_lot_ids_query = db.query(BatchDB.lot_id)\
             .filter(BatchDB.current_location != 'archived') \
             .distinct()
@@ -1222,53 +1226,92 @@ async def get_lots_pending_qc(db: Session = Depends(get_db_session), current_use
         lot_ids = [item[0] for item in lot_ids_with_active_batches_tuples]
 
         if not lot_ids:
+            logger.info("Не найдено лотов с активными (неархивными) батчами.")
             return []
         
-        # Основной запрос для данных по лотам и деталям
+        logger.info(f"Найдены следующие ID лотов с активными батчами: {lot_ids}")
+        
+        # 2. Основной запрос для данных по лотам и деталям
         lots_query = db.query(LotDB, PartDB).select_from(LotDB)\
             .join(PartDB, LotDB.part_id == PartDB.id)\
             .filter(LotDB.id.in_(lot_ids))
-            # .order_by(LotDB.created_at.desc()) # Сортировка здесь может быть избыточной, если результат небольшой или сортируется на фронте
 
         lots_query_result = lots_query.all()
+        logger.info(f"Всего лотов (с деталями) для дальнейшей обработки: {len(lots_query_result)}")
         
         result = []
         for lot_obj, part_obj in lots_query_result:
-            inspector_name_val = None
+            logger.debug(f"Обработка лота ID: {lot_obj.id}, Номер: {lot_obj.lot_number}")
+            
             planned_quantity_val = None
-            is_match_for_qa_filter = False # Флаг для фильтрации по qaId
-
-            # Находим последнюю наладку для данного лота
-            latest_setup_for_lot = db.query(SetupDB.planned_quantity, SetupDB.qa_id, EmployeeDB.full_name)\
-                .outerjoin(EmployeeDB, SetupDB.qa_id == EmployeeDB.id)\
+            inspector_name_val = None
+            machine_name_val = None # Инициализируем machine_name
+            
+            # 3. Находим последнюю наладку для данного лота, включая имя станка
+            # Используем outerjoin для EmployeeDB и MachineDB для большей устойчивости
+            latest_setup_details = db.query(
+                    SetupDB.planned_quantity,
+                    SetupDB.qa_id,
+                    EmployeeDB.full_name.label("inspector_name_from_setup"),
+                    MachineDB.name.label("machine_name_from_setup"),
+                    SetupDB.machine_id.label("setup_machine_id") # <--- ДОБАВЛЕНО ДЛЯ ЛОГИРОВАНИЯ
+                )\
+                .outerjoin(EmployeeDB, SetupDB.qa_id == EmployeeDB.id) \
+                .outerjoin(MachineDB, SetupDB.machine_id == MachineDB.id) \
                 .filter(SetupDB.lot_id == lot_obj.id)\
                 .order_by(desc(SetupDB.created_at))\
                 .first()
 
-            if latest_setup_for_lot:
-                planned_quantity_val = latest_setup_for_lot.planned_quantity
-                if latest_setup_for_lot.qa_id:
-                    inspector_name_val = latest_setup_for_lot.full_name # Имя инспектора из JOIN
-                    if current_user_qa_id is not None and latest_setup_for_lot.qa_id == current_user_qa_id:
-                        is_match_for_qa_filter = True
+            passes_qa_filter = True # По умолчанию лот проходит фильтр
+
+            if latest_setup_details:
+                planned_quantity_val = latest_setup_details.planned_quantity
+                machine_name_val = latest_setup_details.machine_name_from_setup # Получаем имя станка
+                # Исправленный лог:
+                logger.info(f"Lot ID {lot_obj.id}: latest_setup_details found. machine_id in setup (from latest_setup_details): {latest_setup_details.setup_machine_id}. machine_name_from_setup: {machine_name_val}")
+
+                if latest_setup_details.qa_id:
+                    inspector_name_val = latest_setup_details.inspector_name_from_setup
+                    if current_user_qa_id is not None and latest_setup_details.qa_id != current_user_qa_id:
+                        passes_qa_filter = False
+                        logger.debug(f"  Лот НЕ проходит фильтр по qaId. Ожидался: {current_user_qa_id}, в наладке: {latest_setup_details.qa_id}")
+                elif current_user_qa_id is not None: # Фильтр qaId есть, но в наладке qa_id не указан
+                    passes_qa_filter = False
+                    logger.debug(f"  Лот НЕ проходит фильтр по qaId. Ожидался: {current_user_qa_id}, в наладке qa_id отсутствует.")
+                else: # Наладки не найдены, фильтра по qaId нет - просто нет данных о станке
+                    logger.info(f"Lot ID {lot_obj.id}: latest_setup_details NOT found. machine_name will be None.")
             
-            # Если фильтр по qaId активен, и лот не соответствует, пропускаем его
-            if current_user_qa_id is not None and not is_match_for_qa_filter:
-                continue
+            elif current_user_qa_id is not None: # Наладки не найдены, но фильтр по qaId активен
+                 passes_qa_filter = False
+                 logger.debug(f"  Последняя наладка для лота {lot_obj.id} не найдена. Лот НЕ проходит фильтр по qaId {current_user_qa_id}.")
+
+
+            if not passes_qa_filter:
+                continue # Пропускаем лот, если он не прошел фильтр по qaId
             
             item_data = {
                 'id': lot_obj.id,
                 'drawing_number': part_obj.drawing_number,
                 'lot_number': lot_obj.lot_number,
                 'inspector_name': inspector_name_val,
-                'planned_quantity': planned_quantity_val
+                'planned_quantity': planned_quantity_val,
+                'machine_name': machine_name_val, # Добавляем имя станка в результат
             }
-            result.append(LotInfoItem.model_validate(item_data))
             
+            try:
+                result.append(LotInfoItem.model_validate(item_data)) # Pydantic v2
+            except AttributeError:
+                result.append(LotInfoItem.parse_obj(item_data)) # Pydantic v1 fallback
+            logger.debug(f"  Лот ID: {lot_obj.id} добавлен в результаты.")
+
+        logger.info(f"Сформировано {len(result)} элементов для ответа /lots/pending-qc (старая логика).")
+        if not result and lot_ids: # Если были лоты с активными батчами, но они отфильтровались
+             logger.info(f"  Все лоты были отфильтрованы (например, по qaId: {current_user_qa_id}).")
         return result
+
     except Exception as e:
-        logger.error(f"Error fetching lots pending QC: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error fetching lots pending QC")
+        logger.error(f"Ошибка в /lots/pending-qc (старая логика): {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера при получении лотов для ОТК")
 
 # --- END LOTS MANAGEMENT ENDPOINTS ---
 
