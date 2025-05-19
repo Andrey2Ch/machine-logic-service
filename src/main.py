@@ -35,6 +35,7 @@ app.add_middleware(
     allow_headers=["*"], 
 )
 
+
 # Событие startup для инициализации БД
 @app.on_event("startup")
 async def startup_event():
@@ -1384,3 +1385,65 @@ async def get_lot_analytics(lot_id: int, db: Session = Depends(get_db_session)):
 @app.get("/api/morning-report")
 async def morning_report():
     return {"message": "Morning report is working!"}
+
+class BatchLabelInfo(BaseModel):
+    drawing_number: str
+    lot_number: str
+    machine_name: str
+    operator_name: str
+    operator_id: int
+    batch_time: datetime
+    shift: str
+    start_time: str
+    end_time: str
+    initial_quantity: int
+    current_quantity: int
+    batch_quantity: int
+
+@app.get("/machines/{machine_id}/active-batch-label", response_model=BatchLabelInfo)
+async def get_active_batch_label(machine_id: int, db: Session = Depends(get_db_session)):
+    """
+    Получить данные для печати этикетки по последнему батчу станка
+    """
+    batch = (
+        db.query(BatchDB)
+        .join(SetupDB, BatchDB.setup_job_id == SetupDB.id)
+        .filter(SetupDB.machine_id == machine_id)
+        .order_by(BatchDB.batch_time.desc())
+        .first()
+    )
+    if not batch:
+        raise HTTPException(status_code=404, detail="Нет батча для этого станка")
+
+    # Получаем связанные объекты
+    lot = db.query(LotDB).filter(LotDB.id == batch.lot_id).first()
+    part = db.query(PartDB).filter(PartDB.id == lot.part_id).first() if lot else None
+    machine = db.query(MachineDB).filter(MachineDB.id == machine_id).first()
+    operator = db.query(EmployeeDB).filter(EmployeeDB.id == batch.operator_id).first()
+
+    # Вычисляем смену
+    batch_time = batch.batch_time or datetime.now()
+    hour = batch_time.hour
+    if 6 <= hour < 18:
+        shift = "1"
+    else:
+        shift = "2"
+
+    # Для start_time и end_time можно использовать batch_time, если нет других данных
+    start_time = batch.batch_time.strftime('%H:%M') if batch.batch_time else ''
+    end_time = batch.batch_time.strftime('%H:%M') if batch.batch_time else ''
+
+    return BatchLabelInfo(
+        drawing_number=part.drawing_number if part else '',
+        lot_number=lot.lot_number if lot else '',
+        machine_name=machine.name if machine else '',
+        operator_name=operator.full_name if operator else '',
+        operator_id=operator.id if operator else 0,
+        batch_time=batch_time,
+        shift=shift,
+        start_time=start_time,
+        end_time=end_time,
+        initial_quantity=batch.initial_quantity,
+        current_quantity=batch.current_quantity,
+        batch_quantity=(batch.current_quantity - batch.initial_quantity) if batch.initial_quantity is not None and batch.current_quantity is not None else 0
+    )
