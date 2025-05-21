@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from src.models.setup import SetupStatus
 from typing import Optional, Dict, List
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session, aliased
+from sqlalchemy.orm import Session, aliased, selectinload
 from fastapi import Depends, Body
 from src.database import Base, initialize_database, get_db_session
 from src.models.models import SetupDB, ReadingDB, MachineDB, EmployeeDB, PartDB, LotDB, BatchDB
@@ -34,6 +34,7 @@ app.add_middleware(
     allow_methods=["*"], 
     allow_headers=["*"], 
 )
+
 
 # Событие startup для инициализации БД
 @app.on_event("startup")
@@ -416,8 +417,8 @@ class QaSetupViewItem(BaseModel):
     qaDate: Optional[datetime] = Field(None, alias='qa_date')
 
     class Config:
-        orm_mode = True
-        allow_population_by_field_name = True # Разрешаем использовать alias
+        from_attributes = True # Pydantic v2, было orm_mode
+        populate_by_name = True # Pydantic v2, было allow_population_by_field_name
 
 # Эндпоинт для получения наладок для ОТК
 @app.get("/setups/qa-view", response_model=List[QaSetupViewItem])
@@ -494,9 +495,8 @@ class ApprovedSetupResponse(BaseModel): # Используем Pydantic, т.к. 
     qaDate: Optional[datetime] = Field(None, alias='qaDate')
 
     class Config:
-        # orm_mode = True # Это для SQLAlchemy < 2.0
         from_attributes = True # Это для SQLAlchemy >= 2.0 и Pydantic v2
-        allow_population_by_field_name = True
+        populate_by_name = True # Pydantic v2, было allow_population_by_field_name
 
 # Новый эндпоинт для утверждения наладки ОТК
 @app.post("/setups/{setup_id}/approve", response_model=ApprovedSetupResponse)
@@ -616,7 +616,9 @@ class OperatorMachineViewItem(BaseModel):
     plannedQuantity: Optional[int] = Field(None, alias='planned_quantity')
     additionalQuantity: Optional[int] = Field(None, alias='additional_quantity')
     status: Optional[str] = None
-    class Config: from_attributes = True; allow_population_by_field_name = True
+    class Config: 
+        from_attributes = True
+        populate_by_name = True 
 
 # Изменяем путь и убираем operator_id из аргументов
 @app.get("/machines/operator-view", response_model=List[OperatorMachineViewItem])
@@ -801,8 +803,8 @@ class BatchViewItem(BaseModel):
     operator_name: Optional[str]
 
     class Config:
-        orm_mode = True
-        allow_population_by_field_name = True
+        from_attributes = True # Pydantic v2, было orm_mode
+        populate_by_name = True # Pydantic v2, было allow_population_by_field_name
 
 class StartInspectionPayload(BaseModel):
     inspector_id: int
@@ -988,10 +990,10 @@ async def move_batch(
             raise HTTPException(status_code=400, detail="Target location cannot be empty")
         
         # TODO: В идеале, здесь нужна валидация target_location по списку допустимых BatchLocation,
-        #       аналогично тому, как это сделано на фронтенде с locationMap.
+        #       аналогично тому, как это сделано на фронте с locationMap.
         #       Пока что принимаем любую непустую строку.
 
-        logger.info(f"Moving batch {batch_id} from {batch.current_location} to {target_location}")
+        logger.info(f"Moving batch {batch.id} from {batch.current_location} to {target_location}")
 
         batch.current_location = target_location
         batch.updated_at = datetime.now() # Явно обновляем время изменения
@@ -1007,7 +1009,7 @@ async def move_batch(
         # Получаем связанные данные для ответа BatchViewItem
         lot = db.query(LotDB).filter(LotDB.id == batch.lot_id).first()
         part = db.query(PartDB).filter(PartDB.id == lot.part_id).first() if lot else None
-        operator = db.query(EmployeeDB).filter(EmployeeDB.id == batch.operator_id).first() if batch.operator_id else None
+        operator = db.query(EmployeeDB).filter(EmployeeDB.id == batch.operator_id).first()
 
         return BatchViewItem(
             id=batch.id,
@@ -1044,8 +1046,8 @@ class WarehousePendingBatchItem(BaseModel):
     operator_name: Optional[str]
 
     class Config:
-        orm_mode = True
-        allow_population_by_field_name = True
+        from_attributes = True # Pydantic v2, было orm_mode
+        populate_by_name = True # Pydantic v2, было allow_population_by_field_name
         # populate_by_name больше не нужен для этого поля
 
 class AcceptWarehousePayload(BaseModel):
@@ -1054,15 +1056,18 @@ class AcceptWarehousePayload(BaseModel):
 
 @app.get("/warehouse/batches-pending", response_model=List[WarehousePendingBatchItem])
 async def get_warehouse_pending_batches(db: Session = Depends(get_db_session)):
-    """Получить список батчей, ожидающих приемки на склад (статус 'production')."""
+    """Получить список батчей, ожидающих приемки на склад (статус 'production' или 'sorting')."""
     try:
-        batches = db.query(BatchDB, PartDB, LotDB, EmployeeDB).select_from(BatchDB) \
-            .join(LotDB, BatchDB.lot_id == LotDB.id) \
-            .join(PartDB, LotDB.part_id == PartDB.id) \
-            .outerjoin(EmployeeDB, BatchDB.operator_id == EmployeeDB.id) \
-            .filter(BatchDB.current_location == 'production') \
-            .order_by(BatchDB.batch_time.asc()) \
+        batches = (
+            db.query(BatchDB, PartDB, LotDB, EmployeeDB)
+            .select_from(BatchDB)
+            .join(LotDB, BatchDB.lot_id == LotDB.id)
+            .join(PartDB, LotDB.part_id == PartDB.id)
+            .outerjoin(EmployeeDB, BatchDB.operator_id == EmployeeDB.id)
+            .filter(BatchDB.current_location.in_(['production', 'sorting'])) # Включены 'production' и 'sorting'
+            .order_by(BatchDB.batch_time.asc())
             .all()
+        )
 
         result = []
         for row in batches:
@@ -1100,8 +1105,8 @@ async def accept_batch_on_warehouse(batch_id: int, payload: AcceptWarehousePaylo
         
         batch, lot, part = batch_data
 
-        if batch.current_location != 'production':
-            raise HTTPException(status_code=400, detail=f"Batch is not in production state (current: {batch.current_location})")
+        if batch.current_location not in ['production', 'sorting']:
+            raise HTTPException(status_code=400, detail=f"Batch is not in an acceptable state for warehouse acceptance (current: {batch.current_location}). Expected 'production' or 'sorting'.")
         
         warehouse_employee = db.query(EmployeeDB).filter(EmployeeDB.id == payload.warehouse_employee_id).first()
         if not warehouse_employee:
@@ -1137,7 +1142,7 @@ async def accept_batch_on_warehouse(batch_id: int, payload: AcceptWarehousePaylo
                 percentage_diff = abs(difference / operator_reported_qty) * 100
                 batch.discrepancy_percentage = round(percentage_diff, 2)
 
-                if percentage_diff > 3.0:
+                if percentage_diff > 5.0:
                     logger.warning(
                         f"Critical discrepancy for batch {batch.id}: "
                         f"Operator Qty: {operator_reported_qty}, "
@@ -1200,20 +1205,23 @@ class LotInfoItem(BaseModel):
     lot_number: str
     inspector_name: Optional[str] = None
     planned_quantity: Optional[int] = None
+    machine_name: Optional[str] = None
 
     class Config:
-        orm_mode = True
-        # allow_population_by_field_name = True # Больше не нужен, если нет alias
-        # populate_by_name = True # Больше не нужен
+        from_attributes = True # Pydantic v2
+        populate_by_name = True # Pydantic v2, было allow_population_by_field_name
 
 @app.get("/lots/pending-qc", response_model=List[LotInfoItem])
 async def get_lots_pending_qc(db: Session = Depends(get_db_session), current_user_qa_id: Optional[int] = Query(None, alias="qaId")):
-    """Получить ВСЕ лоты, имеющие НЕАРХИВНЫЕ батчи.
-       Для каждого лота также получаем плановое кол-во и имя инспектора из последней наладки.
-       Опционально фильтрует по qaId, если он предоставлен.
     """
+    Получить лоты для ОТК на основе "старой" рабочей логики.
+    1. Находит лоты с неархивными батчами.
+    2. Для каждого такого лота извлекает детали из последней наладки, включая имя инспектора, плановое количество и имя станка.
+    3. Опционально фильтрует по qaId, если он предоставлен (на основе qa_id в последней наладке).
+    """
+    logger.info(f"Запрос /lots/pending-qc (старая логика) получен. qaId: {current_user_qa_id}")
     try:
-        # Базовый запрос на получение ID лотов с активными (неархивными) батчами
+        # 1. Базовый запрос на получение ID лотов с активными (неархивными) батчами
         active_lot_ids_query = db.query(BatchDB.lot_id)\
             .filter(BatchDB.current_location != 'archived') \
             .distinct()
@@ -1222,53 +1230,92 @@ async def get_lots_pending_qc(db: Session = Depends(get_db_session), current_use
         lot_ids = [item[0] for item in lot_ids_with_active_batches_tuples]
 
         if not lot_ids:
+            logger.info("Не найдено лотов с активными (неархивными) батчами.")
             return []
         
-        # Основной запрос для данных по лотам и деталям
+        logger.info(f"Найдены следующие ID лотов с активными батчами: {lot_ids}")
+        
+        # 2. Основной запрос для данных по лотам и деталям
         lots_query = db.query(LotDB, PartDB).select_from(LotDB)\
             .join(PartDB, LotDB.part_id == PartDB.id)\
             .filter(LotDB.id.in_(lot_ids))
-            # .order_by(LotDB.created_at.desc()) # Сортировка здесь может быть избыточной, если результат небольшой или сортируется на фронте
 
         lots_query_result = lots_query.all()
+        logger.info(f"Всего лотов (с деталями) для дальнейшей обработки: {len(lots_query_result)}")
         
         result = []
         for lot_obj, part_obj in lots_query_result:
-            inspector_name_val = None
+            logger.debug(f"Обработка лота ID: {lot_obj.id}, Номер: {lot_obj.lot_number}")
+            
             planned_quantity_val = None
-            is_match_for_qa_filter = False # Флаг для фильтрации по qaId
-
-            # Находим последнюю наладку для данного лота
-            latest_setup_for_lot = db.query(SetupDB.planned_quantity, SetupDB.qa_id, EmployeeDB.full_name)\
-                .outerjoin(EmployeeDB, SetupDB.qa_id == EmployeeDB.id)\
+            inspector_name_val = None
+            machine_name_val = None # Инициализируем machine_name
+            
+            # 3. Находим последнюю наладку для данного лота, включая имя станка
+            # Используем outerjoin для EmployeeDB и MachineDB для большей устойчивости
+            latest_setup_details = db.query(
+                    SetupDB.planned_quantity,
+                    SetupDB.qa_id,
+                    EmployeeDB.full_name.label("inspector_name_from_setup"),
+                    MachineDB.name.label("machine_name_from_setup"),
+                    SetupDB.machine_id.label("setup_machine_id") # <--- ДОБАВЛЕНО ДЛЯ ЛОГИРОВАНИЯ
+                )\
+                .outerjoin(EmployeeDB, SetupDB.qa_id == EmployeeDB.id) \
+                .outerjoin(MachineDB, SetupDB.machine_id == MachineDB.id) \
                 .filter(SetupDB.lot_id == lot_obj.id)\
                 .order_by(desc(SetupDB.created_at))\
                 .first()
 
-            if latest_setup_for_lot:
-                planned_quantity_val = latest_setup_for_lot.planned_quantity
-                if latest_setup_for_lot.qa_id:
-                    inspector_name_val = latest_setup_for_lot.full_name # Имя инспектора из JOIN
-                    if current_user_qa_id is not None and latest_setup_for_lot.qa_id == current_user_qa_id:
-                        is_match_for_qa_filter = True
+            passes_qa_filter = True # По умолчанию лот проходит фильтр
+
+            if latest_setup_details:
+                planned_quantity_val = latest_setup_details.planned_quantity
+                machine_name_val = latest_setup_details.machine_name_from_setup # Получаем имя станка
+                # Исправленный лог:
+                logger.info(f"Lot ID {lot_obj.id}: latest_setup_details found. machine_id in setup (from latest_setup_details): {latest_setup_details.setup_machine_id}. machine_name_from_setup: {machine_name_val}")
+
+                if latest_setup_details.qa_id:
+                    inspector_name_val = latest_setup_details.inspector_name_from_setup
+                    if current_user_qa_id is not None and latest_setup_details.qa_id != current_user_qa_id:
+                        passes_qa_filter = False
+                        logger.debug(f"  Лот НЕ проходит фильтр по qaId. Ожидался: {current_user_qa_id}, в наладке: {latest_setup_details.qa_id}")
+                elif current_user_qa_id is not None: # Фильтр qaId есть, но в наладке qa_id не указан
+                    passes_qa_filter = False
+                    logger.debug(f"  Лот НЕ проходит фильтр по qaId. Ожидался: {current_user_qa_id}, в наладке qa_id отсутствует.")
+                else: # Наладки не найдены, фильтра по qaId нет - просто нет данных о станке
+                    logger.info(f"Lot ID {lot_obj.id}: latest_setup_details NOT found. machine_name will be None.")
             
-            # Если фильтр по qaId активен, и лот не соответствует, пропускаем его
-            if current_user_qa_id is not None and not is_match_for_qa_filter:
-                continue
+            elif current_user_qa_id is not None: # Наладки не найдены, но фильтр по qaId активен
+                 passes_qa_filter = False
+                 logger.debug(f"  Последняя наладка для лота {lot_obj.id} не найдена. Лот НЕ проходит фильтр по qaId {current_user_qa_id}.")
+
+
+            if not passes_qa_filter:
+                continue # Пропускаем лот, если он не прошел фильтр по qaId
             
             item_data = {
                 'id': lot_obj.id,
                 'drawing_number': part_obj.drawing_number,
                 'lot_number': lot_obj.lot_number,
                 'inspector_name': inspector_name_val,
-                'planned_quantity': planned_quantity_val
+                'planned_quantity': planned_quantity_val,
+                'machine_name': machine_name_val, # Добавляем имя станка в результат
             }
-            result.append(LotInfoItem.model_validate(item_data))
             
+            try:
+                result.append(LotInfoItem.model_validate(item_data)) # Pydantic v2
+            except AttributeError:
+                result.append(LotInfoItem.parse_obj(item_data)) # Pydantic v1 fallback
+            logger.debug(f"  Лот ID: {lot_obj.id} добавлен в результаты.")
+
+        logger.info(f"Сформировано {len(result)} элементов для ответа /lots/pending-qc (старая логика).")
+        if not result and lot_ids: # Если были лоты с активными батчами, но они отфильтровались
+             logger.info(f"  Все лоты были отфильтрованы (например, по qaId: {current_user_qa_id}).")
         return result
+
     except Exception as e:
-        logger.error(f"Error fetching lots pending QC: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error fetching lots pending QC")
+        logger.error(f"Ошибка в /lots/pending-qc (старая логика): {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера при получении лотов для ОТК")
 
 # --- END LOTS MANAGEMENT ENDPOINTS ---
 
@@ -1341,3 +1388,167 @@ async def get_lot_analytics(lot_id: int, db: Session = Depends(get_db_session)):
 @app.get("/api/morning-report")
 async def morning_report():
     return {"message": "Morning report is working!"}
+
+class BatchLabelInfo(BaseModel):
+    id: int  # ID самого батча
+    lot_id: int # <--- ДОБАВЛЕНО ЭТО ПОЛЕ
+    drawing_number: str
+    lot_number: str
+    machine_name: str
+    operator_name: str
+    operator_id: int
+    batch_time: datetime
+    shift: str
+    start_time: str
+    end_time: str
+    initial_quantity: int
+    current_quantity: int
+    batch_quantity: int
+
+@app.get("/machines/{machine_id}/active-batch-label", response_model=BatchLabelInfo)
+async def get_active_batch_label(machine_id: int, db: Session = Depends(get_db_session)):
+    batch = (
+        db.query(BatchDB)
+        .join(SetupDB, BatchDB.setup_job_id == SetupDB.id)
+        .filter(SetupDB.machine_id == machine_id)
+        .order_by(BatchDB.batch_time.desc())
+        .first()
+    )
+    if not batch:
+        raise HTTPException(status_code=404, detail="Нет батча для этого станка")
+
+    lot = db.query(LotDB).filter(LotDB.id == batch.lot_id).first()
+    part = db.query(PartDB).filter(PartDB.id == lot.part_id).first() if lot else None
+    machine = db.query(MachineDB).filter(MachineDB.id == machine_id).first()
+    operator = db.query(EmployeeDB).filter(EmployeeDB.id == batch.operator_id).first()
+
+    batch_time = batch.batch_time or datetime.now()
+    hour = batch_time.hour
+    if 6 <= hour < 18:
+        shift = "1"
+    else:
+        shift = "2"
+
+    # Найти предыдущий батч, где current_quantity == initial_quantity текущего
+    previous_batch = (
+        db.query(BatchDB)
+        .filter(BatchDB.current_quantity == batch.initial_quantity)
+        .filter(BatchDB.id != batch.id)
+        .order_by(BatchDB.created_at.desc())
+        .first()
+    )
+    start_time = previous_batch.created_at.strftime('%H:%M') if previous_batch and previous_batch.created_at else ''
+    end_time = batch.created_at.strftime('%H:%M') if batch.created_at else ''
+
+    initial_quantity_db = batch.initial_quantity if batch.initial_quantity is not None else 0
+    quantity_in_batch_db = batch.current_quantity if batch.current_quantity is not None else 0
+
+    # Данные для модели BatchLabelInfo
+    label_initial_counter = initial_quantity_db  # Начальное показание счетчика для этого батча
+    label_final_counter = initial_quantity_db + quantity_in_batch_db  # Конечное показание счетчика для этого батча
+    label_quantity_in_batch = quantity_in_batch_db # Количество произведенное в этом батче
+
+    return BatchLabelInfo(
+        id=batch.id,
+        lot_id=batch.lot_id, # <--- ДОБАВЛЕНА ПЕРЕДАЧА lot_id
+        drawing_number=part.drawing_number if part else '',
+        lot_number=lot.lot_number if lot else '',
+        machine_name=machine.name if machine else '',
+        operator_name=operator.full_name if operator else '',
+        operator_id=operator.id if operator else 0,
+        batch_time=batch_time,
+        shift=shift,
+        start_time=start_time,
+        end_time=end_time,
+        initial_quantity=label_initial_counter, # Передаем начальное показание счетчика
+        current_quantity=label_final_counter,   # Передаем конечное показание счетчика
+        batch_quantity=label_quantity_in_batch # Передаем фактическое количество в батче
+    )
+
+class CreateBatchInput(BaseModel):
+    lot_id: int
+    operator_id: int
+    machine_id: int
+    drawing_number: str
+    status: Optional[str] = 'sorting'
+
+class CreateBatchResponse(BaseModel):
+    batch_id: int
+    lot_number: str
+    drawing_number: str
+    machine_name: str
+    operator_id: int
+    created_at: datetime
+    shift: str
+
+@app.post("/batches", response_model=CreateBatchResponse)
+async def create_batch(payload: CreateBatchInput, db: Session = Depends(get_db_session)):
+    """
+    Создать новый батч (в том числе для переборки). batch_quantity=None, статус по умолчанию 'sorting'.
+    """
+    lot = db.query(LotDB).filter(LotDB.id == payload.lot_id).first()
+    if not lot:
+        raise HTTPException(status_code=404, detail="Lot not found")
+    part = db.query(PartDB).filter(PartDB.drawing_number == payload.drawing_number).first()
+    if not part:
+        raise HTTPException(status_code=404, detail="Part not found")
+    machine = db.query(MachineDB).filter(MachineDB.id == payload.machine_id).first()
+    if not machine:
+        raise HTTPException(status_code=404, detail="Machine not found")
+    operator = db.query(EmployeeDB).filter(EmployeeDB.id == payload.operator_id).first()
+    if not operator:
+        raise HTTPException(status_code=404, detail="Operator not found")
+
+    now = datetime.now()
+    hour = now.hour
+    shift = "1" if 6 <= hour < 18 else "2"
+
+    new_batch = BatchDB(
+        lot_id=payload.lot_id,
+        initial_quantity=0, # <--- ИЗМЕНЕНО: ставим 0 по умолчанию для батчей 'sorting'
+        current_quantity=0, # <--- ИЗМЕНЕНО: ставим 0 по умолчанию для батчей 'sorting'
+        recounted_quantity=None,
+        current_location=payload.status or 'sorting',
+        operator_id=payload.operator_id,
+        batch_time=now,
+        created_at=now
+    )
+    db.add(new_batch)
+    db.commit()
+    db.refresh(new_batch)
+
+    return CreateBatchResponse(
+        batch_id=new_batch.id,
+        lot_number=lot.lot_number,
+        drawing_number=part.drawing_number,
+        machine_name=machine.name,
+        operator_id=operator.id,
+        created_at=now,
+        shift=shift
+    )
+
+# --- START NEW ENDPOINT --- 
+class EmployeeItem(BaseModel):
+    id: int
+    full_name: Optional[str] = None
+    role_id: Optional[int] = None # Добавим роль, может пригодиться для фильтрации на фронте
+
+    class Config:
+        from_attributes = True # Pydantic v2
+
+@app.get("/employees", response_model=List[EmployeeItem])
+async def get_employees(db: Session = Depends(get_db_session)):
+    """
+    Получить список всех активных сотрудников с role_id = 1 (операторы)
+    """
+    try:
+        employees = db.query(EmployeeDB)\
+            .filter(EmployeeDB.role_id == 1)\
+            .filter(EmployeeDB.is_active == True)\
+            .order_by(EmployeeDB.full_name)\
+            .all()
+        return employees # Pydantic автоматически преобразует в EmployeeItem
+    except Exception as e:
+        logger.error(f"Error fetching employees: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error while fetching employees")
+# --- END NEW ENDPOINT ---
