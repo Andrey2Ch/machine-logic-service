@@ -1391,7 +1391,7 @@ async def morning_report():
 
 class BatchLabelInfo(BaseModel):
     id: int  # ID самого батча
-    lot_id: int # <--- ДОБАВЛЕНО ЭТО ПОЛЕ
+    lot_id: int 
     drawing_number: str
     lot_number: str
     machine_name: str
@@ -1399,70 +1399,91 @@ class BatchLabelInfo(BaseModel):
     operator_id: int
     batch_time: datetime
     shift: str
-    start_time: str
-    end_time: str
+    start_time: Optional[str] = None # Изменено
+    end_time: Optional[str] = None   # Изменено
     initial_quantity: int
     current_quantity: int
     batch_quantity: int
 
 @app.get("/machines/{machine_id}/active-batch-label", response_model=BatchLabelInfo)
 async def get_active_batch_label(machine_id: int, db: Session = Depends(get_db_session)):
-    batch = (
-        db.query(BatchDB)
-        .join(SetupDB, BatchDB.setup_job_id == SetupDB.id)
-        .filter(SetupDB.machine_id == machine_id)
-        .order_by(BatchDB.batch_time.desc())
+    active_batch = db.query(BatchDB)\
+        .join(SetupDB, BatchDB.setup_job_id == SetupDB.id)\
+        .filter(SetupDB.machine_id == machine_id)\
+        .filter(BatchDB.current_location == 'production')\
+        .order_by(desc(BatchDB.batch_time)) \
         .first()
-    )
-    if not batch:
-        raise HTTPException(status_code=404, detail="Нет батча для этого станка")
 
-    lot = db.query(LotDB).filter(LotDB.id == batch.lot_id).first()
-    part = db.query(PartDB).filter(PartDB.id == lot.part_id).first() if lot else None
+    if not active_batch:
+        raise HTTPException(status_code=404, detail="Активный батч в производстве не найден для этого станка")
+
+    setup = db.query(SetupDB).filter(SetupDB.id == active_batch.setup_job_id).first()
+    part = db.query(PartDB).filter(PartDB.id == setup.part_id).first() if setup else None
+    lot = db.query(LotDB).filter(LotDB.id == active_batch.lot_id).first()
     machine = db.query(MachineDB).filter(MachineDB.id == machine_id).first()
-    operator = db.query(EmployeeDB).filter(EmployeeDB.id == batch.operator_id).first()
+    operator = db.query(EmployeeDB).filter(EmployeeDB.id == active_batch.operator_id).first()
 
-    batch_time = batch.batch_time or datetime.now()
-    hour = batch_time.hour
-    if 6 <= hour < 18:
-        shift = "1"
+    # Определение времени начала и конца батча
+    determined_start_time: Optional[str] = None
+    final_end_time_str = active_batch.batch_time.strftime("%H:%M") if active_batch.batch_time else None
+
+    # Новая логика для determined_start_time
+    if active_batch.initial_quantity == 0 and setup and setup.start_time:
+        determined_start_time = setup.start_time.strftime("%H:%M")
     else:
-        shift = "2"
+        previous_direct_batch = db.query(BatchDB.batch_time)\
+            .filter(BatchDB.lot_id == active_batch.lot_id)\
+            .filter(BatchDB.setup_job_id == active_batch.setup_job_id)\
+            .filter(BatchDB.id != active_batch.id)\
+            .filter(BatchDB.created_at < active_batch.created_at)\
+            .order_by(desc(BatchDB.created_at)) \
+            .first()
+        
+        if previous_direct_batch and previous_direct_batch.batch_time:
+            determined_start_time = previous_direct_batch.batch_time.strftime("%H:%M")
+        elif setup and setup.start_time: # Fallback
+            determined_start_time = setup.start_time.strftime("%H:%M")
 
-    # Найти предыдущий батч, где current_quantity == initial_quantity текущего
-    previous_batch = (
-        db.query(BatchDB)
-        .filter(BatchDB.current_quantity == batch.initial_quantity)
-        .filter(BatchDB.id != batch.id)
-        .order_by(BatchDB.created_at.desc())
-        .first()
-    )
-    start_time = previous_batch.created_at.strftime('%H:%M') if previous_batch and previous_batch.created_at else ''
-    end_time = batch.created_at.strftime('%H:%M') if batch.created_at else ''
+    # Расчет initial_quantity, current_quantity, batch_quantity (оставляем как было, если корректно)
+    # Эта логика должна соответствовать тому, как поля хранятся в BatchDB и что ожидает этикетка
+    # initial_quantity - показание счетчика в начале этого батча
+    # current_quantity - показание счетчика в конце этого батча
+    # batch_quantity - количество деталей в этом батче (current_quantity - initial_quantity)
 
-    initial_quantity_db = batch.initial_quantity if batch.initial_quantity is not None else 0
-    quantity_in_batch_db = batch.current_quantity if batch.current_quantity is not None else 0
+    # final_initial_quantity - это initial_quantity самого active_batch, т.е. показание счетчика в его начале
+    final_initial_quantity = active_batch.initial_quantity
+    
+    # final_current_quantity - это показание счетчика в конце active_batch.
+    # Оно равно active_batch.initial_quantity + active_batch.current_quantity (где current_quantity - это кол-во В батче)
+    final_current_quantity = active_batch.initial_quantity + active_batch.current_quantity
+    
+    # final_batch_quantity - это количество деталей В active_batch, т.е. active_batch.current_quantity
+    final_batch_quantity = active_batch.current_quantity
 
-    # Данные для модели BatchLabelInfo
-    label_initial_counter = initial_quantity_db  # Начальное показание счетчика для этого батча
-    label_final_counter = initial_quantity_db + quantity_in_batch_db  # Конечное показание счетчика для этого батча
-    label_quantity_in_batch = quantity_in_batch_db # Количество произведенное в этом батче
+    # Вычисляем смену
+    calculated_shift = "N/A"
+    if active_batch.batch_time:
+        hour = active_batch.batch_time.hour
+        if 6 <= hour < 18:
+            calculated_shift = "1"  # Дневная смена
+        else:
+            calculated_shift = "2"  # Ночная смена
 
     return BatchLabelInfo(
-        id=batch.id,
-        lot_id=batch.lot_id, # <--- ДОБАВЛЕНА ПЕРЕДАЧА lot_id
-        drawing_number=part.drawing_number if part else '',
-        lot_number=lot.lot_number if lot else '',
-        machine_name=machine.name if machine else '',
-        operator_name=operator.full_name if operator else '',
-        operator_id=operator.id if operator else 0,
-        batch_time=batch_time,
-        shift=shift,
-        start_time=start_time,
-        end_time=end_time,
-        initial_quantity=label_initial_counter, # Передаем начальное показание счетчика
-        current_quantity=label_final_counter,   # Передаем конечное показание счетчика
-        batch_quantity=label_quantity_in_batch # Передаем фактическое количество в батче
+        id=active_batch.id,
+        lot_id=active_batch.lot_id,
+        drawing_number=part.drawing_number if part else "N/A",
+        lot_number=lot.lot_number if lot else "N/A",
+        machine_name=machine.name if machine else "N/A",
+        operator_name=operator.full_name if operator else "N/A",
+        operator_id=active_batch.operator_id,
+        batch_time=active_batch.batch_time,
+        shift=calculated_shift, # Используем вычисленную смену
+        start_time=determined_start_time,
+        end_time=final_end_time_str,
+        initial_quantity=final_initial_quantity,
+        current_quantity=final_current_quantity,
+        batch_quantity=final_batch_quantity
     )
 
 class CreateBatchInput(BaseModel):
