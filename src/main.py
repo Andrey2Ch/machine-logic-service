@@ -1,12 +1,13 @@
 import logging
 from dotenv import load_dotenv
 import os
+import traceback # <--- ДОБАВИТЬ ЭТОТ ИМПОРТ
 
 # Загружаем переменные окружения из .env файла
 # Это должно быть В САМОМ НАЧАЛЕ, до других импортов, использующих env vars
 load_dotenv()
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Response # Добавил Response для заголовков пагинации, если понадобится
 from fastapi.middleware.cors import CORSMiddleware
 from src.models.setup import SetupStatus
 from typing import Optional, Dict, List
@@ -15,12 +16,13 @@ from sqlalchemy.orm import Session, aliased, selectinload
 from fastapi import Depends, Body
 from src.database import Base, initialize_database, get_db_session
 from src.models.models import SetupDB, ReadingDB, MachineDB, EmployeeDB, PartDB, LotDB, BatchDB
-from datetime import datetime
+from datetime import datetime, timezone
 from src.utils.sheets_handler import save_to_sheets
 import asyncio
 import httpx
 from src.services.notification_service import send_setup_approval_notifications, send_batch_discrepancy_alert
 from sqlalchemy import func, desc, case
+from sqlalchemy.exc import IntegrityError
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +35,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"], 
     allow_headers=["*"], 
+    expose_headers=["X-Total-Count"]  # <--- ДОБАВЛЕНО ЗДЕСЬ
 )
 
 
@@ -41,6 +44,91 @@ app.add_middleware(
 async def startup_event():
     initialize_database()
     # Здесь можно добавить другие действия при старте, если нужно
+
+# Pydantic модели для Деталей (Parts)
+class PartBase(BaseModel):
+    drawing_number: str = Field(..., description="Номер чертежа детали, должен быть уникальным")
+    material: Optional[str] = Field(None, description="Материал детали")
+
+class PartCreate(PartBase):
+    pass
+
+class PartUpdate(PartBase): # Для возможного будущего обновления
+    drawing_number: Optional[str] = None # При обновлении можно разрешить менять не все поля
+    material: Optional[str] = None
+
+class PartResponse(PartBase):
+    id: int
+    created_at: Optional[datetime] # <--- СДЕЛАНО ОПЦИОНАЛЬНЫМ
+
+    class Config:
+        orm_mode = True
+
+# --- Эндпоинты для Деталей (Parts) ---
+@app.post("/parts/", response_model=PartResponse, status_code=201, tags=["Parts"])
+async def create_part(part_in: PartCreate, db: Session = Depends(get_db_session)):
+    """
+    Создать новую деталь.
+    - **drawing_number**: Номер чертежа (уникальный)
+    - **material**: Материал (опционально)
+    """
+    logger.info(f"Запрос на создание детали: {part_in.model_dump()}")
+    existing_part = db.query(PartDB).filter(PartDB.drawing_number == part_in.drawing_number).first()
+    if existing_part:
+        logger.warning(f"Деталь с номером чертежа {part_in.drawing_number} уже существует (ID: {existing_part.id})")
+        raise HTTPException(status_code=409, detail=f"Деталь с номером чертежа '{part_in.drawing_number}' уже существует.")
+    
+    new_part = PartDB(
+        drawing_number=part_in.drawing_number,
+        material=part_in.material
+        # created_at будет установлен по умолчанию
+    )
+    db.add(new_part)
+    try:
+        db.commit()
+        db.refresh(new_part)
+        logger.info(f"Деталь '{new_part.drawing_number}' успешно создана с ID {new_part.id}")
+        return new_part
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Ошибка при сохранении детали {part_in.drawing_number}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Внутренняя ошибка сервера при сохранении детали: {str(e)}")
+
+@app.get("/parts/", response_model=List[PartResponse], tags=["Parts"])
+async def get_parts(
+    response: Response, 
+    search: Optional[str] = Query(None, description="Поисковый запрос для номера чертежа или материала"),
+    skip: int = Query(0, ge=0, description="Количество записей для пропуска (пагинация)"),
+    limit: int = Query(100, ge=1, le=500, description="Максимальное количество записей для возврата (пагинация)"),
+    db: Session = Depends(get_db_session)
+):
+    """
+    Получить список всех деталей.
+    Поддерживает поиск по `drawing_number` и `material` (частичное совпадение без учета регистра).
+    Поддерживает пагинацию через `skip` и `limit`.
+    """
+    try:
+        query = db.query(PartDB)
+        
+        if search:
+            search_term = f"%{search.lower()}%"
+            query = query.filter(
+                (func.lower(PartDB.drawing_number).like(search_term)) |
+                (func.lower(func.coalesce(PartDB.material, '')).like(search_term))
+            )
+
+        total_count = query.count()
+
+        parts = query.order_by(PartDB.drawing_number).offset(skip).limit(limit).all()
+        logger.info(f"Запрос списка деталей: search='{search}', skip={skip}, limit={limit}. Возвращено {len(parts)} из {total_count} деталей.")
+        
+        response.headers["X-Total-Count"] = str(total_count)
+        # УДАЛЕНО: response.headers["Access-Control-Expose-Headers"] = "X-Total-Count"
+            
+        return parts
+    except Exception as e:
+        logger.error(f"Ошибка при получении списка деталей (search='{search}', skip={skip}, limit={limit}): {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Внутренняя ошибка сервера при получении списка деталей: {str(e)}")
 
 @app.get("/")
 async def root():
@@ -1573,3 +1661,163 @@ async def get_employees(db: Session = Depends(get_db_session)):
         logger.error(f"Error fetching employees: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error while fetching employees")
 # --- END NEW ENDPOINT ---
+
+# <<< НОВЫЕ Pydantic МОДЕЛИ ДЛЯ LOT >>>
+class LotBase(BaseModel):
+    lot_number: str
+    part_id: int
+    initial_planned_quantity: Optional[int] = None # <--- СДЕЛАНО ОПЦИОНАЛЬНЫМ
+    due_date: Optional[datetime] = None
+    # Статус будет устанавливаться по умолчанию на бэкенде
+
+class LotCreate(LotBase):
+    # order_manager_id и created_by_order_manager_at будут добавлены на бэкенде
+    # Обновляем для временного решения: клиент может передавать эти поля
+    order_manager_id: Optional[int] = None
+    created_by_order_manager_at: Optional[datetime] = None
+
+class LotResponse(LotBase):
+    id: int
+    order_manager_id: Optional[int] = None
+    created_by_order_manager_at: Optional[datetime] = None
+    status: str
+    created_at: Optional[datetime] = None # <--- СДЕЛАНО ОПЦИОНАЛЬНЫМ
+    part: Optional[PartResponse] = None # Для возврата информации о детали вместе с лотом
+
+    class Config:
+        from_attributes = True # <--- ИСПРАВЛЕНО с orm_mode
+# <<< КОНЕЦ НОВЫХ Pydantic МОДЕЛЕЙ ДЛЯ LOT >>>
+
+# <<< НОВЫЙ ЭНДПОИНТ POST /lots/ >>>
+@app.post("/lots/", response_model=LotResponse, status_code=201, tags=["Lots"])
+async def create_lot(
+    lot_data: LotCreate, 
+    db: Session = Depends(get_db_session),
+    # current_user: EmployeeDB = Depends(get_current_active_user) # Раскомментировать, когда аутентификация будет готова
+):
+    try: # <--- НАЧАЛО БОЛЬШОГО TRY-БЛОКА
+        logger.info(f"Запрос на создание лота: {lot_data.model_dump()}")
+
+        # Проверка существования детали
+        part = db.query(PartDB).filter(PartDB.id == lot_data.part_id).first()
+        if not part:
+            logger.warning(f"Деталь с ID {lot_data.part_id} не найдена при создании лота.")
+            raise HTTPException(status_code=404, detail=f"Part with id {lot_data.part_id} not found")
+
+        # Проверка уникальности номера лота
+        existing_lot = db.query(LotDB).filter(LotDB.lot_number == lot_data.lot_number).first()
+        if existing_lot:
+            logger.warning(f"Лот с номером {lot_data.lot_number} уже существует (ID: {existing_lot.id}).")
+            raise HTTPException(status_code=409, detail=f"Lot with lot_number '{lot_data.lot_number}' already exists.")
+
+        db_lot_data = lot_data.model_dump(exclude_unset=True)
+        logger.debug(f"Данные для создания LotDB (после model_dump): {db_lot_data}")
+        
+        # Если order_manager_id передан, а created_by_order_manager_at нет, устанавливаем текущее время
+        if db_lot_data.get("order_manager_id") is not None:
+            if db_lot_data.get("created_by_order_manager_at") is None:
+                db_lot_data["created_by_order_manager_at"] = datetime.now(timezone.utc) # Используем UTC
+        
+        # Проверка ключевых полей перед созданием объекта
+        if 'part_id' not in db_lot_data or db_lot_data['part_id'] is None:
+            logger.error("Критическая ошибка: part_id отсутствует или None в db_lot_data перед созданием LotDB.")
+            raise HTTPException(status_code=500, detail="Internal error: part_id is missing for LotDB creation.")
+        
+        if 'lot_number' not in db_lot_data or not db_lot_data['lot_number']:
+            logger.error("Критическая ошибка: lot_number отсутствует или пуст в db_lot_data перед созданием LotDB.")
+            raise HTTPException(status_code=500, detail="Internal error: lot_number is missing for LotDB creation.")
+
+        logger.info(f"Попытка создать объект LotDB с данными: {db_lot_data} и status='new'")
+        db_lot = LotDB(**db_lot_data, status='new') # Статус 'new' по умолчанию
+        logger.info(f"Объект LotDB создан в памяти (ID пока нет).")
+
+        db.add(db_lot)
+        logger.info("Объект LotDB добавлен в сессию SQLAlchemy.")
+        
+        try:
+            logger.info("Попытка выполнить db.flush().")
+            db.flush()
+            logger.info("db.flush() выполнен успешно.")
+        except Exception as flush_exc:
+            db.rollback()
+            logger.error(f"Ошибка во время db.flush() при создании лота: {flush_exc}", exc_info=True)
+            logger.error(f"Полный трейсбек ошибки flush: {traceback.format_exc()}")
+            raise HTTPException(status_code=500, detail=f"Database flush error: {str(flush_exc)}")
+
+        db.commit()
+        logger.info("db.commit() выполнен успешно.")
+        db.refresh(db_lot)
+        logger.info(f"Лот '{db_lot.lot_number}' успешно создан с ID {db_lot.id}.")
+        
+        # Для LotResponse нам нужна информация о детали
+        # Явно загружаем деталь, если она не была загружена через joinedload/selectinload в LotDB
+        # или если LotResponse требует этого. В нашем случае LotResponse имеет part: Optional[PartResponse]
+        # SQLAlchemy должен автоматически подтянуть связанную деталь, если сессия активна
+        # и db_lot.part доступно.
+        # Но для надежности можно сделать так, если возникают проблемы:
+        # if not db_lot.part: # Это не сработает, т.к. part это relationship
+        #    db_lot.part = db.query(PartDB).filter(PartDB.id == db_lot.part_id).first()
+        # logger.info(f"Подготовленный для ответа лот: {db_lot}, связанная деталь: {db_lot.part}")
+
+        return db_lot
+    
+    except HTTPException as http_e:
+        # db.rollback() # FastAPI обработчик ошибок позаботится об этом, если транзакция была начата
+        logger.error(f"HTTPException при создании лота: {http_e.status_code} - {http_e.detail}")
+        raise http_e # Перебрасываем дальше, чтобы FastAPI вернул корректный HTTP ответ
+    
+    except IntegrityError as int_e:
+        db.rollback()
+        logger.error(f"IntegrityError при создании лота: {int_e}", exc_info=True)
+        detailed_error = str(int_e.orig) if hasattr(int_e, 'orig') and int_e.orig else str(int_e)
+        logger.error(f"Полный трейсбек IntegrityError: {traceback.format_exc()}")
+        
+        # Попытка определить, какое ограничение было нарушено
+        if "uq_lot_number_global" in detailed_error.lower():
+             raise HTTPException(status_code=409, detail=f"Lot with lot_number '{lot_data.lot_number}' already exists (race condition or concurrent request). Possible original error: {detailed_error}")
+        elif "lots_part_id_fkey" in detailed_error.lower():
+             raise HTTPException(status_code=404, detail=f"Part with id {lot_data.part_id} not found (race condition or concurrent request). Possible original error: {detailed_error}")
+        else:
+            raise HTTPException(status_code=500, detail=f"Database integrity error occurred. Possible original error: {detailed_error}")
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"НЕПРЕДВИДЕННАЯ ОШИБКА СЕРВЕРА при создании лота: {e}", exc_info=True)
+        detailed_traceback = traceback.format_exc()
+        logger.error(f"ПОЛНЫЙ ТРЕЙСБЕК НЕПРЕДВИДЕННОЙ ОШИБКИ:\n{detailed_traceback}")
+        # Временно возвращаем трейсбек в detail для отладки
+        raise HTTPException(status_code=500, detail=f"Unexpected server error. Traceback: {detailed_traceback}")
+
+# Эндпоинт для получения списка лотов (пример, может потребовать доработки)
+@app.get("/lots/", response_model=List[LotResponse], tags=["Lots"])
+async def get_lots(
+    response: Response, 
+    search: Optional[str] = Query(None, description="Поисковый запрос для номера лота или номера чертежа детали"),
+    skip: int = Query(0, ge=0, description="Количество записей для пропуска (пагинация)"),
+    limit: int = Query(100, ge=1, le=500, description="Максимальное количество записей для возврата (пагинация)"),
+    db: Session = Depends(get_db_session)
+):
+    """
+    Получить список всех лотов.
+    Поддерживает поиск по `lot_number` (номер лота) и `drawing_number` (номер чертежа связанной детали) (частичное совпадение без учета регистра).
+    Поддерживает пагинацию через `skip` и `limit`.
+    Сортировка по убыванию ID лота (новые сверху).
+    """
+    query = db.query(LotDB).options(selectinload(LotDB.part))
+    
+    if search:
+        search_term = f"%{search.lower()}%"
+        query = query.join(LotDB.part).filter( 
+            (func.lower(LotDB.lot_number).like(search_term)) |
+            (func.lower(PartDB.drawing_number).like(search_term))
+        )
+    
+    total_count = query.count() 
+
+    lots = query.order_by(LotDB.id.desc()).offset(skip).limit(limit).all()
+    logger.info(f"Запрос списка лотов: search='{search}', skip={skip}, limit={limit}. Возвращено {len(lots)} из {total_count} лотов.")
+    
+    response.headers["X-Total-Count"] = str(total_count)
+    # УДАЛЕНО: response.headers["Access-Control-Expose-Headers"] = "X-Total-Count" 
+        
+    return lots

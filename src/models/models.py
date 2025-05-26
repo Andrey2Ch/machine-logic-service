@@ -29,8 +29,8 @@ class PartDB(Base):
     __tablename__ = "parts"
 
     id = Column(Integer, primary_key=True, index=True)
-    drawing_number = Column(String(255))
-    description = Column(String)
+    drawing_number = Column(String(255), unique=True, index=True)
+    material = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.now)
     # is_active = Column(Boolean, default=True)
 
@@ -42,6 +42,14 @@ class LotDB(Base):
     part_id = Column(Integer, ForeignKey("parts.id"))
     created_at = Column(DateTime, default=datetime.now)
     # is_active = Column(Boolean, default=True)
+
+    # Новые поля, добавленные ранее:
+    order_manager_id = Column(Integer, ForeignKey("employees.id"), nullable=True)
+    created_by_order_manager_at = Column(DateTime, nullable=True)
+    due_date = Column(DateTime, nullable=True)
+    initial_planned_quantity = Column(Integer, nullable=True)
+    total_planned_quantity = Column(Integer, nullable=True)
+    status = Column(String(50), nullable=False, default='new') # Статус лота
 
     # Добавляем обратную связь к BatchDB
     batches = relationship("BatchDB", back_populates="lot")
