@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from src.models.setup import SetupStatus
 from typing import Optional, Dict, List
 from pydantic import BaseModel, Field
+from enum import Enum
 from sqlalchemy.orm import Session, aliased, selectinload
 from fastapi import Depends, Body
 from src.database import Base, initialize_database, get_db_session
@@ -20,6 +21,7 @@ from datetime import datetime, timezone
 from src.utils.sheets_handler import save_to_sheets
 import asyncio
 import httpx
+import aiohttp
 from src.services.notification_service import send_setup_approval_notifications, send_batch_discrepancy_alert
 from sqlalchemy import func, desc, case
 from sqlalchemy.exc import IntegrityError
@@ -771,6 +773,81 @@ async def get_operator_machines_view(db: Session = Depends(get_db_session)):
         logger.error(f"Error fetching operator machine view: {e}", exc_info=True) # Обновляем лог
         raise HTTPException(status_code=500, detail="Internal server error fetching operator machine view")
 
+async def check_lot_completion_and_update_status(lot_id: int, db: Session):
+    """
+    Проверяет, завершены ли все наладки для лота, и обновляет статус лота на 'post_production'
+    """
+    try:
+        # Получаем информацию о лоте
+        lot = db.query(LotDB).filter(LotDB.id == lot_id).first()
+        if not lot:
+            logger.warning(f"Lot {lot_id} not found")
+            return
+        
+        logger.info(f"Checking completion status for lot {lot_id} (current status: {lot.status})")
+        
+        # Проверяем только если лот в статусе 'in_production'
+        if lot.status != 'in_production':
+            logger.info(f"Lot {lot_id} is not in 'in_production' status, skipping check")
+            return
+        
+        # Проверяем, есть ли незавершенные наладки для этого лота
+        active_setups = db.query(SetupDB).filter(
+            SetupDB.lot_id == lot_id,
+            SetupDB.status.in_(['created', 'pending_qc', 'allowed', 'started', 'queued']),
+            SetupDB.end_time == None
+        ).count()
+        
+        logger.info(f"Found {active_setups} active setups for lot {lot_id}")
+        
+        if active_setups == 0:
+            # Все наладки завершены, переводим лот в статус 'post_production'
+            logger.info(f"All setups completed for lot {lot_id}, updating status to 'post_production'")
+            lot.status = 'post_production'
+            db.commit()
+            
+            # Синхронизируем с Telegram-ботом
+            try:
+                await sync_lot_status_to_telegram_bot(lot_id, 'post_production')
+            except Exception as sync_error:
+                logger.error(f"Failed to sync lot status to Telegram bot: {sync_error}")
+                # Не прерываем выполнение, если синхронизация не удалась
+        
+    except Exception as e:
+        logger.error(f"Error checking lot completion for lot {lot_id}: {e}", exc_info=True)
+
+async def sync_lot_status_to_telegram_bot(lot_id: int, status: str):
+    """
+    Синхронизирует статус лота с Telegram-ботом через прямое обновление БД
+    """
+    try:
+        # Обновляем статус лота в БД напрямую (Telegram-бот использует ту же БД)
+        from sqlalchemy import create_engine, text
+        from sqlalchemy.orm import sessionmaker
+        
+        # Используем ту же БД, что и Telegram-бот
+        DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://postgres:password@localhost:5432/isramat_bot')
+        
+        # Создаем отдельное соединение для синхронизации
+        sync_engine = create_engine(DATABASE_URL)
+        SyncSession = sessionmaker(bind=sync_engine)
+        
+        with SyncSession() as sync_session:
+            # Обновляем статус лота в БД
+            result = sync_session.execute(
+                text("UPDATE lots SET status = :status WHERE id = :lot_id"),
+                {"status": status, "lot_id": lot_id}
+            )
+            sync_session.commit()
+            
+            if result.rowcount > 0:
+                logger.info(f"Successfully synced lot {lot_id} status to '{status}' in Telegram bot DB")
+            else:
+                logger.warning(f"No lot found with ID {lot_id} for status sync")
+                
+    except Exception as e:
+        logger.error(f"Error syncing lot status to Telegram bot DB: {e}")
+
 @app.post("/setups/{setup_id}/complete")
 async def complete_setup(setup_id: int, db: Session = Depends(get_db_session)):
     """
@@ -826,6 +903,10 @@ async def complete_setup(setup_id: int, db: Session = Depends(get_db_session)):
             db.commit()
             logger.info("Successfully committed changes to database")
             db.refresh(setup)
+            
+            # Проверяем, завершены ли все наладки для лота и обновляем статус лота
+            await check_lot_completion_and_update_status(setup.lot_id, db)
+            
         except Exception as db_error:
             logger.error(f"Database error during commit: {db_error}")
             db.rollback()
@@ -1663,6 +1744,17 @@ async def get_employees(db: Session = Depends(get_db_session)):
 # --- END NEW ENDPOINT ---
 
 # <<< НОВЫЕ Pydantic МОДЕЛИ ДЛЯ LOT >>>
+from enum import Enum
+
+class LotStatus(str, Enum):
+    """Статусы лотов для синхронизации между Telegram-ботом и FastAPI"""
+    NEW = "new"                    # Новый лот от Order Manager
+    IN_PRODUCTION = "in_production"  # Лот в производстве (после начала наладки)
+    POST_PRODUCTION = "post_production"  # Лот после производства (все наладки завершены)
+    COMPLETED = "completed"        # Завершенный лот
+    CANCELLED = "cancelled"        # Отмененный лот
+    ACTIVE = "active"             # Устаревший статус (для совместимости)
+
 class LotBase(BaseModel):
     lot_number: str
     part_id: int
@@ -1680,8 +1772,9 @@ class LotResponse(LotBase):
     id: int
     order_manager_id: Optional[int] = None
     created_by_order_manager_at: Optional[datetime] = None
-    status: str
+    status: LotStatus
     created_at: Optional[datetime] = None # <--- СДЕЛАНО ОПЦИОНАЛЬНЫМ
+    total_planned_quantity: Optional[int] = None # Общее количество (плановое + дополнительное)
     part: Optional[PartResponse] = None # Для возврата информации о детали вместе с лотом
 
     class Config:
@@ -1727,8 +1820,8 @@ async def create_lot(
             logger.error("Критическая ошибка: lot_number отсутствует или пуст в db_lot_data перед созданием LotDB.")
             raise HTTPException(status_code=500, detail="Internal error: lot_number is missing for LotDB creation.")
 
-        logger.info(f"Попытка создать объект LotDB с данными: {db_lot_data} и status='new'")
-        db_lot = LotDB(**db_lot_data, status='new') # Статус 'new' по умолчанию
+        logger.info(f"Попытка создать объект LotDB с данными: {db_lot_data} и status='{LotStatus.NEW.value}'")
+        db_lot = LotDB(**db_lot_data, status=LotStatus.NEW.value) # Статус 'new' по умолчанию
         logger.info(f"Объект LotDB создан в памяти (ID пока нет).")
 
         db.add(db_lot)
@@ -1792,32 +1885,578 @@ async def create_lot(
 @app.get("/lots/", response_model=List[LotResponse], tags=["Lots"])
 async def get_lots(
     response: Response, 
-    search: Optional[str] = Query(None, description="Поисковый запрос для номера лота или номера чертежа детали"),
+    search: Optional[str] = Query(None, description="Поисковый запрос для номера лота"),
+    part_search: Optional[str] = Query(None, description="Поисковый запрос для номера детали"),
+    status_filter: Optional[str] = Query(None, description="Фильтр по статусам (через запятую, например: new,in_production)"),
     skip: int = Query(0, ge=0, description="Количество записей для пропуска (пагинация)"),
     limit: int = Query(100, ge=1, le=500, description="Максимальное количество записей для возврата (пагинация)"),
     db: Session = Depends(get_db_session)
 ):
     """
     Получить список всех лотов.
-    Поддерживает поиск по `lot_number` (номер лота) и `drawing_number` (номер чертежа связанной детали) (частичное совпадение без учета регистра).
+    Поддерживает поиск по `lot_number` (номер лота) и отдельный поиск по `drawing_number` (номер чертежа связанной детали) (частичное совпадение без учета регистра).
     Поддерживает пагинацию через `skip` и `limit`.
     Сортировка по убыванию ID лота (новые сверху).
     """
     query = db.query(LotDB).options(selectinload(LotDB.part))
     
+    # Поиск по номеру лота
     if search:
         search_term = f"%{search.lower()}%"
-        query = query.join(LotDB.part).filter( 
-            (func.lower(LotDB.lot_number).like(search_term)) |
-            (func.lower(PartDB.drawing_number).like(search_term))
-        )
+        query = query.filter(func.lower(LotDB.lot_number).like(search_term))
+    
+    # Поиск по номеру детали
+    if part_search:
+        part_search_term = f"%{part_search.lower()}%"
+        query = query.join(LotDB.part).filter(func.lower(PartDB.drawing_number).like(part_search_term))
+    
+    # Фильтрация по статусам
+    if status_filter:
+        statuses = [status.strip() for status in status_filter.split(',') if status.strip()]
+        if statuses:
+            query = query.filter(LotDB.status.in_(statuses))
     
     total_count = query.count() 
 
     lots = query.order_by(LotDB.id.desc()).offset(skip).limit(limit).all()
-    logger.info(f"Запрос списка лотов: search='{search}', skip={skip}, limit={limit}. Возвращено {len(lots)} из {total_count} лотов.")
+    logger.info(f"Запрос списка лотов: search='{search}', part_search='{part_search}', skip={skip}, limit={limit}. Возвращено {len(lots)} из {total_count} лотов.")
     
     response.headers["X-Total-Count"] = str(total_count)
     # УДАЛЕНО: response.headers["Access-Control-Expose-Headers"] = "X-Total-Count" 
         
     return lots
+
+# <<< НОВЫЙ ЭНДПОИНТ ДЛЯ ОБНОВЛЕНИЯ СТАТУСА ЛОТА >>>
+class LotStatusUpdate(BaseModel):
+    status: LotStatus
+
+class LotQuantityUpdate(BaseModel):
+    additional_quantity: int = Field(..., ge=0, description="Дополнительное количество (неотрицательное число)")
+
+@app.patch("/lots/{lot_id}/status", response_model=LotResponse, tags=["Lots"])
+async def update_lot_status(
+    lot_id: int,
+    status_update: LotStatusUpdate,
+    db: Session = Depends(get_db_session)
+):
+    """
+    Обновить статус лота.
+    Используется для синхронизации статусов между Telegram-ботом и FastAPI.
+    """
+    try:
+        # Найти лот
+        lot = db.query(LotDB).options(selectinload(LotDB.part)).filter(LotDB.id == lot_id).first()
+        if not lot:
+            raise HTTPException(status_code=404, detail=f"Lot with id {lot_id} not found")
+        
+        old_status = lot.status
+        lot.status = status_update.status.value
+        
+        db.commit()
+        db.refresh(lot)
+        
+        logger.info(f"Статус лота {lot_id} обновлен с '{old_status}' на '{status_update.status.value}'")
+        
+        return lot
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Ошибка при обновлении статуса лота {lot_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error while updating lot status")
+
+# <<< ЭНДПОИНТ ДЛЯ ПОЛУЧЕНИЯ ОДНОГО ЛОТА >>>
+@app.get("/lots/{lot_id}", response_model=LotResponse, tags=["Lots"])
+async def get_lot(lot_id: int, db: Session = Depends(get_db_session)):
+    """
+    Получить информацию о конкретном лоте.
+    """
+    lot = db.query(LotDB).options(selectinload(LotDB.part)).filter(LotDB.id == lot_id).first()
+    if not lot:
+        raise HTTPException(status_code=404, detail=f"Lot with id {lot_id} not found")
+    
+    return lot
+
+@app.patch("/lots/{lot_id}/quantity", response_model=LotResponse, tags=["Lots"])
+async def update_lot_quantity(
+    lot_id: int, 
+    quantity_update: LotQuantityUpdate, 
+    db: Session = Depends(get_db_session)
+):
+    """
+    Обновить дополнительное количество для лота.
+    Доступно только для лотов в статусах 'new' и 'in_production'.
+    total_planned_quantity = initial_planned_quantity + additional_quantity
+    """
+    try:
+        # Найти лот
+        lot = db.query(LotDB).options(selectinload(LotDB.part)).filter(LotDB.id == lot_id).first()
+        if not lot:
+            raise HTTPException(status_code=404, detail=f"Лот с ID {lot_id} не найден")
+        
+        # Проверить, что лот в подходящем статусе
+        allowed_statuses = [LotStatus.NEW, LotStatus.IN_PRODUCTION]
+        if lot.status not in allowed_statuses:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Изменение количества доступно только для статусов: {', '.join(allowed_statuses)}. Текущий статус: '{lot.status}'"
+            )
+        
+        # Рассчитать новое общее количество
+        initial_quantity = lot.initial_planned_quantity or 0
+        new_total_quantity = initial_quantity + quantity_update.additional_quantity
+        
+        # Обновить total_planned_quantity
+        lot.total_planned_quantity = new_total_quantity
+        db.commit()
+        db.refresh(lot)
+        
+        logger.info(f"Количество лота {lot_id} обновлено: initial={initial_quantity}, additional={quantity_update.additional_quantity}, total={new_total_quantity}")
+        
+        return lot
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Ошибка при обновлении количества лота {lot_id}: {str(e)}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Внутренняя ошибка сервера при обновлении количества: {str(e)}")
+
+@app.patch("/lots/{lot_id}/close", response_model=LotResponse, tags=["Lots"])
+async def close_lot(lot_id: int, db: Session = Depends(get_db_session)):
+    """
+    Закрыть лот (перевести в статус 'completed').
+    Доступно только для лотов в статусе 'post_production'.
+    """
+    try:
+        lot = db.query(LotDB).options(selectinload(LotDB.part)).filter(LotDB.id == lot_id).first()
+        if not lot:
+            raise HTTPException(status_code=404, detail=f"Лот с ID {lot_id} не найден")
+        
+        logger.info(f"Attempting to close lot {lot_id} (current status: {lot.status})")
+        
+        if lot.status != 'post_production':
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Нельзя закрыть лот в статусе '{lot.status}'. Ожидался статус 'post_production'"
+            )
+        
+        # Обновляем статус лота
+        lot.status = 'completed'
+        db.commit()
+        db.refresh(lot)
+        
+        logger.info(f"Successfully closed lot {lot_id}")
+        
+        # Синхронизируем с Telegram-ботом
+        try:
+            await sync_lot_status_to_telegram_bot(lot_id, 'completed')
+        except Exception as sync_error:
+            logger.error(f"Failed to sync lot closure to Telegram bot: {sync_error}")
+            # Не прерываем выполнение, если синхронизация не удалась
+        
+        return lot
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error closing lot {lot_id}: {e}", exc_info=True)
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Внутренняя ошибка сервера при закрытии лота: {str(e)}")
+
+# <<< КОНЕЦ НОВЫХ ЭНДПОИНТОВ ДЛЯ ЛОТОВ >>>
+
+# === ОТЧЕТНОСТЬ И АНАЛИТИКА ДЛЯ ORDER MANAGER ===
+
+class LotSummaryReport(BaseModel):
+    """Сводный отчет по лотам"""
+    total_lots: int
+    lots_by_status: Dict[str, int]
+    total_planned_quantity: int
+    total_produced_quantity: int
+    average_completion_time_hours: Optional[float] = None
+    on_time_delivery_rate: float  # Процент лотов, выполненных в срок
+
+class LotDetailReport(BaseModel):
+    """Детальный отчет по конкретному лоту"""
+    lot_id: int
+    lot_number: str
+    drawing_number: str
+    material: Optional[str]
+    status: str
+    initial_planned_quantity: Optional[int]
+    total_produced_quantity: int
+    total_good_quantity: int
+    total_defect_quantity: int
+    total_rework_quantity: int
+    created_at: Optional[datetime]
+    started_at: Optional[datetime]
+    completed_at: Optional[datetime]
+    due_date: Optional[datetime]
+    is_overdue: bool
+    completion_time_hours: Optional[float]
+    setups_count: int
+    batches_count: int
+    machines_used: List[str]
+    operators_involved: List[str]
+
+class ProductionPerformanceReport(BaseModel):
+    """Отчет по производительности"""
+    period_start: datetime
+    period_end: datetime
+    total_setups: int
+    total_batches: int
+    total_produced_quantity: int
+    average_cycle_time_seconds: Optional[float]
+    machine_utilization: Dict[str, float]  # Процент использования по станкам
+    operator_productivity: Dict[str, int]  # Количество деталей по операторам
+
+class QualityReport(BaseModel):
+    """Отчет по качеству"""
+    period_start: datetime
+    period_end: datetime
+    total_inspected_quantity: int
+    good_quantity: int
+    defect_quantity: int
+    rework_quantity: int
+    defect_rate: float  # Процент брака
+    rework_rate: float  # Процент переборки
+    quality_by_drawing: Dict[str, Dict[str, int]]  # Качество по чертежам
+
+@app.get("/reports/lots-summary", response_model=LotSummaryReport, tags=["Reports"])
+async def get_lots_summary_report(
+    order_manager_id: Optional[int] = Query(None, description="ID менеджера заказов для фильтрации"),
+    status_filter: Optional[str] = Query(None, description="Фильтр по статусу лота"),
+    date_from: Optional[datetime] = Query(None, description="Начальная дата для фильтрации"),
+    date_to: Optional[datetime] = Query(None, description="Конечная дата для фильтрации"),
+    db: Session = Depends(get_db_session)
+):
+    """
+    Получить сводный отчет по лотам.
+    Включает статистику по статусам, количествам и производительности.
+    """
+    try:
+        # Базовый запрос
+        query = db.query(LotDB)
+        
+        # Применяем фильтры
+        if order_manager_id:
+            query = query.filter(LotDB.order_manager_id == order_manager_id)
+        if status_filter:
+            query = query.filter(LotDB.status == status_filter)
+        if date_from:
+            query = query.filter(LotDB.created_at >= date_from)
+        if date_to:
+            query = query.filter(LotDB.created_at <= date_to)
+        
+        lots = query.all()
+        total_lots = len(lots)
+        
+        # Статистика по статусам
+        lots_by_status = {}
+        for lot in lots:
+            status = lot.status or 'unknown'
+            lots_by_status[status] = lots_by_status.get(status, 0) + 1
+        
+        # Подсчет количеств
+        total_planned_quantity = sum(lot.initial_planned_quantity or 0 for lot in lots)
+        
+        # Подсчет произведенного количества через батчи
+        lot_ids = [lot.id for lot in lots]
+        if lot_ids:
+            produced_batches = db.query(BatchDB).filter(
+                BatchDB.lot_id.in_(lot_ids),
+                BatchDB.current_location.in_(['warehouse_counted', 'good', 'defect', 'rework_repair'])
+            ).all()
+            total_produced_quantity = sum(batch.current_quantity for batch in produced_batches)
+        else:
+            total_produced_quantity = 0
+        
+        # Расчет среднего времени выполнения
+        completed_lots = [lot for lot in lots if lot.status == 'completed']
+        if completed_lots:
+            completion_times = []
+            for lot in completed_lots:
+                if lot.created_at and lot.created_by_order_manager_at:
+                    # Ищем время завершения последней наладки
+                    last_setup = db.query(SetupDB).filter(
+                        SetupDB.lot_id == lot.id,
+                        SetupDB.status == 'completed'
+                    ).order_by(SetupDB.end_time.desc()).first()
+                    
+                    if last_setup and last_setup.end_time:
+                        completion_time = (last_setup.end_time - lot.created_by_order_manager_at).total_seconds() / 3600
+                        completion_times.append(completion_time)
+            
+            average_completion_time_hours = sum(completion_times) / len(completion_times) if completion_times else None
+        else:
+            average_completion_time_hours = None
+        
+        # Расчет процента выполнения в срок
+        on_time_count = 0
+        lots_with_due_date = [lot for lot in completed_lots if lot.due_date]
+        
+        for lot in lots_with_due_date:
+            last_setup = db.query(SetupDB).filter(
+                SetupDB.lot_id == lot.id,
+                SetupDB.status == 'completed'
+            ).order_by(SetupDB.end_time.desc()).first()
+            
+            if last_setup and last_setup.end_time and last_setup.end_time <= lot.due_date:
+                on_time_count += 1
+        
+        on_time_delivery_rate = (on_time_count / len(lots_with_due_date)) * 100 if lots_with_due_date else 0.0
+        
+        return LotSummaryReport(
+            total_lots=total_lots,
+            lots_by_status=lots_by_status,
+            total_planned_quantity=total_planned_quantity,
+            total_produced_quantity=total_produced_quantity,
+            average_completion_time_hours=average_completion_time_hours,
+            on_time_delivery_rate=on_time_delivery_rate
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка при генерации сводного отчета по лотам: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ошибка при генерации отчета: {str(e)}")
+
+@app.get("/reports/lots/{lot_id}/detail", response_model=LotDetailReport, tags=["Reports"])
+async def get_lot_detail_report(lot_id: int, db: Session = Depends(get_db_session)):
+    """
+    Получить детальный отчет по конкретному лоту.
+    Включает полную информацию о жизненном цикле лота.
+    """
+    try:
+        # Получаем лот с деталью
+        lot = db.query(LotDB).options(selectinload(LotDB.part)).filter(LotDB.id == lot_id).first()
+        if not lot:
+            raise HTTPException(status_code=404, detail=f"Лот с ID {lot_id} не найден")
+        
+        # Получаем все наладки для лота
+        setups = db.query(SetupDB).options(
+            selectinload(SetupDB.machine),
+            selectinload(SetupDB.operator)
+        ).filter(SetupDB.lot_id == lot_id).all()
+        
+        # Получаем все батчи для лота
+        batches = db.query(BatchDB).filter(BatchDB.lot_id == lot_id).all()
+        
+        # Подсчет количеств
+        total_produced_quantity = sum(batch.current_quantity for batch in batches 
+                                    if batch.current_location in ['warehouse_counted', 'good', 'defect', 'rework_repair'])
+        
+        total_good_quantity = sum(batch.current_quantity for batch in batches 
+                                if batch.current_location == 'good')
+        
+        total_defect_quantity = sum(batch.current_quantity for batch in batches 
+                                  if batch.current_location == 'defect')
+        
+        total_rework_quantity = sum(batch.current_quantity for batch in batches 
+                                  if batch.current_location == 'rework_repair')
+        
+        # Определение временных меток
+        started_at = min(setup.start_time for setup in setups if setup.start_time) if setups else None
+        completed_at = max(setup.end_time for setup in setups if setup.end_time and setup.status == 'completed') if setups else None
+        
+        # Расчет времени выполнения
+        completion_time_hours = None
+        if started_at and completed_at:
+            completion_time_hours = (completed_at - started_at).total_seconds() / 3600
+        
+        # Проверка просрочки
+        is_overdue = False
+        if lot.due_date and lot.status != 'completed':
+            is_overdue = datetime.now(timezone.utc) > lot.due_date.replace(tzinfo=timezone.utc)
+        elif lot.due_date and completed_at:
+            is_overdue = completed_at.replace(tzinfo=timezone.utc) > lot.due_date.replace(tzinfo=timezone.utc)
+        
+        # Список станков и операторов
+        machines_used = list(set(setup.machine.name for setup in setups if setup.machine))
+        operators_involved = list(set(setup.operator.full_name for setup in setups if setup.operator and setup.operator.full_name))
+        
+        return LotDetailReport(
+            lot_id=lot.id,
+            lot_number=lot.lot_number,
+            drawing_number=lot.part.drawing_number if lot.part else 'N/A',
+            material=lot.part.material if lot.part else None,
+            status=lot.status or 'unknown',
+            initial_planned_quantity=lot.initial_planned_quantity,
+            total_produced_quantity=total_produced_quantity,
+            total_good_quantity=total_good_quantity,
+            total_defect_quantity=total_defect_quantity,
+            total_rework_quantity=total_rework_quantity,
+            created_at=lot.created_at,
+            started_at=started_at,
+            completed_at=completed_at,
+            due_date=lot.due_date,
+            is_overdue=is_overdue,
+            completion_time_hours=completion_time_hours,
+            setups_count=len(setups),
+            batches_count=len(batches),
+            machines_used=machines_used,
+            operators_involved=operators_involved
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Ошибка при генерации детального отчета по лоту {lot_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ошибка при генерации отчета: {str(e)}")
+
+@app.get("/reports/production-performance", response_model=ProductionPerformanceReport, tags=["Reports"])
+async def get_production_performance_report(
+    date_from: datetime = Query(..., description="Начальная дата периода"),
+    date_to: datetime = Query(..., description="Конечная дата периода"),
+    order_manager_id: Optional[int] = Query(None, description="ID менеджера заказов для фильтрации"),
+    db: Session = Depends(get_db_session)
+):
+    """
+    Получить отчет по производительности за указанный период.
+    """
+    try:
+        # Базовый запрос для наладок в периоде
+        setups_query = db.query(SetupDB).filter(
+            SetupDB.created_at >= date_from,
+            SetupDB.created_at <= date_to
+        )
+        
+        if order_manager_id:
+            setups_query = setups_query.join(LotDB).filter(LotDB.order_manager_id == order_manager_id)
+        
+        setups = setups_query.options(
+            selectinload(SetupDB.machine),
+            selectinload(SetupDB.operator)
+        ).all()
+        
+        # Базовый запрос для батчей в периоде
+        batches_query = db.query(BatchDB).filter(
+            BatchDB.batch_time >= date_from,
+            BatchDB.batch_time <= date_to
+        )
+        
+        if order_manager_id:
+            batches_query = batches_query.join(LotDB).filter(LotDB.order_manager_id == order_manager_id)
+        
+        batches = batches_query.all()
+        
+        # Подсчет основных метрик
+        total_setups = len(setups)
+        total_batches = len(batches)
+        total_produced_quantity = sum(batch.current_quantity for batch in batches)
+        
+        # Среднее время цикла
+        cycle_times = [setup.cycle_time_seconds for setup in setups if setup.cycle_time_seconds]
+        average_cycle_time_seconds = sum(cycle_times) / len(cycle_times) if cycle_times else None
+        
+        # Использование станков (процент времени работы)
+        machine_utilization = {}
+        for setup in setups:
+            if setup.machine and setup.start_time and setup.end_time:
+                machine_name = setup.machine.name
+                work_time = (setup.end_time - setup.start_time).total_seconds()
+                
+                if machine_name not in machine_utilization:
+                    machine_utilization[machine_name] = 0
+                machine_utilization[machine_name] += work_time
+        
+        # Конвертируем в проценты (предполагаем 8-часовой рабочий день)
+        period_hours = (date_to - date_from).total_seconds() / 3600
+        working_hours_per_day = 8
+        max_work_time = min(period_hours, working_hours_per_day * ((date_to - date_from).days + 1))
+        
+        for machine_name in machine_utilization:
+            utilization_hours = machine_utilization[machine_name] / 3600
+            machine_utilization[machine_name] = (utilization_hours / max_work_time) * 100 if max_work_time > 0 else 0
+        
+        # Производительность операторов
+        operator_productivity = {}
+        for batch in batches:
+            if batch.operator_id:
+                operator = db.query(EmployeeDB).filter(EmployeeDB.id == batch.operator_id).first()
+                if operator and operator.full_name:
+                    operator_name = operator.full_name
+                    if operator_name not in operator_productivity:
+                        operator_productivity[operator_name] = 0
+                    operator_productivity[operator_name] += batch.current_quantity
+        
+        return ProductionPerformanceReport(
+            period_start=date_from,
+            period_end=date_to,
+            total_setups=total_setups,
+            total_batches=total_batches,
+            total_produced_quantity=total_produced_quantity,
+            average_cycle_time_seconds=average_cycle_time_seconds,
+            machine_utilization=machine_utilization,
+            operator_productivity=operator_productivity
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка при генерации отчета по производительности: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ошибка при генерации отчета: {str(e)}")
+
+@app.get("/reports/quality", response_model=QualityReport, tags=["Reports"])
+async def get_quality_report(
+    date_from: datetime = Query(..., description="Начальная дата периода"),
+    date_to: datetime = Query(..., description="Конечная дата периода"),
+    order_manager_id: Optional[int] = Query(None, description="ID менеджера заказов для фильтрации"),
+    db: Session = Depends(get_db_session)
+):
+    """
+    Получить отчет по качеству за указанный период.
+    """
+    try:
+        # Запрос батчей, прошедших инспекцию в периоде
+        batches_query = db.query(BatchDB).filter(
+            BatchDB.qc_date >= date_from,
+            BatchDB.qc_date <= date_to,
+            BatchDB.current_location.in_(['good', 'defect', 'rework_repair'])
+        )
+        
+        if order_manager_id:
+            batches_query = batches_query.join(LotDB).filter(LotDB.order_manager_id == order_manager_id)
+        
+        batches = batches_query.options(selectinload(BatchDB.lot).selectinload(LotDB.part)).all()
+        
+        # Подсчет количеств
+        total_inspected_quantity = sum(batch.current_quantity for batch in batches)
+        good_quantity = sum(batch.current_quantity for batch in batches if batch.current_location == 'good')
+        defect_quantity = sum(batch.current_quantity for batch in batches if batch.current_location == 'defect')
+        rework_quantity = sum(batch.current_quantity for batch in batches if batch.current_location == 'rework_repair')
+        
+        # Расчет процентов
+        defect_rate = (defect_quantity / total_inspected_quantity) * 100 if total_inspected_quantity > 0 else 0.0
+        rework_rate = (rework_quantity / total_inspected_quantity) * 100 if total_inspected_quantity > 0 else 0.0
+        
+        # Качество по чертежам
+        quality_by_drawing = {}
+        for batch in batches:
+            if batch.lot and batch.lot.part:
+                drawing_number = batch.lot.part.drawing_number
+                if drawing_number not in quality_by_drawing:
+                    quality_by_drawing[drawing_number] = {'good': 0, 'defect': 0, 'rework': 0}
+                
+                if batch.current_location == 'good':
+                    quality_by_drawing[drawing_number]['good'] += batch.current_quantity
+                elif batch.current_location == 'defect':
+                    quality_by_drawing[drawing_number]['defect'] += batch.current_quantity
+                elif batch.current_location == 'rework_repair':
+                    quality_by_drawing[drawing_number]['rework'] += batch.current_quantity
+        
+        return QualityReport(
+            period_start=date_from,
+            period_end=date_to,
+            total_inspected_quantity=total_inspected_quantity,
+            good_quantity=good_quantity,
+            defect_quantity=defect_quantity,
+            rework_quantity=rework_quantity,
+            defect_rate=defect_rate,
+            rework_rate=rework_rate,
+            quality_by_drawing=quality_by_drawing
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка при генерации отчета по качеству: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ошибка при генерации отчета: {str(e)}")
+
+# === КОНЕЦ ОТЧЕТНОСТИ ===
