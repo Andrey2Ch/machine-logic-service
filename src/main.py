@@ -16,14 +16,14 @@ from enum import Enum
 from sqlalchemy.orm import Session, aliased, selectinload
 from fastapi import Depends, Body
 from src.database import Base, initialize_database, get_db_session
-from src.models.models import SetupDB, ReadingDB, MachineDB, EmployeeDB, PartDB, LotDB, BatchDB
+from src.models.models import SetupDB, ReadingDB, MachineDB, EmployeeDB, PartDB, LotDB, BatchDB, CardDB
 from datetime import datetime, timezone
 from src.utils.sheets_handler import save_to_sheets
 import asyncio
 import httpx
 import aiohttp
 from src.services.notification_service import send_setup_approval_notifications, send_batch_discrepancy_alert
-from sqlalchemy import func, desc, case
+from sqlalchemy import func, desc, case, text
 from sqlalchemy.exc import IntegrityError
 
 logger = logging.getLogger(__name__)
@@ -1214,11 +1214,11 @@ class WarehousePendingBatchItem(BaseModel):
     batch_time: Optional[datetime]
     operator_name: Optional[str]
     machine_name: Optional[str]  # Добавляем поле для названия станка
+    card_number: Optional[int] = None  # Добавляем номер карточки
 
     class Config:
         from_attributes = True # Pydantic v2, было orm_mode
         populate_by_name = True # Pydantic v2, было allow_population_by_field_name
-        # populate_by_name больше не нужен для этого поля
 
 class AcceptWarehousePayload(BaseModel):
     recounted_quantity: int
@@ -1229,13 +1229,14 @@ async def get_warehouse_pending_batches(db: Session = Depends(get_db_session)):
     """Получить список батчей, ожидающих приемки на склад (статус 'production' или 'sorting')."""
     try:
         batches = (
-            db.query(BatchDB, PartDB, LotDB, EmployeeDB, MachineDB)
+            db.query(BatchDB, PartDB, LotDB, EmployeeDB, MachineDB, CardDB)
             .select_from(BatchDB)
             .join(LotDB, BatchDB.lot_id == LotDB.id)
             .join(PartDB, LotDB.part_id == PartDB.id)
             .outerjoin(EmployeeDB, BatchDB.operator_id == EmployeeDB.id)
             .outerjoin(SetupDB, BatchDB.setup_job_id == SetupDB.id)
             .outerjoin(MachineDB, SetupDB.machine_id == MachineDB.id)
+            .outerjoin(CardDB, BatchDB.id == CardDB.batch_id)
             .filter(BatchDB.current_location.in_(['production', 'sorting'])) # Включены 'production' и 'sorting'
             .order_by(BatchDB.batch_time.asc())
             .all()
@@ -1243,7 +1244,7 @@ async def get_warehouse_pending_batches(db: Session = Depends(get_db_session)):
 
         result = []
         for row in batches:
-            batch_obj, part_obj, lot_obj, emp_obj, machine_obj = row
+            batch_obj, part_obj, lot_obj, emp_obj, machine_obj, card_obj = row
             # Собираем данные как есть из БД
             item_data = {
                 'id': batch_obj.id,
@@ -1254,6 +1255,7 @@ async def get_warehouse_pending_batches(db: Session = Depends(get_db_session)):
                 'batch_time': batch_obj.batch_time,
                 'operator_name': emp_obj.full_name if emp_obj else None,
                 'machine_name': machine_obj.name if machine_obj else None,
+                'card_number': card_obj.card_number if card_obj else None
             }
             # Валидируем и добавляем
             result.append(WarehousePendingBatchItem.model_validate(item_data))
@@ -1577,6 +1579,10 @@ class BatchLabelInfo(BaseModel):
     initial_quantity: int
     current_quantity: int
     batch_quantity: int
+    # Новые поля для складской информации
+    warehouse_received_at: Optional[datetime] = None
+    warehouse_employee_name: Optional[str] = None
+    recounted_quantity: Optional[int] = None
 
 @app.get("/machines/{machine_id}/active-batch-label", response_model=BatchLabelInfo)
 async def get_active_batch_label(machine_id: int, db: Session = Depends(get_db_session)):
@@ -1656,7 +1662,10 @@ async def get_active_batch_label(machine_id: int, db: Session = Depends(get_db_s
         end_time=final_end_time_str,
         initial_quantity=final_initial_quantity,
         current_quantity=final_current_quantity,
-        batch_quantity=final_batch_quantity
+        batch_quantity=final_batch_quantity,
+        warehouse_received_at=active_batch.warehouse_received_at,
+        warehouse_employee_name=active_batch.operator_name,
+        recounted_quantity=active_batch.recounted_quantity
     )
 
 class CreateBatchInput(BaseModel):
@@ -2559,7 +2568,10 @@ async def get_batch_availability(machine_id: int, db: Session = Depends(get_db_s
             end_time=final_end_time_str,
             initial_quantity=final_initial_quantity,
             current_quantity=final_current_quantity,
-            batch_quantity=final_batch_quantity
+            batch_quantity=final_batch_quantity,
+            warehouse_received_at=last_batch.warehouse_received_at,
+            warehouse_employee_name=last_batch.operator_name,
+            recounted_quantity=last_batch.recounted_quantity
         )
 
     return BatchAvailabilityInfo(
@@ -2570,3 +2582,414 @@ async def get_batch_availability(machine_id: int, db: Session = Depends(get_db_s
         last_batch_data=last_batch_data
     )
 # --- END NEW ENDPOINT FOR SORTING LABELS ---
+
+# --- CARD SYSTEM ENDPOINTS ---
+
+class CardUseRequest(BaseModel):
+    """Запрос на использование карточки"""
+    batch_id: int
+
+class CardInfo(BaseModel):
+    """Информация о карточке"""
+    card_number: int
+    machine_id: int
+    machine_name: str
+    status: str
+    batch_id: Optional[int] = None
+    last_event: datetime
+    
+    class Config:
+        from_attributes = True
+
+def find_machine_by_flexible_code(db: Session, machine_code: str) -> Optional[MachineDB]:
+    """
+    Гибкий поиск станка по коду с учетом различных форматов:
+    SR-32, SR32, sr 32, SR 32 и т.д.
+    """
+    # Извлекаем только цифры из кода
+    import re
+    digits = re.findall(r'\d+', machine_code)
+    if not digits:
+        return None
+    
+    machine_number = int(digits[0])
+    
+    # Ищем станок по номеру в различных форматах
+    possible_names = [
+        f"SR-{machine_number}",
+        f"SR{machine_number}",
+        f"sr-{machine_number}",
+        f"sr{machine_number}",
+        f"Станок {machine_number}",
+        f"Machine {machine_number}",
+        str(machine_number)
+    ]
+    
+    for name in possible_names:
+        machine = db.query(MachineDB).filter(
+            func.lower(MachineDB.name) == name.lower()
+        ).first()
+        if machine:
+            return machine
+    
+    # Если точного совпадения нет, ищем по содержанию номера
+    machine = db.query(MachineDB).filter(
+        MachineDB.name.ilike(f"%{machine_number}%")
+    ).first()
+    
+    return machine
+
+@app.get("/cards/free", tags=["Cards"])
+async def get_free_cards(
+    machine_id: int, 
+    limit: int = Query(4, ge=1, le=20, description="Количество карточек для возврата (по умолчанию 4)"),
+    db: Session = Depends(get_db_session)
+):
+    """Получить список свободных карточек для станка (по умолчанию первые 4)"""
+    try:
+        cards = db.query(CardDB).filter(
+            CardDB.machine_id == machine_id,
+            CardDB.status == 'free'
+        ).order_by(CardDB.card_number).limit(limit).all()
+        
+        return {"cards": [card.card_number for card in cards]}
+    except Exception as e:
+        logger.error(f"Error fetching free cards for machine {machine_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error while fetching free cards")
+
+@app.patch("/cards/{card_number}/use", tags=["Cards"])
+async def use_card(card_number: int, data: CardUseRequest, db: Session = Depends(get_db_session)):
+    """Занять карточку (ОДИН КЛИК) - optimistic locking"""
+    try:
+        # Сначала находим станок по batch_id
+        batch = db.query(BatchDB).filter(BatchDB.id == data.batch_id).first()
+        if not batch:
+            raise HTTPException(status_code=404, detail="Батч не найден")
+        
+        # Получаем machine_id из setup_job
+        setup = db.query(SetupDB).filter(SetupDB.id == batch.setup_job_id).first()
+        if not setup:
+            raise HTTPException(status_code=404, detail="Наладка для батча не найдена")
+        
+        machine_id = setup.machine_id
+        
+        # Используем optimistic locking для исключения гонок
+        result = db.execute(
+            text("""UPDATE cards 
+                   SET status = 'in_use', batch_id = :batch_id, last_event = NOW()
+                   WHERE card_number = :card_number AND machine_id = :machine_id AND status = 'free'"""),
+            {"card_number": card_number, "machine_id": machine_id, "batch_id": data.batch_id}
+        )
+        
+        if result.rowcount == 0:
+            # Проверяем, существует ли карточка
+            card = db.query(CardDB).filter(
+                CardDB.card_number == card_number, 
+                CardDB.machine_id == machine_id
+            ).first()
+            if not card:
+                raise HTTPException(status_code=404, detail="Карточка не найдена для этого станка")
+            else:
+                raise HTTPException(status_code=409, detail="Карточка уже занята")
+        
+        db.commit()
+        
+        logger.info(f"Card {card_number} (machine {machine_id}) successfully assigned to batch {data.batch_id}")
+        return {"message": f"Карточка #{card_number} закреплена за батчем {data.batch_id}"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error using card {card_number}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error while using card")
+
+@app.patch("/cards/{card_number}/return", tags=["Cards"])
+async def return_card(card_number: int, machine_id: int, db: Session = Depends(get_db_session)):
+    """Вернуть карточку в оборот"""
+    try:
+        card = db.query(CardDB).filter(
+            CardDB.card_number == card_number,
+            CardDB.machine_id == machine_id
+        ).first()
+        if not card:
+            raise HTTPException(status_code=404, detail="Карточка не найдена")
+        
+        card.status = 'free'
+        card.batch_id = None
+        card.last_event = datetime.now()
+        
+        db.commit()
+        
+        logger.info(f"Card {card_number} (machine {machine_id}) returned to circulation")
+        return {"message": f"Карточка #{card_number} возвращена в оборот"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error returning card {card_number}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error while returning card")
+
+@app.patch("/cards/{card_number}/lost", tags=["Cards"])
+async def mark_card_lost(card_number: int, machine_id: int, db: Session = Depends(get_db_session)):
+    """Отметить карточку как потерянную"""
+    try:
+        card = db.query(CardDB).filter(
+            CardDB.card_number == card_number,
+            CardDB.machine_id == machine_id
+        ).first()
+        if not card:
+            raise HTTPException(status_code=404, detail="Карточка не найдена")
+        
+        card.status = 'lost'
+        card.last_event = datetime.now()
+        
+        db.commit()
+        
+        logger.info(f"Card {card_number} (machine {machine_id}) marked as lost")
+        return {"message": f"Карточка #{card_number} отмечена как потерянная"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error marking card {card_number} as lost: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error while marking card as lost")
+
+@app.get("/cards/{card_number}/machine/{machine_code}", response_model=CardInfo, tags=["Cards"])
+async def get_card_by_machine_code(card_number: int, machine_code: str, db: Session = Depends(get_db_session)):
+    """Получить карточку по номеру и коду станка (гибкий поиск)"""
+    try:
+        # Ищем станок по гибкому коду
+        machine = find_machine_by_flexible_code(db, machine_code)
+        if not machine:
+            raise HTTPException(status_code=404, detail=f"Станок с кодом '{machine_code}' не найден")
+        
+        # Ищем карточку
+        card = db.query(CardDB).filter(
+            CardDB.card_number == card_number,
+            CardDB.machine_id == machine.id
+        ).first()
+        
+        if not card:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Карточка #{card_number} для станка {machine.name} не найдена"
+            )
+        
+        return CardInfo(
+            card_number=card.card_number,
+            machine_id=card.machine_id,
+            machine_name=machine.name,
+            status=card.status,
+            batch_id=card.batch_id,
+            last_event=card.last_event
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting card {card_number} for machine {machine_code}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера")
+
+@app.get("/cards/search", tags=["Cards"])
+async def search_card_by_number(card_number: int, db: Session = Depends(get_db_session)):
+    """Поиск карточки только по номеру среди всех станков"""
+    try:
+        # Ищем все карточки с данным номером
+        cards = db.query(CardDB).join(MachineDB).filter(
+            CardDB.card_number == card_number
+        ).all()
+        
+        if not cards:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Карточка #{card_number} не найдена ни на одном станке"
+            )
+        
+        # Если найдена только одна карточка, возвращаем её
+        if len(cards) == 1:
+            card = cards[0]
+            machine = db.query(MachineDB).filter(MachineDB.id == card.machine_id).first()
+            
+            return {
+                "card_number": card.card_number,
+                "machine_id": card.machine_id,
+                "machine_name": machine.name if machine else "Неизвестно",
+                "status": card.status,
+                "batch_id": card.batch_id,
+                "last_event": card.last_event
+            }
+        
+        # Если найдено несколько карточек, возвращаем список
+        result = []
+        for card in cards:
+            machine = db.query(MachineDB).filter(MachineDB.id == card.machine_id).first()
+            result.append({
+                "card_number": card.card_number,
+                "machine_id": card.machine_id,
+                "machine_name": machine.name if machine else "Неизвестно",
+                "status": card.status,
+                "batch_id": card.batch_id,
+                "last_event": card.last_event
+            })
+        
+        return {"cards": result, "count": len(result)}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error searching card {card_number}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера")
+
+@app.get("/cards/{card_number}/batch", tags=["Cards"])
+async def get_batch_by_card(card_number: int, machine_code: str = Query(..., description="Код станка (например: SR-32, SR32, sr32)"), db: Session = Depends(get_db_session)):
+    """Получить информацию о батче по номеру карточки и коду станка для веб-дашборда"""
+    try:
+        # Ищем станок по гибкому коду
+        machine = find_machine_by_flexible_code(db, machine_code)
+        if not machine:
+            raise HTTPException(status_code=404, detail=f"Станок с кодом '{machine_code}' не найден")
+        
+        # Ищем карточку
+        card = db.query(CardDB).filter(
+            CardDB.card_number == card_number,
+            CardDB.machine_id == machine.id
+        ).first()
+        
+        if not card:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Карточка #{card_number} для станка {machine.name} не найдена"
+            )
+        
+        # Если карточка свободна - нет батча
+        if card.status == 'free' or not card.batch_id:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Карточка #{card_number} свободна, батч не найден"
+            )
+        
+        # Получаем информацию о батче
+        batch_query = db.query(BatchDB).join(SetupDB).join(LotDB).join(PartDB).join(MachineDB).outerjoin(
+            EmployeeDB, SetupDB.employee_id == EmployeeDB.id
+        ).filter(BatchDB.id == card.batch_id)
+        
+        batch_data = batch_query.first()
+        
+        if not batch_data:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Батч для карточки #{card_number} не найден в базе данных"
+            )
+        
+        # Формируем ответ в формате, совместимом с существующим API
+        return {
+            "id": batch_data.id,
+            "lot_id": batch_data.setup_job.lot.id,
+            "drawing_number": batch_data.setup_job.lot.part.drawing_number,
+            "lot_number": batch_data.setup_job.lot.lot_number,
+            "machine_name": batch_data.setup_job.machine.name,
+            "operator_name": batch_data.setup_job.employee.full_name if batch_data.setup_job.employee else None,
+            "current_quantity": batch_data.current_quantity,
+            "batch_time": batch_data.batch_time,
+            "warehouse_received_at": batch_data.warehouse_received_at,
+            "current_location": batch_data.current_location,
+            "card_number": card.card_number,
+            "card_status": card.status
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting batch by card {card_number} for machine {machine_code}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера")
+
+# --- END CARD SYSTEM ENDPOINTS ---
+
+@app.get("/batches/{batch_id}/label-info", response_model=BatchLabelInfo)
+async def get_batch_label_info(batch_id: int, db: Session = Depends(get_db_session)):
+    """Получить данные для печати этикетки конкретного батча"""
+    try:
+        # Получаем батч
+        batch = db.query(BatchDB).filter(BatchDB.id == batch_id).first()
+        if not batch:
+            raise HTTPException(status_code=404, detail="Batch not found")
+
+        # Получаем связанные данные
+        setup = db.query(SetupDB).filter(SetupDB.id == batch.setup_job_id).first()
+        part = db.query(PartDB).filter(PartDB.id == setup.part_id).first() if setup else None
+        lot = db.query(LotDB).filter(LotDB.id == batch.lot_id).first()
+        machine = db.query(MachineDB).filter(MachineDB.id == setup.machine_id).first() if setup else None
+        operator = db.query(EmployeeDB).filter(EmployeeDB.id == batch.operator_id).first()
+
+        # Получаем информацию о складском сотруднике, если батч был принят на склад
+        warehouse_employee = None
+        if batch.warehouse_employee_id:
+            warehouse_employee = db.query(EmployeeDB).filter(EmployeeDB.id == batch.warehouse_employee_id).first()
+
+        # Определение времени начала и конца батча (копируем логику из active-batch-label)
+        determined_start_time: Optional[str] = None
+        final_end_time_str = batch.batch_time.strftime("%H:%M") if batch.batch_time else None
+
+        # Новая логика для determined_start_time
+        if batch.initial_quantity == 0 and setup and setup.start_time:
+            determined_start_time = setup.start_time.strftime("%H:%M")
+        else:
+            previous_direct_batch = db.query(BatchDB.batch_time)\
+                .filter(BatchDB.lot_id == batch.lot_id)\
+                .filter(BatchDB.setup_job_id == batch.setup_job_id)\
+                .filter(BatchDB.id != batch.id)\
+                .filter(BatchDB.created_at < batch.created_at)\
+                .order_by(desc(BatchDB.created_at)) \
+                .first()
+            
+            if previous_direct_batch and previous_direct_batch.batch_time:
+                determined_start_time = previous_direct_batch.batch_time.strftime("%H:%M")
+            elif setup and setup.start_time: # Fallback
+                determined_start_time = setup.start_time.strftime("%H:%M")
+
+        # Расчет количеств - ПРОСТАЯ ЛОГИКА как в warehouse pending!
+        # batch.current_quantity - это количество деталей в батче (как в таблице)
+        # current_quantity для этикетки - это последнее показание счетчика
+        # initial_quantity - начальное показание счетчика
+        
+        batch_quantity = batch.current_quantity  # Количество деталей в батче
+        initial_quantity = batch.initial_quantity  # Начальное показание
+        current_quantity = batch.initial_quantity + batch.current_quantity  # Конечное показание = начальное + количество
+
+        # Вычисляем смену (копируем логику из active-batch-label)
+        calculated_shift = "N/A"
+        if batch.batch_time:
+            hour = batch.batch_time.hour
+            if 6 <= hour < 18:
+                calculated_shift = "1"  # Дневная смена
+            else:
+                calculated_shift = "2"  # Ночная смена
+
+        return BatchLabelInfo(
+            id=batch.id,
+            lot_id=batch.lot_id,
+            drawing_number=part.drawing_number if part else "N/A",
+            lot_number=lot.lot_number if lot else "N/A",
+            machine_name=machine.name if machine else "N/A",
+            operator_name=operator.full_name if operator else "N/A",
+            operator_id=batch.operator_id,
+            batch_time=batch.batch_time,
+            shift=calculated_shift,
+            start_time=determined_start_time,
+            end_time=final_end_time_str,
+            initial_quantity=initial_quantity,
+            current_quantity=current_quantity,
+            batch_quantity=batch_quantity,
+            warehouse_received_at=batch.warehouse_received_at,
+            warehouse_employee_name=warehouse_employee.full_name if warehouse_employee else None,
+            recounted_quantity=batch.recounted_quantity
+        )
+
+    except HTTPException as http_exc:
+        raise http_exc
+    except Exception as e:
+        logger.error(f"Error fetching batch label info for batch {batch_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error while fetching batch label info")

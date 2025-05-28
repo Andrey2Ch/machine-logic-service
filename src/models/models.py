@@ -1,8 +1,9 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Enum, Boolean, Float, Text
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Enum, Boolean, Float, Text, BigInteger, CheckConstraint, Index
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from .setup import SetupStatus
 from ..database import Base
+from sqlalchemy.sql import func
 
 class MachineDB(Base):
     __tablename__ = "machines"
@@ -12,6 +13,9 @@ class MachineDB(Base):
     type = Column(String(50))
     created_at = Column(DateTime, default=datetime.now)
     is_active = Column(Boolean, default=True)
+    
+    # Добавляем связь с карточками
+    cards = relationship("CardDB", back_populates="machine")
 
 class EmployeeDB(Base):
     __tablename__ = "employees"
@@ -119,6 +123,9 @@ class BatchDB(Base):
     operator = relationship("EmployeeDB", foreign_keys=[operator_id])
     warehouse_employee = relationship("EmployeeDB", foreign_keys=[warehouse_employee_id])
     qc_inspector = relationship("EmployeeDB", foreign_keys=[qc_inspector_id])
+    
+    # Добавляем связь с карточкой
+    card = relationship("CardDB", back_populates="batch", uselist=False)
 
 class ReadingDB(Base):
     __tablename__ = "machine_readings"
@@ -128,3 +135,23 @@ class ReadingDB(Base):
     machine_id = Column(Integer, ForeignKey("machines.id"))
     reading = Column(Integer)
     created_at = Column(DateTime, default=datetime.now)
+
+class CardDB(Base):
+    """Модель для пластиковых карточек операторов"""
+    __tablename__ = 'cards'
+    
+    card_number = Column(Integer, primary_key=True)  # номер на пластике (1-20)
+    machine_id = Column(BigInteger, ForeignKey('machines.id'), primary_key=True)  # составной ключ
+    status = Column(String(20), nullable=False, default='free')  # free, in_use, lost
+    batch_id = Column(BigInteger, ForeignKey('batches.id'), nullable=True)
+    last_event = Column(DateTime, nullable=False, default=func.now())
+    
+    # Отношения
+    machine = relationship("MachineDB", back_populates="cards")
+    batch = relationship("BatchDB", back_populates="card", uselist=False)
+    
+    __table_args__ = (
+        CheckConstraint("status IN ('free', 'in_use', 'lost')", name='check_card_status'),
+        Index('idx_cards_machine_status', 'machine_id', 'status'),
+        Index('idx_cards_batch_id', 'batch_id'),
+    )
