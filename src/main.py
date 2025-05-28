@@ -1213,6 +1213,7 @@ class WarehousePendingBatchItem(BaseModel):
     current_quantity: int 
     batch_time: Optional[datetime]
     operator_name: Optional[str]
+    machine_name: Optional[str]  # Добавляем поле для названия станка
 
     class Config:
         from_attributes = True # Pydantic v2, было orm_mode
@@ -1228,11 +1229,13 @@ async def get_warehouse_pending_batches(db: Session = Depends(get_db_session)):
     """Получить список батчей, ожидающих приемки на склад (статус 'production' или 'sorting')."""
     try:
         batches = (
-            db.query(BatchDB, PartDB, LotDB, EmployeeDB)
+            db.query(BatchDB, PartDB, LotDB, EmployeeDB, MachineDB)
             .select_from(BatchDB)
             .join(LotDB, BatchDB.lot_id == LotDB.id)
             .join(PartDB, LotDB.part_id == PartDB.id)
             .outerjoin(EmployeeDB, BatchDB.operator_id == EmployeeDB.id)
+            .outerjoin(SetupDB, BatchDB.setup_job_id == SetupDB.id)
+            .outerjoin(MachineDB, SetupDB.machine_id == MachineDB.id)
             .filter(BatchDB.current_location.in_(['production', 'sorting'])) # Включены 'production' и 'sorting'
             .order_by(BatchDB.batch_time.asc())
             .all()
@@ -1240,7 +1243,7 @@ async def get_warehouse_pending_batches(db: Session = Depends(get_db_session)):
 
         result = []
         for row in batches:
-            batch_obj, part_obj, lot_obj, emp_obj = row
+            batch_obj, part_obj, lot_obj, emp_obj, machine_obj = row
             # Собираем данные как есть из БД
             item_data = {
                 'id': batch_obj.id,
@@ -1250,6 +1253,7 @@ async def get_warehouse_pending_batches(db: Session = Depends(get_db_session)):
                 'current_quantity': batch_obj.current_quantity, # Теперь имя совпадает
                 'batch_time': batch_obj.batch_time,
                 'operator_name': emp_obj.full_name if emp_obj else None,
+                'machine_name': machine_obj.name if machine_obj else None,
             }
             # Валидируем и добавляем
             result.append(WarehousePendingBatchItem.model_validate(item_data))
@@ -2460,3 +2464,109 @@ async def get_quality_report(
         raise HTTPException(status_code=500, detail=f"Ошибка при генерации отчета: {str(e)}")
 
 # === КОНЕЦ ОТЧЕТНОСТИ ===
+
+# --- START NEW ENDPOINT FOR SORTING LABELS ---
+class BatchAvailabilityInfo(BaseModel):
+    """Информация о доступности печати этикеток для станка"""
+    machine_id: int
+    machine_name: str
+    has_active_batch: bool  # Есть ли активный батч в production
+    has_any_batch: bool     # Есть ли любой батч (для переборки)
+    last_batch_data: Optional[BatchLabelInfo] = None  # Данные последнего батча
+
+@app.get("/machines/{machine_id}/batch-availability", response_model=BatchAvailabilityInfo)
+async def get_batch_availability(machine_id: int, db: Session = Depends(get_db_session)):
+    """
+    Получить информацию о доступности печати этикеток для станка.
+    Возвращает данные для обычных этикеток (только production) и этикеток на переборку (любой последний батч).
+    """
+    machine = db.query(MachineDB).filter(MachineDB.id == machine_id).first()
+    if not machine:
+        raise HTTPException(status_code=404, detail="Станок не найден")
+
+    # Проверяем наличие активного батча в production
+    active_batch = db.query(BatchDB)\
+        .join(SetupDB, BatchDB.setup_job_id == SetupDB.id)\
+        .filter(SetupDB.machine_id == machine_id)\
+        .filter(BatchDB.current_location == 'production')\
+        .order_by(desc(BatchDB.batch_time)) \
+        .first()
+
+    # Ищем последний батч независимо от статуса
+    last_batch = db.query(BatchDB)\
+        .join(SetupDB, BatchDB.setup_job_id == SetupDB.id)\
+        .filter(SetupDB.machine_id == machine_id)\
+        .order_by(desc(BatchDB.batch_time)) \
+        .first()
+
+    has_active_batch = active_batch is not None
+    has_any_batch = last_batch is not None
+
+    last_batch_data = None
+    if last_batch:
+        # Получаем данные для последнего батча (используем ту же логику что и в active-batch-label)
+        setup = db.query(SetupDB).filter(SetupDB.id == last_batch.setup_job_id).first()
+        part = db.query(PartDB).filter(PartDB.id == setup.part_id).first() if setup else None
+        lot = db.query(LotDB).filter(LotDB.id == last_batch.lot_id).first()
+        operator = db.query(EmployeeDB).filter(EmployeeDB.id == last_batch.operator_id).first()
+
+        # Определение времени начала и конца батча
+        determined_start_time: Optional[str] = None
+        final_end_time_str = last_batch.batch_time.strftime("%H:%M") if last_batch.batch_time else None
+
+        # Логика для determined_start_time
+        if last_batch.initial_quantity == 0 and setup and setup.start_time:
+            determined_start_time = setup.start_time.strftime("%H:%M")
+        else:
+            previous_direct_batch = db.query(BatchDB.batch_time)\
+                .filter(BatchDB.lot_id == last_batch.lot_id)\
+                .filter(BatchDB.setup_job_id == last_batch.setup_job_id)\
+                .filter(BatchDB.id != last_batch.id)\
+                .filter(BatchDB.created_at < last_batch.created_at)\
+                .order_by(desc(BatchDB.created_at)) \
+                .first()
+            
+            if previous_direct_batch and previous_direct_batch.batch_time:
+                determined_start_time = previous_direct_batch.batch_time.strftime("%H:%M")
+            elif setup and setup.start_time:
+                determined_start_time = setup.start_time.strftime("%H:%M")
+
+        # Расчет количества
+        final_initial_quantity = last_batch.initial_quantity
+        final_current_quantity = last_batch.initial_quantity + last_batch.current_quantity
+        final_batch_quantity = last_batch.current_quantity
+
+        # Вычисляем смену
+        calculated_shift = "N/A"
+        if last_batch.batch_time:
+            hour = last_batch.batch_time.hour
+            if 6 <= hour < 18:
+                calculated_shift = "1"
+            else:
+                calculated_shift = "2"
+
+        last_batch_data = BatchLabelInfo(
+            id=last_batch.id,
+            lot_id=last_batch.lot_id,
+            drawing_number=part.drawing_number if part else "N/A",
+            lot_number=lot.lot_number if lot else "N/A",
+            machine_name=machine.name,
+            operator_name=operator.full_name if operator else "N/A",
+            operator_id=last_batch.operator_id,
+            batch_time=last_batch.batch_time,
+            shift=calculated_shift,
+            start_time=determined_start_time,
+            end_time=final_end_time_str,
+            initial_quantity=final_initial_quantity,
+            current_quantity=final_current_quantity,
+            batch_quantity=final_batch_quantity
+        )
+
+    return BatchAvailabilityInfo(
+        machine_id=machine_id,
+        machine_name=machine.name,
+        has_active_batch=has_active_batch,
+        has_any_batch=has_any_batch,
+        last_batch_data=last_batch_data
+    )
+# --- END NEW ENDPOINT FOR SORTING LABELS ---
