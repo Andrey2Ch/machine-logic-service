@@ -23,7 +23,7 @@ import asyncio
 import httpx
 import aiohttp
 from src.services.notification_service import send_setup_approval_notifications, send_batch_discrepancy_alert
-from sqlalchemy import func, desc, case, text
+from sqlalchemy import func, desc, case, text, or_, and_
 from sqlalchemy.exc import IntegrityError
 
 logger = logging.getLogger(__name__)
@@ -1136,6 +1136,7 @@ async def merge_batches(payload: BatchMergePayload, db: Session = Depends(get_db
 # --- NEW BATCH MOVE ENDPOINT ---
 class BatchMovePayload(BaseModel):
     target_location: str
+    inspector_id: Optional[int] = None  # ID пользователя, выполняющего перемещение (для финальных статусов)
     # Можно добавить employee_id, если нужно отслеживать, кто переместил
     # employee_id: Optional[int] = None
 
@@ -1163,6 +1164,27 @@ async def move_batch(
         #       Пока что принимаем любую непустую строку.
 
         logger.info(f"Moving batch {batch.id} from {batch.current_location} to {target_location}")
+
+        # Проверяем, перемещается ли батч в финальное состояние QC
+        final_qc_locations = ['good', 'defect', 'rework_repair']
+        if target_location in final_qc_locations:
+            # Если батч перемещается в финальное состояние, должен быть указан inspector_id
+            if payload.inspector_id:
+                # Проверяем, что inspector_id существует
+                inspector = db.query(EmployeeDB).filter(EmployeeDB.id == payload.inspector_id).first()
+                if not inspector:
+                    raise HTTPException(status_code=400, detail=f"Inspector with ID {payload.inspector_id} not found")
+                
+                # Устанавливаем qc_inspector_id для отслеживания кто проверил
+                batch.qc_inspector_id = payload.inspector_id
+                batch.qc_inspected_at = datetime.now()
+                logger.info(f"Batch {batch.id} moved to final QC state '{target_location}' by inspector {inspector.full_name} (ID: {payload.inspector_id})")
+            else:
+                # Если inspector_id не указан, но это финальное состояние - ошибка
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"inspector_id is required when moving batch to final QC state '{target_location}'"
+                )
 
         batch.current_location = target_location
         batch.updated_at = datetime.now() # Явно обновляем время изменения
@@ -1387,36 +1409,67 @@ class LotInfoItem(BaseModel):
         populate_by_name = True # Pydantic v2, было allow_population_by_field_name
 
 @app.get("/lots/pending-qc", response_model=List[LotInfoItem])
-async def get_lots_pending_qc(db: Session = Depends(get_db_session), current_user_qa_id: Optional[int] = Query(None, alias="qaId")):
+async def get_lots_pending_qc(
+    db: Session = Depends(get_db_session), 
+    current_user_qa_id: Optional[int] = Query(None, alias="qaId"),
+    hideCompleted: Optional[bool] = Query(False, description="Скрыть завершенные лоты и лоты со всеми проверенными батчами")
+):
     """
-    Получить лоты для ОТК на основе "старой" рабочей логики.
-    1. Находит лоты с неархивными батчами.
+    Получить лоты для ОТК (старая логика с оптимизированной фильтрацией).
+    
+    1. Находит лоты с активными (неархивными) батчами.
     2. Для каждого такого лота извлекает детали из последней наладки, включая имя инспектора, плановое количество и имя станка.
     3. Опционально фильтрует по qaId, если он предоставлен (на основе qa_id в последней наладке).
+    4. Опционально скрывает завершенные лоты (hideCompleted=True) - ОПТИМИЗИРОВАНО через SQL.
     """
-    logger.info(f"Запрос /lots/pending-qc (старая логика) получен. qaId: {current_user_qa_id}")
+    logger.info(f"Запрос /lots/pending-qc получен. qaId: {current_user_qa_id}, hideCompleted: {hideCompleted}")
     try:
         # 1. Базовый запрос на получение ID лотов с активными (неархивными) батчами
-        active_lot_ids_query = db.query(BatchDB.lot_id)\
+        base_lot_ids_query = db.query(BatchDB.lot_id)\
             .filter(BatchDB.current_location != 'archived') \
             .distinct()
-        
-        lot_ids_with_active_batches_tuples = active_lot_ids_query.all()
+
+        # 2. Если включен фильтр hideCompleted, дополнительно исключаем завершенные лоты
+        if hideCompleted:
+            # Исключаем лоты со статусом 'completed'
+            base_lot_ids_query = base_lot_ids_query.join(LotDB, BatchDB.lot_id == LotDB.id)\
+                .filter(LotDB.status != 'completed')
+            
+            # Исключаем лоты где ВСЕ батчи проверены
+            # Проверенные = НЕ qc_pending И (ЕСТЬ inspector_id ИЛИ в финальных состояниях)
+            # Логика: исключаем лот, если НЕТ непроверенных батчей
+            unchecked_batch_exists = db.query(BatchDB.lot_id)\
+                .filter(
+                    or_(
+                        BatchDB.current_location == 'qc_pending',  # qc_pending = непроверенный
+                        and_(
+                            BatchDB.qc_inspector_id.is_(None),  # НЕТ инспектора
+                            BatchDB.current_location.notin_(['good', 'defect', 'archived'])  # И НЕ в финальных состояниях
+                        )
+                    )
+                )\
+                .distinct()\
+                .subquery()
+            
+            # Включаем только лоты с непроверенными батчами
+            base_lot_ids_query = base_lot_ids_query.filter(BatchDB.lot_id.in_(unchecked_batch_exists))
+
+        lot_ids_with_active_batches_tuples = base_lot_ids_query.all()
         lot_ids = [item[0] for item in lot_ids_with_active_batches_tuples]
 
         if not lot_ids:
-            logger.info("Не найдено лотов с активными (неархивными) батчами.")
+            logger.info("Не найдено лотов с активными батчами (после фильтрации).")
             return []
         
-        logger.info(f"Найдены следующие ID лотов с активными батчами: {lot_ids}")
+        logger.info(f"Найдены ID лотов с активными батчами: {lot_ids} (всего: {len(lot_ids)})")
         
-        # 2. Основной запрос для данных по лотам и деталям
+        # 3. Основной запрос для данных по лотам и деталям
         lots_query = db.query(LotDB, PartDB).select_from(LotDB)\
             .join(PartDB, LotDB.part_id == PartDB.id)\
             .filter(LotDB.id.in_(lot_ids))
 
         lots_query_result = lots_query.all()
-        logger.info(f"Всего лотов (с деталями) для дальнейшей обработки: {len(lots_query_result)}")
+        logger.info(f"Всего лотов (с деталями) для обработки: {len(lots_query_result)}")
         
         result = []
         for lot_obj, part_obj in lots_query_result:
@@ -1424,16 +1477,15 @@ async def get_lots_pending_qc(db: Session = Depends(get_db_session), current_use
             
             planned_quantity_val = None
             inspector_name_val = None
-            machine_name_val = None # Инициализируем machine_name
+            machine_name_val = None
             
-            # 3. Находим последнюю наладку для данного лота, включая имя станка
-            # Используем outerjoin для EmployeeDB и MachineDB для большей устойчивости
+            # 4. Находим последнюю наладку для данного лота, включая имя станка
             latest_setup_details = db.query(
                     SetupDB.planned_quantity,
                     SetupDB.qa_id,
                     EmployeeDB.full_name.label("inspector_name_from_setup"),
                     MachineDB.name.label("machine_name_from_setup"),
-                    SetupDB.machine_id.label("setup_machine_id") # <--- ДОБАВЛЕНО ДЛЯ ЛОГИРОВАНИЯ
+                    SetupDB.machine_id.label("setup_machine_id")
                 )\
                 .outerjoin(EmployeeDB, SetupDB.qa_id == EmployeeDB.id) \
                 .outerjoin(MachineDB, SetupDB.machine_id == MachineDB.id) \
@@ -1441,55 +1493,44 @@ async def get_lots_pending_qc(db: Session = Depends(get_db_session), current_use
                 .order_by(desc(SetupDB.created_at))\
                 .first()
 
-            passes_qa_filter = True # По умолчанию лот проходит фильтр
+            passes_qa_filter = True
 
             if latest_setup_details:
                 planned_quantity_val = latest_setup_details.planned_quantity
-                machine_name_val = latest_setup_details.machine_name_from_setup # Получаем имя станка
-                # Исправленный лог:
-                logger.info(f"Lot ID {lot_obj.id}: latest_setup_details found. machine_id in setup (from latest_setup_details): {latest_setup_details.setup_machine_id}. machine_name_from_setup: {machine_name_val}")
+                machine_name_val = latest_setup_details.machine_name_from_setup
+                logger.debug(f"Lot ID {lot_obj.id}: setup found, machine_id: {latest_setup_details.setup_machine_id}")
 
                 if latest_setup_details.qa_id:
                     inspector_name_val = latest_setup_details.inspector_name_from_setup
                     if current_user_qa_id is not None and latest_setup_details.qa_id != current_user_qa_id:
                         passes_qa_filter = False
-                        logger.debug(f"  Лот НЕ проходит фильтр по qaId. Ожидался: {current_user_qa_id}, в наладке: {latest_setup_details.qa_id}")
-                elif current_user_qa_id is not None: # Фильтр qaId есть, но в наладке qa_id не указан
+                elif current_user_qa_id is not None:
                     passes_qa_filter = False
-                    logger.debug(f"  Лот НЕ проходит фильтр по qaId. Ожидался: {current_user_qa_id}, в наладке qa_id отсутствует.")
-                else: # Наладки не найдены, фильтра по qaId нет - просто нет данных о станке
-                    logger.info(f"Lot ID {lot_obj.id}: latest_setup_details NOT found. machine_name will be None.")
-            
-            elif current_user_qa_id is not None: # Наладки не найдены, но фильтр по qaId активен
-                 passes_qa_filter = False
-                 logger.debug(f"  Последняя наладка для лота {lot_obj.id} не найдена. Лот НЕ проходит фильтр по qaId {current_user_qa_id}.")
-
+            elif current_user_qa_id is not None:
+                passes_qa_filter = False
 
             if not passes_qa_filter:
-                continue # Пропускаем лот, если он не прошел фильтр по qaId
-            
+                continue
+
             item_data = {
                 'id': lot_obj.id,
                 'drawing_number': part_obj.drawing_number,
                 'lot_number': lot_obj.lot_number,
                 'inspector_name': inspector_name_val,
                 'planned_quantity': planned_quantity_val,
-                'machine_name': machine_name_val, # Добавляем имя станка в результат
+                'machine_name': machine_name_val,
             }
             
             try:
-                result.append(LotInfoItem.model_validate(item_data)) # Pydantic v2
+                result.append(LotInfoItem.model_validate(item_data))
             except AttributeError:
-                result.append(LotInfoItem.parse_obj(item_data)) # Pydantic v1 fallback
-            logger.debug(f"  Лот ID: {lot_obj.id} добавлен в результаты.")
+                result.append(LotInfoItem.parse_obj(item_data))
 
-        logger.info(f"Сформировано {len(result)} элементов для ответа /lots/pending-qc (старая логика).")
-        if not result and lot_ids: # Если были лоты с активными батчами, но они отфильтровались
-             logger.info(f"  Все лоты были отфильтрованы (например, по qaId: {current_user_qa_id}).")
+        logger.info(f"Сформировано {len(result)} элементов для ответа /lots/pending-qc (оптимизированная версия).")
         return result
 
     except Exception as e:
-        logger.error(f"Ошибка в /lots/pending-qc (старая логика): {e}", exc_info=True)
+        logger.error(f"Ошибка в /lots/pending-qc: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера при получении лотов для ОТК")
 
 # --- END LOTS MANAGEMENT ENDPOINTS ---
@@ -1563,6 +1604,51 @@ async def get_lot_analytics(lot_id: int, db: Session = Depends(get_db_session)):
 @app.get("/api/morning-report")
 async def morning_report():
     return {"message": "Morning report is working!"}
+
+@app.get("/debug/batches-summary")
+async def get_batches_summary(db: Session = Depends(get_db_session)):
+    """Быстрое получение сводки по всем батчам для отладки"""
+    try:
+        # Статистика по статусам батчей
+        status_stats = db.query(
+            BatchDB.current_location,
+            func.count(BatchDB.id).label('count')
+        ).group_by(BatchDB.current_location).all()
+        
+        # Батчи с qc_pending
+        qc_pending_batches = db.query(BatchDB).filter(
+            BatchDB.current_location == 'qc_pending'
+        ).all()
+        
+        # Батчи лота 88 (ID=32)
+        lot_88_batches = db.query(BatchDB).filter(
+            BatchDB.lot_id == 32
+        ).all()
+        
+        result = {
+            "status_statistics": {stat.current_location: stat.count for stat in status_stats},
+            "qc_pending_batches": [
+                {
+                    "id": batch.id,
+                    "lot_id": batch.lot_id,
+                    "quantity": batch.current_quantity
+                } for batch in qc_pending_batches
+            ],
+            "lot_88_batches": [
+                {
+                    "id": batch.id,
+                    "location": batch.current_location,
+                    "quantity": batch.current_quantity,
+                    "qc_inspector_id": batch.qc_inspector_id
+                } for batch in lot_88_batches
+            ]
+        }
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error in batches summary: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 class BatchLabelInfo(BaseModel):
     id: int  # ID самого батча
@@ -2527,17 +2613,20 @@ async def get_batch_availability(machine_id: int, db: Session = Depends(get_db_s
         if last_batch.initial_quantity == 0 and setup and setup.start_time:
             determined_start_time = setup.start_time.strftime("%H:%M")
         else:
-            previous_direct_batch = db.query(BatchDB.batch_time)\
-                .filter(BatchDB.lot_id == last_batch.lot_id)\
-                .filter(BatchDB.setup_job_id == last_batch.setup_job_id)\
-                .filter(BatchDB.id != last_batch.id)\
-                .filter(BatchDB.created_at < last_batch.created_at)\
-                .order_by(desc(BatchDB.created_at)) \
-                .first()
+            previous_direct_batch = None
+            # Добавляем проверку на None для batch.created_at чтобы избежать ошибки SQLAlchemy
+            if last_batch.created_at is not None:
+                previous_direct_batch = db.query(BatchDB.batch_time)\
+                    .filter(BatchDB.lot_id == last_batch.lot_id)\
+                    .filter(BatchDB.setup_job_id == last_batch.setup_job_id)\
+                    .filter(BatchDB.id != last_batch.id)\
+                    .filter(BatchDB.created_at < last_batch.created_at)\
+                    .order_by(desc(BatchDB.created_at)) \
+                    .first()
             
             if previous_direct_batch and previous_direct_batch.batch_time:
                 determined_start_time = previous_direct_batch.batch_time.strftime("%H:%M")
-            elif setup and setup.start_time:
+            elif setup and setup.start_time: # Fallback
                 determined_start_time = setup.start_time.strftime("%H:%M")
 
         # Расчет количества
@@ -2937,27 +3026,45 @@ async def get_batch_label_info(batch_id: int, db: Session = Depends(get_db_sessi
         if batch.initial_quantity == 0 and setup and setup.start_time:
             determined_start_time = setup.start_time.strftime("%H:%M")
         else:
-            previous_direct_batch = db.query(BatchDB.batch_time)\
-                .filter(BatchDB.lot_id == batch.lot_id)\
-                .filter(BatchDB.setup_job_id == batch.setup_job_id)\
-                .filter(BatchDB.id != batch.id)\
-                .filter(BatchDB.created_at < batch.created_at)\
-                .order_by(desc(BatchDB.created_at)) \
-                .first()
+            previous_direct_batch = None
+            # Добавляем проверку на None для batch.created_at чтобы избежать ошибки SQLAlchemy
+            if batch.created_at is not None:
+                previous_direct_batch = db.query(BatchDB.batch_time)\
+                    .filter(BatchDB.lot_id == batch.lot_id)\
+                    .filter(BatchDB.setup_job_id == batch.setup_job_id)\
+                    .filter(BatchDB.id != batch.id)\
+                    .filter(BatchDB.created_at < batch.created_at)\
+                    .order_by(desc(BatchDB.created_at)) \
+                    .first()
             
             if previous_direct_batch and previous_direct_batch.batch_time:
                 determined_start_time = previous_direct_batch.batch_time.strftime("%H:%M")
             elif setup and setup.start_time: # Fallback
                 determined_start_time = setup.start_time.strftime("%H:%M")
 
-        # Расчет количеств - ПРОСТАЯ ЛОГИКА как в warehouse pending!
-        # batch.current_quantity - это количество деталей в батче (как в таблице)
-        # current_quantity для этикетки - это последнее показание счетчика
+        # Расчет количеств - ИСПРАВЛЕННАЯ ЛОГИКА V3
+        # batch.initial_quantity - начальное показание счетчика  
+        # batch.current_quantity - количество деталей в батче (из БД) - НЕ ИСПОЛЬЗУЕМ для этикетки!
+        # Для этикетки нужно:
         # initial_quantity - начальное показание счетчика
+        # current_quantity - последние РЕАЛЬНЫЕ показания со станка (из readings)
+        # batch_quantity - РАЗНОСТЬ показаний счетчика (current - initial)
         
-        batch_quantity = batch.current_quantity  # Количество деталей в батче
-        initial_quantity = batch.initial_quantity  # Начальное показание
-        current_quantity = batch.initial_quantity + batch.current_quantity  # Конечное показание = начальное + количество
+        initial_quantity = batch.initial_quantity  # Начальное показание счетчика
+
+        # Получаем последние реальные показания со станка из таблицы readings
+        if setup and setup.machine_id:
+            last_reading = db.query(ReadingDB.reading).filter(
+                ReadingDB.machine_id == setup.machine_id
+            ).order_by(desc(ReadingDB.created_at)).first()
+            
+            current_quantity = last_reading[0] if last_reading else (batch.initial_quantity + batch.current_quantity)
+        else:
+            # Fallback если нет setup или machine_id
+            current_quantity = batch.initial_quantity + batch.current_quantity
+
+        # ПРАВИЛЬНЫЙ расчет batch_quantity как разности показаний
+        batch_quantity = current_quantity - initial_quantity
 
         # Вычисляем смену (копируем логику из active-batch-label)
         calculated_shift = "N/A"
