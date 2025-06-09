@@ -105,7 +105,7 @@ async def create_setup(setup: SetupInput, db: Session = Depends(get_db_session))
         # Создаем новую наладку
         new_setup = SetupDB(
             machine_id=setup.machine_id,
-            operator_id=setup.operator_id,
+            employee_id=setup.operator_id,
             part_id=part.id,
             lot_id=lot.id,
             planned_quantity=setup.planned_quantity,
@@ -152,11 +152,11 @@ async def get_qa_view(db: Session = Depends(get_db_session)):
                 s.status,
                 qa_emp.full_name as qa_name,
                 s.qa_date
-            FROM setups s
+            FROM setup_jobs s
             JOIN machines m ON s.machine_id = m.id
             JOIN parts p ON s.part_id = p.id
             JOIN lots l ON s.lot_id = l.id
-            JOIN employees e ON s.operator_id = e.id
+            JOIN employees e ON s.employee_id = e.id
             LEFT JOIN employees qa_emp ON s.qa_id = qa_emp.id
             WHERE s.status IN ('created', 'pending_qc', 'allowed')
             ORDER BY s.created_at DESC
@@ -230,7 +230,7 @@ async def approve_setup(
         machine_name = db.query(MachineDB.name).filter(MachineDB.id == setup.machine_id).scalar()
         part = db.query(PartDB).filter(PartDB.id == setup.part_id).first()
         lot = db.query(LotDB).filter(LotDB.id == setup.lot_id).first()
-        machinist_name = db.query(EmployeeDB.full_name).filter(EmployeeDB.id == setup.operator_id).scalar()
+        machinist_name = db.query(EmployeeDB.full_name).filter(EmployeeDB.id == setup.employee_id).scalar()
         
         response = ApprovedSetupResponse(
             id=setup.id,

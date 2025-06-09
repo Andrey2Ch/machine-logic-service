@@ -40,7 +40,7 @@ async def get_operator_machines_view(db: Session = Depends(get_db_session)):
             # Получаем последнее показание
             last_reading = db.query(ReadingDB)\
                 .filter(ReadingDB.machine_id == machine.id)\
-                .order_by(ReadingDB.timestamp.desc())\
+                .order_by(ReadingDB.created_at.desc())\
                 .first()
             
             # Получаем текущую наладку
@@ -54,8 +54,8 @@ async def get_operator_machines_view(db: Session = Depends(get_db_session)):
                 id=machine.id,
                 name=machine.name,
                 reading='',
-                lastReading=last_reading.value if last_reading else None,
-                lastReadingTime=last_reading.timestamp if last_reading else None,
+                lastReading=last_reading.reading if last_reading else None,
+                lastReadingTime=last_reading.created_at if last_reading else None,
                 setupId=current_setup.id if current_setup else None,
                 drawingNumber=current_setup.drawing_number if current_setup else None,
                 plannedQuantity=current_setup.planned_quantity if current_setup else None,

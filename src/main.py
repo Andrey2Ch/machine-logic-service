@@ -531,63 +531,7 @@ class QaSetupViewItem(BaseModel):
         from_attributes = True # Pydantic v2, было orm_mode
         populate_by_name = True # Pydantic v2, было allow_population_by_field_name
 
-# Эндпоинт для получения наладок для ОТК
-@app.get("/setups/qa-view", response_model=List[QaSetupViewItem])
-async def get_qa_view(db: Session = Depends(get_db_session)):
-    """
-    Получить список АКТИВНЫХ наладок для отображения ОТК.
-    Возвращает данные, необходимые для отображения в таблице ОТК на дашборде,
-    включая информацию об утверждении ОТК, если оно было.
-    """
-    try:
-        active_statuses = ['created', 'pending_qc', 'allowed', 'started']
-
-        # --- ДОПОЛНЯЕМ ЗАПРОС ДАННЫМИ ОТК --- 
-        # Создаем псевдонимы для таблицы EmployeeDB
-        OperatorEmployee = aliased(EmployeeDB, name="operator")
-        QAEmployee = aliased(EmployeeDB, name="qa_approver")
-
-        # Запрос к БД с необходимыми join'ами
-        active_setups = db.query(
-            SetupDB.id,
-            MachineDB.name.label('machine_name'),
-            PartDB.drawing_number.label('drawing_number'),
-            LotDB.lot_number.label('lot_number'),
-            OperatorEmployee.full_name.label('machinist_name'), # Наладчик
-            SetupDB.start_time,
-            SetupDB.status,
-            QAEmployee.full_name.label('qa_name'), # <-- Добавлено имя ОТК
-            SetupDB.qa_date # <-- Добавлена дата ОТК
-        ).select_from(SetupDB) \
-         .join(MachineDB, SetupDB.machine_id == MachineDB.id) \
-         .join(OperatorEmployee, SetupDB.employee_id == OperatorEmployee.id) \
-         .join(PartDB, SetupDB.part_id == PartDB.id) \
-         .join(LotDB, SetupDB.lot_id == LotDB.id) \
-         .outerjoin(QAEmployee, SetupDB.qa_id == QAEmployee.id) \
-         .filter(SetupDB.status.in_(active_statuses)) \
-         .order_by(SetupDB.created_at.asc()) \
-         .all()
-        # -----------------------------------------
-
-        result_list = []
-        for row in active_setups: 
-            result_list.append(QaSetupViewItem(
-                id=row.id,
-                machine_name=row.machine_name,
-                drawing_number=row.drawing_number,
-                lot_number=row.lot_number,
-                machinist_name=row.machinist_name,
-                start_time=row.start_time,
-                status=row.status,
-                qa_name=row.qa_name, # <-- Передаем имя ОТК
-                qa_date=row.qa_date # <-- Передаем дату ОТК
-            ))
-
-        return result_list
-
-    except Exception as e:
-        print(f"Error fetching QA view data: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error while fetching QA data")
+# Duplicated /setups/qa-view endpoint removed - using router version
 
 # Модель для тела запроса на утверждение
 class ApproveSetupPayload(BaseModel):
@@ -731,8 +675,7 @@ class OperatorMachineViewItem(BaseModel):
         from_attributes = True
         populate_by_name = True 
 
-# Изменяем путь и убираем operator_id из аргументов
-@app.get("/machines/operator-view", response_model=List[OperatorMachineViewItem])
+# REMOVED: Duplicate /machines/operator-view endpoint - using router version
 async def get_operator_machines_view(db: Session = Depends(get_db_session)):
     """
     Получает список ВСЕХ активных станков с информацией
