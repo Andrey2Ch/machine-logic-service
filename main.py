@@ -27,10 +27,11 @@ from sqlalchemy import func, desc, case, text, or_, and_
 from sqlalchemy.exc import IntegrityError
 
 # Импорт роутеров
-from src.routers import parts, employees
+from src.routers import parts, employees, machines
 # Импорт схем
 from src.schemas.part import PartResponse
 from src.schemas.employee import EmployeeItem
+from src.schemas.machine import MachineItem, OperatorMachineViewItem, BatchLabelInfo, BatchAvailabilityInfo
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,7 @@ async def startup_event():
 # Подключение роутеров
 app.include_router(parts.router)
 app.include_router(employees.router)
+app.include_router(machines.router)
 
 
 
@@ -277,21 +279,7 @@ async def save_reading(reading_input: ReadingInput, db: Session = Depends(get_db
         logger.error(f"Error in save_reading: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error while saving reading")
 
-@app.get("/machines")
-async def get_machines(db: Session = Depends(get_db_session)):
-    """
-    Получить список всех станков
-    """
-    machines = db.query(MachineDB).all()
-    return {
-        "machines": [
-            {
-                "id": m.id,
-                "name": m.name,
-                "type": m.type
-            } for m in machines
-        ]
-    }
+
 
 @app.get("/readings")
 async def get_readings(db: Session = Depends(get_db_session)):
@@ -622,83 +610,7 @@ async def approve_setup(
         raise HTTPException(status_code=500, detail=f"Internal server error while approving setup {setup_id}")
 
 # Модель ответа остается прежней
-class OperatorMachineViewItem(BaseModel):
-    id: int 
-    name: Optional[str] = None
-    reading: Optional[str] = '' 
-    lastReading: Optional[int] = Field(None, alias='last_reading')
-    lastReadingTime: Optional[datetime] = Field(None, alias='last_reading_time')
-    setupId: Optional[int] = Field(None, alias='setup_id')
-    drawingNumber: Optional[str] = Field(None, alias='drawing_number')
-    plannedQuantity: Optional[int] = Field(None, alias='planned_quantity')
-    additionalQuantity: Optional[int] = Field(None, alias='additional_quantity')
-    status: Optional[str] = None
-    class Config: 
-        from_attributes = True
-        populate_by_name = True 
 
-# Изменяем путь и убираем operator_id из аргументов
-@app.get("/machines/operator-view", response_model=List[OperatorMachineViewItem])
-async def get_operator_machines_view(db: Session = Depends(get_db_session)):
-    """
-    Получает список ВСЕХ активных станков с информацией
-    о последней активной наладке и последнем показании.
-    """
-    logger.info(f"Fetching operator machine view for ALL operators") # Обновляем лог
-    try:
-        # 1. Получаем все активные станки
-        machines = db.query(MachineDB).filter(MachineDB.is_active == True).order_by(MachineDB.name).all()
-        print("DEBUG: machines from DB:", machines)
-        logger.debug(f"Found {len(machines)} active machines.")
-
-        result_list = []
-        active_setup_statuses = ['created', 'pending_qc', 'allowed', 'started']
-
-        for machine in machines:
-            logger.debug(f"Processing machine: {machine.name} (ID: {machine.id})")
-            # 2. Находим последнее показание для станка
-            last_reading_data = db.query(ReadingDB.reading, ReadingDB.created_at)\
-                .filter(ReadingDB.machine_id == machine.id)\
-                .order_by(ReadingDB.created_at.desc())\
-                .first()
-            logger.debug(f"Last reading data for machine {machine.id}: {last_reading_data}")
-
-            # 3. Находим последнюю активную наладку и ее СТАТУС
-            active_setup = db.query(
-                    SetupDB.id, 
-                    SetupDB.planned_quantity,
-                    SetupDB.additional_quantity,
-                    PartDB.drawing_number,
-                    SetupDB.status # <-- Добавляем статус
-                )\
-                .join(PartDB, SetupDB.part_id == PartDB.id)\
-                .filter(SetupDB.machine_id == machine.id)\
-                .filter(SetupDB.status.in_(active_setup_statuses))\
-                .filter(SetupDB.end_time == None)\
-                .order_by(SetupDB.created_at.desc())\
-                .first()
-            
-            # Формируем элемент ответа
-            machine_view = OperatorMachineViewItem(
-                id=machine.id,
-                name=machine.name,
-                last_reading=last_reading_data.reading if last_reading_data else None,
-                last_reading_time=last_reading_data.created_at if last_reading_data else None,
-                setup_id=active_setup.id if active_setup else None,
-                drawing_number=active_setup.drawing_number if active_setup else None,
-                planned_quantity=active_setup.planned_quantity if active_setup else None,
-                additional_quantity=active_setup.additional_quantity if active_setup else None,
-                status=active_setup.status if active_setup else 'idle'
-            )
-            result_list.append(machine_view)
-
-        logger.info(f"Successfully prepared operator machine view")
-        print("DEBUG: result to return:", result_list)
-        return result_list
-
-    except Exception as e:
-        logger.error(f"Error fetching operator machine view: {e}", exc_info=True) # Обновляем лог
-        raise HTTPException(status_code=500, detail="Internal server error fetching operator machine view")
 
 async def check_lot_completion_and_update_status(lot_id: int, db: Session):
     """
@@ -1577,109 +1489,9 @@ async def get_batches_summary(db: Session = Depends(get_db_session)):
         logger.error(f"Error in batches summary: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
 
-class BatchLabelInfo(BaseModel):
-    id: int  # ID самого батча
-    lot_id: int 
-    drawing_number: str
-    lot_number: str
-    machine_name: str
-    operator_name: str
-    operator_id: int
-    batch_time: datetime
-    shift: str
-    start_time: Optional[str] = None # Изменено
-    end_time: Optional[str] = None   # Изменено
-    initial_quantity: int
-    current_quantity: int
-    batch_quantity: int
-    # Новые поля для складской информации
-    warehouse_received_at: Optional[datetime] = None
-    warehouse_employee_name: Optional[str] = None
-    recounted_quantity: Optional[int] = None
 
-@app.get("/machines/{machine_id}/active-batch-label", response_model=BatchLabelInfo)
-async def get_active_batch_label(machine_id: int, db: Session = Depends(get_db_session)):
-    active_batch = db.query(BatchDB)\
-        .join(SetupDB, BatchDB.setup_job_id == SetupDB.id)\
-        .filter(SetupDB.machine_id == machine_id)\
-        .filter(BatchDB.current_location == 'production')\
-        .order_by(desc(BatchDB.batch_time)) \
-        .first()
 
-    if not active_batch:
-        raise HTTPException(status_code=404, detail="Активный батч в производстве не найден для этого станка")
 
-    setup = db.query(SetupDB).filter(SetupDB.id == active_batch.setup_job_id).first()
-    part = db.query(PartDB).filter(PartDB.id == setup.part_id).first() if setup else None
-    lot = db.query(LotDB).filter(LotDB.id == active_batch.lot_id).first()
-    machine = db.query(MachineDB).filter(MachineDB.id == machine_id).first()
-    operator = db.query(EmployeeDB).filter(EmployeeDB.id == active_batch.operator_id).first()
-
-    # Определение времени начала и конца батча
-    determined_start_time: Optional[str] = None
-    final_end_time_str = active_batch.batch_time.strftime("%H:%M") if active_batch.batch_time else None
-
-    # Новая логика для determined_start_time
-    if active_batch.initial_quantity == 0 and setup and setup.start_time:
-        determined_start_time = setup.start_time.strftime("%H:%M")
-    else:
-        previous_direct_batch = db.query(BatchDB.batch_time)\
-            .filter(BatchDB.lot_id == active_batch.lot_id)\
-            .filter(BatchDB.setup_job_id == active_batch.setup_job_id)\
-            .filter(BatchDB.id != active_batch.id)\
-            .filter(BatchDB.created_at < active_batch.created_at)\
-            .order_by(desc(BatchDB.created_at)) \
-            .first()
-        
-        if previous_direct_batch and previous_direct_batch.batch_time:
-            determined_start_time = previous_direct_batch.batch_time.strftime("%H:%M")
-        elif setup and setup.start_time: # Fallback
-            determined_start_time = setup.start_time.strftime("%H:%M")
-
-    # Расчет initial_quantity, current_quantity, batch_quantity (оставляем как было, если корректно)
-    # Эта логика должна соответствовать тому, как поля хранятся в BatchDB и что ожидает этикетка
-    # initial_quantity - показание счетчика в начале этого батча
-    # current_quantity - показание счетчика в конце этого батча
-    # batch_quantity - количество деталей в этом батче (current_quantity - initial_quantity)
-
-    # final_initial_quantity - это initial_quantity самого active_batch, т.е. показание счетчика в его начале
-    final_initial_quantity = active_batch.initial_quantity
-    
-    # final_current_quantity - это показание счетчика в конце active_batch.
-    # Оно равно active_batch.initial_quantity + active_batch.current_quantity (где current_quantity - это кол-во В батче)
-    final_current_quantity = active_batch.initial_quantity + active_batch.current_quantity
-    
-    # final_batch_quantity - это количество деталей В active_batch, т.е. active_batch.current_quantity
-    final_batch_quantity = active_batch.current_quantity
-
-    # Вычисляем смену
-    calculated_shift = "N/A"
-    if active_batch.batch_time:
-        hour = active_batch.batch_time.hour
-        if 6 <= hour < 18:
-            calculated_shift = "1"  # Дневная смена
-        else:
-            calculated_shift = "2"  # Ночная смена
-
-    return BatchLabelInfo(
-        id=active_batch.id,
-        lot_id=active_batch.lot_id,
-        drawing_number=part.drawing_number if part else "N/A",
-        lot_number=lot.lot_number if lot else "N/A",
-        machine_name=machine.name if machine else "N/A",
-        operator_name=operator.full_name if operator else "N/A",
-        operator_id=active_batch.operator_id,
-        batch_time=active_batch.batch_time,
-        shift=calculated_shift, # Используем вычисленную смену
-        start_time=determined_start_time,
-        end_time=final_end_time_str,
-        initial_quantity=final_initial_quantity,
-        current_quantity=final_current_quantity,
-        batch_quantity=final_batch_quantity,
-        warehouse_received_at=active_batch.warehouse_received_at,
-        warehouse_employee_name=active_batch.operator_name,
-        recounted_quantity=active_batch.recounted_quantity
-    )
 
 class CreateBatchInput(BaseModel):
     lot_id: int
@@ -2467,116 +2279,7 @@ async def get_quality_report(
 # === КОНЕЦ ОТЧЕТНОСТИ ===
 
 # --- START NEW ENDPOINT FOR SORTING LABELS ---
-class BatchAvailabilityInfo(BaseModel):
-    """Информация о доступности печати этикеток для станка"""
-    machine_id: int
-    machine_name: str
-    has_active_batch: bool  # Есть ли активный батч в production
-    has_any_batch: bool     # Есть ли любой батч (для переборки)
-    last_batch_data: Optional[BatchLabelInfo] = None  # Данные последнего батча
 
-@app.get("/machines/{machine_id}/batch-availability", response_model=BatchAvailabilityInfo)
-async def get_batch_availability(machine_id: int, db: Session = Depends(get_db_session)):
-    """
-    Получить информацию о доступности печати этикеток для станка.
-    Возвращает данные для обычных этикеток (только production) и этикеток на переборку (любой последний батч).
-    """
-    machine = db.query(MachineDB).filter(MachineDB.id == machine_id).first()
-    if not machine:
-        raise HTTPException(status_code=404, detail="Станок не найден")
-
-    # Проверяем наличие активного батча в production
-    active_batch = db.query(BatchDB)\
-        .join(SetupDB, BatchDB.setup_job_id == SetupDB.id)\
-        .filter(SetupDB.machine_id == machine_id)\
-        .filter(BatchDB.current_location == 'production')\
-        .order_by(desc(BatchDB.batch_time)) \
-        .first()
-
-    # Ищем последний батч независимо от статуса
-    last_batch = db.query(BatchDB)\
-        .join(SetupDB, BatchDB.setup_job_id == SetupDB.id)\
-        .filter(SetupDB.machine_id == machine_id)\
-        .order_by(desc(BatchDB.batch_time)) \
-        .first()
-
-    has_active_batch = active_batch is not None
-    has_any_batch = last_batch is not None
-
-    last_batch_data = None
-    if last_batch:
-        # Получаем данные для последнего батча (используем ту же логику что и в active-batch-label)
-        setup = db.query(SetupDB).filter(SetupDB.id == last_batch.setup_job_id).first()
-        part = db.query(PartDB).filter(PartDB.id == setup.part_id).first() if setup else None
-        lot = db.query(LotDB).filter(LotDB.id == last_batch.lot_id).first()
-        operator = db.query(EmployeeDB).filter(EmployeeDB.id == last_batch.operator_id).first()
-
-        # Определение времени начала и конца батча
-        determined_start_time: Optional[str] = None
-        final_end_time_str = last_batch.batch_time.strftime("%H:%M") if last_batch.batch_time else None
-
-        # Логика для determined_start_time
-        if last_batch.initial_quantity == 0 and setup and setup.start_time:
-            determined_start_time = setup.start_time.strftime("%H:%M")
-        else:
-            previous_direct_batch = None
-            # Добавляем проверку на None для batch.created_at чтобы избежать ошибки SQLAlchemy
-            if last_batch.created_at is not None:
-                previous_direct_batch = db.query(BatchDB.batch_time)\
-                    .filter(BatchDB.lot_id == last_batch.lot_id)\
-                    .filter(BatchDB.setup_job_id == last_batch.setup_job_id)\
-                    .filter(BatchDB.id != last_batch.id)\
-                    .filter(BatchDB.created_at < last_batch.created_at)\
-                    .order_by(desc(BatchDB.created_at)) \
-                    .first()
-            
-            if previous_direct_batch and previous_direct_batch.batch_time:
-                determined_start_time = previous_direct_batch.batch_time.strftime("%H:%M")
-            elif setup and setup.start_time: # Fallback
-                determined_start_time = setup.start_time.strftime("%H:%M")
-
-        # Расчет количества
-        final_initial_quantity = last_batch.initial_quantity
-        final_current_quantity = last_batch.initial_quantity + last_batch.current_quantity
-        final_batch_quantity = last_batch.current_quantity
-
-        # Вычисляем смену
-        calculated_shift = "N/A"
-        if last_batch.batch_time:
-            hour = last_batch.batch_time.hour
-            if 6 <= hour < 18:
-                calculated_shift = "1"
-            else:
-                calculated_shift = "2"
-
-        last_batch_data = BatchLabelInfo(
-            id=last_batch.id,
-            lot_id=last_batch.lot_id,
-            drawing_number=part.drawing_number if part else "N/A",
-            lot_number=lot.lot_number if lot else "N/A",
-            machine_name=machine.name,
-            operator_name=operator.full_name if operator else "N/A",
-            operator_id=last_batch.operator_id,
-            batch_time=last_batch.batch_time,
-            shift=calculated_shift,
-            start_time=determined_start_time,
-            end_time=final_end_time_str,
-            initial_quantity=final_initial_quantity,
-            current_quantity=final_current_quantity,
-            batch_quantity=final_batch_quantity,
-            warehouse_received_at=last_batch.warehouse_received_at,
-            warehouse_employee_name=last_batch.operator_name,
-            recounted_quantity=last_batch.recounted_quantity
-        )
-
-    return BatchAvailabilityInfo(
-        machine_id=machine_id,
-        machine_name=machine.name,
-        has_active_batch=has_active_batch,
-        has_any_batch=has_any_batch,
-        last_batch_data=last_batch_data
-    )
-# --- END NEW ENDPOINT FOR SORTING LABELS ---
 
 # --- CARD SYSTEM ENDPOINTS ---
 
