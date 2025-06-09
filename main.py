@@ -27,9 +27,10 @@ from sqlalchemy import func, desc, case, text, or_, and_
 from sqlalchemy.exc import IntegrityError
 
 # Импорт роутеров
-from src.routers import parts
+from src.routers import parts, employees
 # Импорт схем
 from src.schemas.part import PartResponse
+from src.schemas.employee import EmployeeItem
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,7 @@ async def startup_event():
 
 # Подключение роутеров
 app.include_router(parts.router)
+app.include_router(employees.router)
 
 
 
@@ -1742,30 +1744,9 @@ async def create_batch(payload: CreateBatchInput, db: Session = Depends(get_db_s
     )
 
 # --- START NEW ENDPOINT --- 
-class EmployeeItem(BaseModel):
-    id: int
-    full_name: Optional[str] = None
-    role_id: Optional[int] = None # Добавим роль, может пригодиться для фильтрации на фронте
 
-    class Config:
-        from_attributes = True # Pydantic v2
 
-@app.get("/employees", response_model=List[EmployeeItem])
-async def get_employees(db: Session = Depends(get_db_session)):
-    """
-    Получить список всех активных сотрудников с role_id = 1 (операторы)
-    """
-    try:
-        employees = db.query(EmployeeDB)\
-            .filter(EmployeeDB.role_id == 1)\
-            .filter(EmployeeDB.is_active == True)\
-            .order_by(EmployeeDB.full_name)\
-            .all()
-        return employees # Pydantic автоматически преобразует в EmployeeItem
-    except Exception as e:
-        logger.error(f"Error fetching employees: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error while fetching employees")
-# --- END NEW ENDPOINT ---
+
 
 # <<< НОВЫЕ Pydantic МОДЕЛИ ДЛЯ LOT >>>
 from enum import Enum
