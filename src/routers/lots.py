@@ -172,6 +172,68 @@ async def get_lots(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# === LOT INFO ENDPOINTS ===
+
+@router.get("/lots/pending-qc", response_model=List[LotInfoItem])
+async def get_lots_pending_qc(
+    db: Session = Depends(get_db_session), 
+    current_user_qa_id: Optional[int] = Query(None, alias="qaId"),
+    hideCompleted: Optional[bool] = Query(False, description="Скрыть завершенные лоты и лоты со всеми проверенными батчами")
+):
+    """
+    Получить список лотов, ожидающих контроля качества.
+    Используется для интерфейса ОТК.
+    """
+    try:
+        # Базовый запрос для получения лотов с информацией о деталях
+        query = db.query(LotDB, PartDB) \
+                  .join(PartDB, LotDB.part_id == PartDB.id)
+
+        # Если нужно скрыть завершенные лоты
+        if hideCompleted:
+            # Исключаем лоты со статусом 'completed'
+            query = query.filter(LotDB.status != 'completed')
+
+        lots_data = query.all()
+        
+        result = []
+        for lot, part in lots_data:
+            # Получаем информацию об инспекторе (если есть активная наладка)
+            inspector_name = None
+            planned_quantity = lot.initial_planned_quantity
+            machine_name = None
+            
+            # Ищем активную наладку для этого лота
+            active_setup = db.query(SetupDB, EmployeeDB) \
+                            .outerjoin(EmployeeDB, SetupDB.employee_id == EmployeeDB.id) \
+                            .filter(SetupDB.lot_id == lot.id) \
+                            .filter(SetupDB.status.in_(['created', 'started', 'pending_qc', 'allowed'])) \
+                            .first()
+            
+            if active_setup:
+                setup, employee = active_setup
+                if employee:
+                    inspector_name = employee.full_name
+                if setup.planned_quantity:
+                    planned_quantity = setup.planned_quantity
+
+            result.append(LotInfoItem(
+                id=lot.id,
+                drawing_number=part.drawing_number,
+                lot_number=lot.lot_number,
+                inspector_name=inspector_name,
+                planned_quantity=planned_quantity,
+                machine_name=machine_name
+            ))
+
+        logger.info(f"Возвращено {len(result)} лотов для QC (hideCompleted={hideCompleted})")
+        return result
+
+    except Exception as e:
+        logger.error(f"Ошибка при получении лотов для QC: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
 @router.get("/lots/{lot_id}", response_model=LotResponse, tags=["Lots"])
 async def get_lot(lot_id: int, db: Session = Depends(get_db_session)):
     """Получить лот по ID"""
@@ -281,68 +343,6 @@ async def close_lot(lot_id: int, db: Session = Depends(get_db_session)):
     except Exception as e:
         db.rollback()
         logger.error(f"Ошибка при закрытии лота {lot_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-
-# === LOT INFO ENDPOINTS ===
-
-@router.get("/lots/pending-qc", response_model=List[LotInfoItem])
-async def get_lots_pending_qc(
-    db: Session = Depends(get_db_session), 
-    current_user_qa_id: Optional[int] = Query(None, alias="qaId"),
-    hideCompleted: Optional[bool] = Query(False, description="Скрыть завершенные лоты и лоты со всеми проверенными батчами")
-):
-    """
-    Получить список лотов, ожидающих контроля качества.
-    Используется для интерфейса ОТК.
-    """
-    try:
-        # Базовый запрос для получения лотов с информацией о деталях
-        query = db.query(LotDB, PartDB) \
-                  .join(PartDB, LotDB.part_id == PartDB.id)
-
-        # Если нужно скрыть завершенные лоты
-        if hideCompleted:
-            # Исключаем лоты со статусом 'completed'
-            query = query.filter(LotDB.status != 'completed')
-
-        lots_data = query.all()
-        
-        result = []
-        for lot, part in lots_data:
-            # Получаем информацию об инспекторе (если есть активная наладка)
-            inspector_name = None
-            planned_quantity = lot.initial_planned_quantity
-            machine_name = None
-            
-            # Ищем активную наладку для этого лота
-            active_setup = db.query(SetupDB, EmployeeDB) \
-                            .outerjoin(EmployeeDB, SetupDB.employee_id == EmployeeDB.id) \
-                            .filter(SetupDB.lot_id == lot.id) \
-                            .filter(SetupDB.status.in_(['created', 'started', 'pending_qc', 'allowed'])) \
-                            .first()
-            
-            if active_setup:
-                setup, employee = active_setup
-                if employee:
-                    inspector_name = employee.full_name
-                if setup.planned_quantity:
-                    planned_quantity = setup.planned_quantity
-
-            result.append(LotInfoItem(
-                id=lot.id,
-                drawing_number=part.drawing_number,
-                lot_number=lot.lot_number,
-                inspector_name=inspector_name,
-                planned_quantity=planned_quantity,
-                machine_name=machine_name
-            ))
-
-        logger.info(f"Возвращено {len(result)} лотов для QC (hideCompleted={hideCompleted})")
-        return result
-
-    except Exception as e:
-        logger.error(f"Ошибка при получении лотов для QC: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

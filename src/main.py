@@ -26,9 +26,24 @@ from src.services.notification_service import send_setup_approval_notifications,
 from sqlalchemy import func, desc, case, text, or_, and_
 from sqlalchemy.exc import IntegrityError
 
+# Duplicate lot schemas removed - importing from schemas
+from src.schemas.lot import LotStatus, LotBase, LotCreate, LotResponse, LotQuantityUpdate
+
+# Router imports
+from src.routers import parts, employees, machines, readings, setups, batches, lots
+
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Machine Logic Service", debug=True)
+
+# Include routers
+app.include_router(parts.router)
+app.include_router(employees.router) 
+app.include_router(machines.router)
+app.include_router(readings.router)
+app.include_router(setups.router)
+app.include_router(batches.router)
+app.include_router(lots.router)
 
 # Возвращаем универсальное разрешение CORS
 app.add_middleware(
@@ -1408,198 +1423,7 @@ class LotInfoItem(BaseModel):
         from_attributes = True # Pydantic v2
         populate_by_name = True # Pydantic v2, было allow_population_by_field_name
 
-@app.get("/lots/pending-qc", response_model=List[LotInfoItem])
-async def get_lots_pending_qc(
-    db: Session = Depends(get_db_session), 
-    current_user_qa_id: Optional[int] = Query(None, alias="qaId"),
-    hideCompleted: Optional[bool] = Query(False, description="Скрыть завершенные лоты и лоты со всеми проверенными батчами")
-):
-    """
-    Получить лоты для ОТК (старая логика с оптимизированной фильтрацией).
-    
-    1. Находит лоты с активными (неархивными) батчами.
-    2. Для каждого такого лота извлекает детали из последней наладки, включая имя инспектора, плановое количество и имя станка.
-    3. Опционально фильтрует по qaId, если он предоставлен (на основе qa_id в последней наладке).
-    4. Опционально скрывает завершенные лоты (hideCompleted=True) - ОПТИМИЗИРОВАНО через SQL.
-    """
-    logger.info(f"Запрос /lots/pending-qc получен. qaId: {current_user_qa_id}, hideCompleted: {hideCompleted}")
-    try:
-        # 1. Базовый запрос на получение ID лотов с активными (неархивными) батчами
-        base_lot_ids_query = db.query(BatchDB.lot_id)\
-            .filter(BatchDB.current_location != 'archived') \
-            .distinct()
-
-        # 2. Если включен фильтр hideCompleted, дополнительно исключаем завершенные лоты
-        if hideCompleted:
-            # Исключаем лоты со статусом 'completed'
-            base_lot_ids_query = base_lot_ids_query.join(LotDB, BatchDB.lot_id == LotDB.id)\
-                .filter(LotDB.status != 'completed')
-            
-            # Исключаем лоты где ВСЕ батчи проверены
-            # Проверенные = НЕ qc_pending И (ЕСТЬ inspector_id ИЛИ в финальных состояниях)
-            # Логика: исключаем лот, если НЕТ непроверенных батчей
-            unchecked_batch_exists = db.query(BatchDB.lot_id)\
-                .filter(
-                    or_(
-                        BatchDB.current_location == 'qc_pending',  # qc_pending = непроверенный
-                        and_(
-                            BatchDB.qc_inspector_id.is_(None),  # НЕТ инспектора
-                            BatchDB.current_location.notin_(['good', 'defect', 'archived'])  # И НЕ в финальных состояниях
-                        )
-                    )
-                )\
-                .distinct()\
-                .subquery()
-            
-            # Включаем только лоты с непроверенными батчами
-            base_lot_ids_query = base_lot_ids_query.filter(BatchDB.lot_id.in_(unchecked_batch_exists))
-
-        lot_ids_with_active_batches_tuples = base_lot_ids_query.all()
-        lot_ids = [item[0] for item in lot_ids_with_active_batches_tuples]
-
-        if not lot_ids:
-            logger.info("Не найдено лотов с активными батчами (после фильтрации).")
-            return []
-        
-        logger.info(f"Найдены ID лотов с активными батчами: {lot_ids} (всего: {len(lot_ids)})")
-        
-        # 3. Основной запрос для данных по лотам и деталям
-        lots_query = db.query(LotDB, PartDB).select_from(LotDB)\
-            .join(PartDB, LotDB.part_id == PartDB.id)\
-            .filter(LotDB.id.in_(lot_ids))
-
-        lots_query_result = lots_query.all()
-        logger.info(f"Всего лотов (с деталями) для обработки: {len(lots_query_result)}")
-        
-        result = []
-        for lot_obj, part_obj in lots_query_result:
-            logger.debug(f"Обработка лота ID: {lot_obj.id}, Номер: {lot_obj.lot_number}")
-            
-            planned_quantity_val = None
-            inspector_name_val = None
-            machine_name_val = None
-            
-            # 4. Находим последнюю наладку для данного лота, включая имя станка
-            latest_setup_details = db.query(
-                    SetupDB.planned_quantity,
-                    SetupDB.qa_id,
-                    EmployeeDB.full_name.label("inspector_name_from_setup"),
-                    MachineDB.name.label("machine_name_from_setup"),
-                    SetupDB.machine_id.label("setup_machine_id")
-                )\
-                .outerjoin(EmployeeDB, SetupDB.qa_id == EmployeeDB.id) \
-                .outerjoin(MachineDB, SetupDB.machine_id == MachineDB.id) \
-                .filter(SetupDB.lot_id == lot_obj.id)\
-                .order_by(desc(SetupDB.created_at))\
-                .first()
-
-            passes_qa_filter = True
-
-            if latest_setup_details:
-                planned_quantity_val = latest_setup_details.planned_quantity
-                machine_name_val = latest_setup_details.machine_name_from_setup
-                logger.debug(f"Lot ID {lot_obj.id}: setup found, machine_id: {latest_setup_details.setup_machine_id}")
-
-                if latest_setup_details.qa_id:
-                    inspector_name_val = latest_setup_details.inspector_name_from_setup
-                    if current_user_qa_id is not None and latest_setup_details.qa_id != current_user_qa_id:
-                        passes_qa_filter = False
-                elif current_user_qa_id is not None:
-                    passes_qa_filter = False
-            elif current_user_qa_id is not None:
-                passes_qa_filter = False
-
-            if not passes_qa_filter:
-                continue
-
-            item_data = {
-                'id': lot_obj.id,
-                'drawing_number': part_obj.drawing_number,
-                'lot_number': lot_obj.lot_number,
-                'inspector_name': inspector_name_val,
-                'planned_quantity': planned_quantity_val,
-                'machine_name': machine_name_val,
-            }
-            
-            try:
-                result.append(LotInfoItem.model_validate(item_data))
-            except AttributeError:
-                result.append(LotInfoItem.parse_obj(item_data))
-
-        logger.info(f"Сформировано {len(result)} элементов для ответа /lots/pending-qc (оптимизированная версия).")
-        return result
-
-    except Exception as e:
-        logger.error(f"Ошибка в /lots/pending-qc: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера при получении лотов для ОТК")
-
-# --- END LOTS MANAGEMENT ENDPOINTS ---
-
-# --- LOT ANALYTICS ENDPOINT ---
-
-class LotAnalyticsResponse(BaseModel):
-    accepted_by_warehouse_quantity: int = 0  # "Принято" (на складе)
-    from_machine_quantity: int = 0           # "Со станка" (сырые)
-
-@app.get("/lots/{lot_id}/analytics", response_model=LotAnalyticsResponse)
-async def get_lot_analytics(lot_id: int, db: Session = Depends(get_db_session)):
-    """
-    Получить сводную аналитику по указанному лоту.
-    "Принято" (accepted_by_warehouse_quantity) - сумма recounted_quantity по всем партиям лота, прошедшим приемку складом.
-    "Со станка" (from_machine_quantity) - сумма current_quantity для "сырых" батчей (до приемки складом).
-    """
-    logger.error(f"DEBUG_ANALYTICS: Fetching simplified analytics for lot_id: {lot_id}")
-    
-    lot = db.query(LotDB).filter(LotDB.id == lot_id).first()
-    if not lot:
-        logger.warning(f"Lot with id {lot_id} not found for analytics.")
-        return LotAnalyticsResponse()
-
-    # accepted_by_warehouse_quantity: Сумма recounted_quantity для партий, обработанных складом.
-    # Это количество, которое склад фактически посчитал.
-    accepted_warehouse_query = db.query(BatchDB.recounted_quantity)\
-        .filter(BatchDB.lot_id == lot_id)\
-        .filter(BatchDB.recounted_quantity != None) # Условие, что партия прошла пересчет складом
-    
-    # Собираем только не-None значения для корректной суммы
-    accepted_quantities_list = [q[0] for q in accepted_warehouse_query.all() if q[0] is not None]
-    logger.error(f"DEBUG_ANALYTICS: For lot_id {lot_id}, recounted_quantities summed for 'accepted_by_warehouse': {accepted_quantities_list}")
-    
-    accepted_by_warehouse_result = sum(accepted_quantities_list)
-
-    # from_machine_quantity: Последнее показание счетчика для машины, связанной с последней наладкой этого лота.
-    from_machine_result = 0 # Значение по умолчанию
-    
-    # 1. Найти последнюю наладку для лота
-    latest_setup_for_lot = db.query(SetupDB.machine_id)\
-        .filter(SetupDB.lot_id == lot_id)\
-        .order_by(SetupDB.created_at.desc())\
-        .first()
-    
-    if latest_setup_for_lot:
-        machine_id_for_lot = latest_setup_for_lot.machine_id
-        # 2. Найти последнее показание для этой машины
-        latest_reading_for_machine = db.query(ReadingDB.reading)\
-            .filter(ReadingDB.machine_id == machine_id_for_lot)\
-            .order_by(ReadingDB.created_at.desc())\
-            .first()
-        
-        if latest_reading_for_machine:
-            from_machine_result = latest_reading_for_machine.reading or 0 # Берем показание или 0, если None
-            logger.error(f"DEBUG_ANALYTICS: For lot_id {lot_id}, found latest reading for machine {machine_id_for_lot}: {from_machine_result}")
-        else:
-            logger.error(f"DEBUG_ANALYTICS: For lot_id {lot_id}, no readings found for machine {machine_id_for_lot} (from latest setup)")
-    else:
-        logger.error(f"DEBUG_ANALYTICS: For lot_id {lot_id}, no setup found to determine machine_id for 'from_machine_quantity'")
-
-    logger.error(f"DEBUG_ANALYTICS: For lot_id {lot_id}, accepted_by_warehouse={accepted_by_warehouse_result}, from_machine={from_machine_result}")
-
-    return LotAnalyticsResponse(
-        accepted_by_warehouse_quantity=accepted_by_warehouse_result,
-        from_machine_quantity=from_machine_result
-    )
-
-# --- END LOT ANALYTICS ENDPOINT ---
+# --- LOT ENDPOINTS MOVED TO ROUTERS ---
 
 @app.get("/api/morning-report")
 async def morning_report():
@@ -1880,204 +1704,9 @@ class LotResponse(LotBase):
         from_attributes = True # <--- ИСПРАВЛЕНО с orm_mode
 # <<< КОНЕЦ НОВЫХ Pydantic МОДЕЛЕЙ ДЛЯ LOT >>>
 
-# <<< НОВЫЙ ЭНДПОИНТ POST /lots/ >>>
-@app.post("/lots/", response_model=LotResponse, status_code=201, tags=["Lots"])
-async def create_lot(
-    lot_data: LotCreate, 
-    db: Session = Depends(get_db_session),
-    # current_user: EmployeeDB = Depends(get_current_active_user) # Раскомментировать, когда аутентификация будет готова
-):
-    try: # <--- НАЧАЛО БОЛЬШОГО TRY-БЛОКА
-        logger.info(f"Запрос на создание лота: {lot_data.model_dump()}")
+# Duplicate lot endpoints removed - moved to routers
 
-        # Проверка существования детали
-        part = db.query(PartDB).filter(PartDB.id == lot_data.part_id).first()
-        if not part:
-            logger.warning(f"Деталь с ID {lot_data.part_id} не найдена при создании лота.")
-            raise HTTPException(status_code=404, detail=f"Part with id {lot_data.part_id} not found")
-
-        # Проверка уникальности номера лота
-        existing_lot = db.query(LotDB).filter(LotDB.lot_number == lot_data.lot_number).first()
-        if existing_lot:
-            logger.warning(f"Лот с номером {lot_data.lot_number} уже существует (ID: {existing_lot.id}).")
-            raise HTTPException(status_code=409, detail=f"Lot with lot_number '{lot_data.lot_number}' already exists.")
-
-        db_lot_data = lot_data.model_dump(exclude_unset=True)
-        logger.debug(f"Данные для создания LotDB (после model_dump): {db_lot_data}")
-        
-        # Если order_manager_id передан, а created_by_order_manager_at нет, устанавливаем текущее время
-        if db_lot_data.get("order_manager_id") is not None:
-            if db_lot_data.get("created_by_order_manager_at") is None:
-                db_lot_data["created_by_order_manager_at"] = datetime.now(timezone.utc) # Используем UTC
-        
-        # Проверка ключевых полей перед созданием объекта
-        if 'part_id' not in db_lot_data or db_lot_data['part_id'] is None:
-            logger.error("Критическая ошибка: part_id отсутствует или None в db_lot_data перед созданием LotDB.")
-            raise HTTPException(status_code=500, detail="Internal error: part_id is missing for LotDB creation.")
-        
-        if 'lot_number' not in db_lot_data or not db_lot_data['lot_number']:
-            logger.error("Критическая ошибка: lot_number отсутствует или пуст в db_lot_data перед созданием LotDB.")
-            raise HTTPException(status_code=500, detail="Internal error: lot_number is missing for LotDB creation.")
-
-        logger.info(f"Попытка создать объект LotDB с данными: {db_lot_data} и status='{LotStatus.NEW.value}'")
-        db_lot = LotDB(**db_lot_data, status=LotStatus.NEW.value) # Статус 'new' по умолчанию
-        logger.info(f"Объект LotDB создан в памяти (ID пока нет).")
-
-        db.add(db_lot)
-        logger.info("Объект LotDB добавлен в сессию SQLAlchemy.")
-        
-        try:
-            logger.info("Попытка выполнить db.flush().")
-            db.flush()
-            logger.info("db.flush() выполнен успешно.")
-        except Exception as flush_exc:
-            db.rollback()
-            logger.error(f"Ошибка во время db.flush() при создании лота: {flush_exc}", exc_info=True)
-            logger.error(f"Полный трейсбек ошибки flush: {traceback.format_exc()}")
-            raise HTTPException(status_code=500, detail=f"Database flush error: {str(flush_exc)}")
-
-        db.commit()
-        logger.info("db.commit() выполнен успешно.")
-        db.refresh(db_lot)
-        logger.info(f"Лот '{db_lot.lot_number}' успешно создан с ID {db_lot.id}.")
-        
-        # Для LotResponse нам нужна информация о детали
-        # Явно загружаем деталь, если она не была загружена через joinedload/selectinload в LotDB
-        # или если LotResponse требует этого. В нашем случае LotResponse имеет part: Optional[PartResponse]
-        # SQLAlchemy должен автоматически подтянуть связанную деталь, если сессия активна
-        # и db_lot.part доступно.
-        # Но для надежности можно сделать так, если возникают проблемы:
-        # if not db_lot.part: # Это не сработает, т.к. part это relationship
-        #    db_lot.part = db.query(PartDB).filter(PartDB.id == db_lot.part_id).first()
-        # logger.info(f"Подготовленный для ответа лот: {db_lot}, связанная деталь: {db_lot.part}")
-
-        return db_lot
-    
-    except HTTPException as http_e:
-        # db.rollback() # FastAPI обработчик ошибок позаботится об этом, если транзакция была начата
-        logger.error(f"HTTPException при создании лота: {http_e.status_code} - {http_e.detail}")
-        raise http_e # Перебрасываем дальше, чтобы FastAPI вернул корректный HTTP ответ
-    
-    except IntegrityError as int_e:
-        db.rollback()
-        logger.error(f"IntegrityError при создании лота: {int_e}", exc_info=True)
-        detailed_error = str(int_e.orig) if hasattr(int_e, 'orig') and int_e.orig else str(int_e)
-        logger.error(f"Полный трейсбек IntegrityError: {traceback.format_exc()}")
-        
-        # Попытка определить, какое ограничение было нарушено
-        if "uq_lot_number_global" in detailed_error.lower():
-             raise HTTPException(status_code=409, detail=f"Lot with lot_number '{lot_data.lot_number}' already exists (race condition or concurrent request). Possible original error: {detailed_error}")
-        elif "lots_part_id_fkey" in detailed_error.lower():
-             raise HTTPException(status_code=404, detail=f"Part with id {lot_data.part_id} not found (race condition or concurrent request). Possible original error: {detailed_error}")
-        else:
-            raise HTTPException(status_code=500, detail=f"Database integrity error occurred. Possible original error: {detailed_error}")
-
-    except Exception as e:
-        db.rollback()
-        logger.error(f"НЕПРЕДВИДЕННАЯ ОШИБКА СЕРВЕРА при создании лота: {e}", exc_info=True)
-        detailed_traceback = traceback.format_exc()
-        logger.error(f"ПОЛНЫЙ ТРЕЙСБЕК НЕПРЕДВИДЕННОЙ ОШИБКИ:\n{detailed_traceback}")
-        # Временно возвращаем трейсбек в detail для отладки
-        raise HTTPException(status_code=500, detail=f"Unexpected server error. Traceback: {detailed_traceback}")
-
-# Эндпоинт для получения списка лотов (пример, может потребовать доработки)
-@app.get("/lots/", response_model=List[LotResponse], tags=["Lots"])
-async def get_lots(
-    response: Response, 
-    search: Optional[str] = Query(None, description="Поисковый запрос для номера лота"),
-    part_search: Optional[str] = Query(None, description="Поисковый запрос для номера детали"),
-    status_filter: Optional[str] = Query(None, description="Фильтр по статусам (через запятую, например: new,in_production)"),
-    skip: int = Query(0, ge=0, description="Количество записей для пропуска (пагинация)"),
-    limit: int = Query(100, ge=1, le=500, description="Максимальное количество записей для возврата (пагинация)"),
-    db: Session = Depends(get_db_session)
-):
-    """
-    Получить список всех лотов.
-    Поддерживает поиск по `lot_number` (номер лота) и отдельный поиск по `drawing_number` (номер чертежа связанной детали) (частичное совпадение без учета регистра).
-    Поддерживает пагинацию через `skip` и `limit`.
-    Сортировка по убыванию ID лота (новые сверху).
-    """
-    query = db.query(LotDB).options(selectinload(LotDB.part))
-    
-    # Поиск по номеру лота
-    if search:
-        search_term = f"%{search.lower()}%"
-        query = query.filter(func.lower(LotDB.lot_number).like(search_term))
-    
-    # Поиск по номеру детали
-    if part_search:
-        part_search_term = f"%{part_search.lower()}%"
-        query = query.join(LotDB.part).filter(func.lower(PartDB.drawing_number).like(part_search_term))
-    
-    # Фильтрация по статусам
-    if status_filter:
-        statuses = [status.strip() for status in status_filter.split(',') if status.strip()]
-        if statuses:
-            query = query.filter(LotDB.status.in_(statuses))
-    
-    total_count = query.count() 
-
-    lots = query.order_by(LotDB.id.desc()).offset(skip).limit(limit).all()
-    logger.info(f"Запрос списка лотов: search='{search}', part_search='{part_search}', skip={skip}, limit={limit}. Возвращено {len(lots)} из {total_count} лотов.")
-    
-    response.headers["X-Total-Count"] = str(total_count)
-    # УДАЛЕНО: response.headers["Access-Control-Expose-Headers"] = "X-Total-Count" 
-        
-    return lots
-
-# <<< НОВЫЙ ЭНДПОИНТ ДЛЯ ОБНОВЛЕНИЯ СТАТУСА ЛОТА >>>
-class LotStatusUpdate(BaseModel):
-    status: LotStatus
-
-class LotQuantityUpdate(BaseModel):
-    additional_quantity: int = Field(..., ge=0, description="Дополнительное количество (неотрицательное число)")
-
-@app.patch("/lots/{lot_id}/status", response_model=LotResponse, tags=["Lots"])
-async def update_lot_status(
-    lot_id: int,
-    status_update: LotStatusUpdate,
-    db: Session = Depends(get_db_session)
-):
-    """
-    Обновить статус лота.
-    Используется для синхронизации статусов между Telegram-ботом и FastAPI.
-    """
-    try:
-        # Найти лот
-        lot = db.query(LotDB).options(selectinload(LotDB.part)).filter(LotDB.id == lot_id).first()
-        if not lot:
-            raise HTTPException(status_code=404, detail=f"Lot with id {lot_id} not found")
-        
-        old_status = lot.status
-        lot.status = status_update.status.value
-        
-        db.commit()
-        db.refresh(lot)
-        
-        logger.info(f"Статус лота {lot_id} обновлен с '{old_status}' на '{status_update.status.value}'")
-        
-        return lot
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Ошибка при обновлении статуса лота {lot_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error while updating lot status")
-
-# <<< ЭНДПОИНТ ДЛЯ ПОЛУЧЕНИЯ ОДНОГО ЛОТА >>>
-@app.get("/lots/{lot_id}", response_model=LotResponse, tags=["Lots"])
-async def get_lot(lot_id: int, db: Session = Depends(get_db_session)):
-    """
-    Получить информацию о конкретном лоте.
-    """
-    lot = db.query(LotDB).options(selectinload(LotDB.part)).filter(LotDB.id == lot_id).first()
-    if not lot:
-        raise HTTPException(status_code=404, detail=f"Lot with id {lot_id} not found")
-    
-    return lot
-
-@app.patch("/lots/{lot_id}/quantity", response_model=LotResponse, tags=["Lots"])
+# Schema imports needed for remaining code
 async def update_lot_quantity(
     lot_id: int, 
     quantity_update: LotQuantityUpdate, 
@@ -2122,49 +1751,7 @@ async def update_lot_quantity(
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Внутренняя ошибка сервера при обновлении количества: {str(e)}")
 
-@app.patch("/lots/{lot_id}/close", response_model=LotResponse, tags=["Lots"])
-async def close_lot(lot_id: int, db: Session = Depends(get_db_session)):
-    """
-    Закрыть лот (перевести в статус 'completed').
-    Доступно только для лотов в статусе 'post_production'.
-    """
-    try:
-        lot = db.query(LotDB).options(selectinload(LotDB.part)).filter(LotDB.id == lot_id).first()
-        if not lot:
-            raise HTTPException(status_code=404, detail=f"Лот с ID {lot_id} не найден")
-        
-        logger.info(f"Attempting to close lot {lot_id} (current status: {lot.status})")
-        
-        if lot.status != 'post_production':
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Нельзя закрыть лот в статусе '{lot.status}'. Ожидался статус 'post_production'"
-            )
-        
-        # Обновляем статус лота
-        lot.status = 'completed'
-        db.commit()
-        db.refresh(lot)
-        
-        logger.info(f"Successfully closed lot {lot_id}")
-        
-        # Синхронизируем с Telegram-ботом
-        try:
-            await sync_lot_status_to_telegram_bot(lot_id, 'completed')
-        except Exception as sync_error:
-            logger.error(f"Failed to sync lot closure to Telegram bot: {sync_error}")
-            # Не прерываем выполнение, если синхронизация не удалась
-        
-        return lot
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error closing lot {lot_id}: {e}", exc_info=True)
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Внутренняя ошибка сервера при закрытии лота: {str(e)}")
-
-# <<< КОНЕЦ НОВЫХ ЭНДПОИНТОВ ДЛЯ ЛОТОВ >>>
+# Duplicate lot endpoint removed - available through router
 
 # === ОТЧЕТНОСТЬ И АНАЛИТИКА ДЛЯ ORDER MANAGER ===
 
