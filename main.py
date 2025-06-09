@@ -28,6 +28,8 @@ from sqlalchemy.exc import IntegrityError
 
 # Импорт роутеров
 from src.routers import parts
+# Импорт схем
+from src.schemas.part import PartResponse
 
 logger = logging.getLogger(__name__)
 
