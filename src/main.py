@@ -30,20 +30,26 @@ from sqlalchemy.exc import IntegrityError
 from src.schemas.lot import LotStatus, LotBase, LotCreate, LotResponse, LotQuantityUpdate
 
 # Router imports
-from src.routers import parts, employees, machines, readings, setups, batches, lots
+from src.routers.parts import router as parts_router
+from src.routers.employees import router as employees_router  
+from src.routers.machines import router as machines_router
+from src.routers.readings import router as readings_router
+from src.routers.setups import router as setups_router
+from src.routers.batches import router as batches_router
+from src.routers.lots import router as lots_router
 
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Machine Logic Service", debug=True)
 
 # Include routers
-app.include_router(parts.router)
-app.include_router(employees.router) 
-app.include_router(machines.router)
-app.include_router(readings.router)
-app.include_router(setups.router)
-app.include_router(batches.router)
-app.include_router(lots.router)
+app.include_router(parts_router)
+app.include_router(employees_router) 
+app.include_router(machines_router)
+app.include_router(readings_router)
+app.include_router(setups_router)
+app.include_router(batches_router)
+app.include_router(lots_router)
 
 # Возвращаем универсальное разрешение CORS
 app.add_middleware(
@@ -1666,47 +1672,7 @@ async def get_employees(db: Session = Depends(get_db_session)):
         raise HTTPException(status_code=500, detail="Internal server error while fetching employees")
 # --- END NEW ENDPOINT ---
 
-# <<< НОВЫЕ Pydantic МОДЕЛИ ДЛЯ LOT >>>
-from enum import Enum
-
-class LotStatus(str, Enum):
-    """Статусы лотов для синхронизации между Telegram-ботом и FastAPI"""
-    NEW = "new"                    # Новый лот от Order Manager
-    IN_PRODUCTION = "in_production"  # Лот в производстве (после начала наладки)
-    POST_PRODUCTION = "post_production"  # Лот после производства (все наладки завершены)
-    COMPLETED = "completed"        # Завершенный лот
-    CANCELLED = "cancelled"        # Отмененный лот
-    ACTIVE = "active"             # Устаревший статус (для совместимости)
-
-class LotBase(BaseModel):
-    lot_number: str
-    part_id: int
-    initial_planned_quantity: Optional[int] = None # <--- СДЕЛАНО ОПЦИОНАЛЬНЫМ
-    due_date: Optional[datetime] = None
-    # Статус будет устанавливаться по умолчанию на бэкенде
-
-class LotCreate(LotBase):
-    # order_manager_id и created_by_order_manager_at будут добавлены на бэкенде
-    # Обновляем для временного решения: клиент может передавать эти поля
-    order_manager_id: Optional[int] = None
-    created_by_order_manager_at: Optional[datetime] = None
-
-class LotResponse(LotBase):
-    id: int
-    order_manager_id: Optional[int] = None
-    created_by_order_manager_at: Optional[datetime] = None
-    status: LotStatus
-    created_at: Optional[datetime] = None # <--- СДЕЛАНО ОПЦИОНАЛЬНЫМ
-    total_planned_quantity: Optional[int] = None # Общее количество (плановое + дополнительное)
-    part: Optional[PartResponse] = None # Для возврата информации о детали вместе с лотом
-
-    class Config:
-        from_attributes = True # <--- ИСПРАВЛЕНО с orm_mode
-# <<< КОНЕЦ НОВЫХ Pydantic МОДЕЛЕЙ ДЛЯ LOT >>>
-
-# Duplicate lot endpoints removed - moved to routers
-
-# Schema imports needed for remaining code
+# Duplicate lot schemas removed - using schemas from src.schemas.lot
 async def update_lot_quantity(
     lot_id: int, 
     quantity_update: LotQuantityUpdate, 
