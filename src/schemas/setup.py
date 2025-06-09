@@ -7,9 +7,10 @@ from src.models.setup import SetupStatus
 class SetupInput(BaseModel):
     machine_id: int
     operator_id: int
-    part_id: int
-    lot_id: Optional[int] = None
+    drawing_number: str
+    lot_number: str
     planned_quantity: int
+    cycle_time_seconds: Optional[int] = 30
 
 class SetupStatusUpdate(BaseModel):
     status: SetupStatus
@@ -60,5 +61,23 @@ class QaSetupViewItem(BaseModel):
     qaDate: Optional[datetime] = Field(None, alias='qa_date')
 
     class Config:
-        from_attributes = True 
+        from_attributes = True
+        populate_by_name = True
+
+class ApproveSetupPayload(BaseModel):
+    qa_id: int
+
+class ApprovedSetupResponse(BaseModel):
+    id: int
+    machineName: Optional[str] = Field(None, alias='machineName')
+    drawingNumber: Optional[str] = Field(None, alias='drawingNumber')
+    lotNumber: Optional[str] = Field(None, alias='lotNumber')
+    machinistName: Optional[str] = Field(None, alias='machinistName')
+    startTime: Optional[datetime] = Field(None, alias='startTime')
+    status: Optional[str]
+    qaName: Optional[str] = Field(None, alias='qaName')
+    qaDate: Optional[datetime] = Field(None, alias='qaDate')
+
+    class Config:
+        from_attributes = True
         populate_by_name = True 

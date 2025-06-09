@@ -27,12 +27,13 @@ from sqlalchemy import func, desc, case, text, or_, and_
 from sqlalchemy.exc import IntegrityError
 
 # Импорт роутеров
-from src.routers import parts, employees, machines, readings
+from src.routers import parts, employees, machines, readings, setups
 # Импорт схем
 from src.schemas.part import PartResponse
 from src.schemas.employee import EmployeeItem
 from src.schemas.machine import MachineItem, OperatorMachineViewItem, BatchLabelInfo, BatchAvailabilityInfo
 from src.schemas.reading import ReadingInput, ReadingResponse
+from src.schemas.setup import SetupInput, QaSetupViewItem, ApproveSetupPayload, ApprovedSetupResponse
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,7 @@ app.include_router(parts.router)
 app.include_router(employees.router)
 app.include_router(machines.router)
 app.include_router(readings.router)
+app.include_router(setups.router)
 
 
 
@@ -71,50 +73,6 @@ async def root():
         "available_statuses": [status.value for status in SetupStatus]
     }
 
-@app.get("/setup/{machine_id}/status")
-async def get_setup_status(machine_id: int, db: Session = Depends(get_db_session)):
-    """
-    Получить текущий статус наладки для станка
-    """
-    # Получаем последнюю наладку для станка
-    setup = db.query(SetupDB).filter(
-        SetupDB.machine_id == machine_id
-    ).order_by(SetupDB.created_at.desc()).first()
-    
-    if not setup:
-        return {
-            "machine_id": machine_id,
-            "status": SetupStatus.IDLE.value,
-            "message": "Станок простаивает"
-        }
-    
-    return {
-        "machine_id": machine_id,
-        "status": setup.status,
-        "message": f"Текущий статус: {setup.status}"
-    }
-
-@app.get("/setup/{machine_id}/all")
-async def get_setup_history(machine_id: int, db: Session = Depends(get_db_session)):
-    """
-    Получить историю наладок для станка
-    """
-    setups = db.query(SetupDB).filter(
-        SetupDB.machine_id == machine_id
-    ).order_by(SetupDB.created_at.desc()).all()
-    
-    return {
-        "machine_id": machine_id,
-        "setups": [
-            {
-                "id": s.id,
-                "status": s.status,
-                "created_at": s.created_at,
-                "start_time": s.start_time,
-                "end_time": s.end_time
-            } for s in setups
-        ]
-    }
 
 
 
@@ -127,13 +85,10 @@ async def get_setup_history(machine_id: int, db: Session = Depends(get_db_sessio
 
 
 
-class SetupInput(BaseModel):
-    machine_id: int
-    operator_id: int
-    drawing_number: str
-    lot_number: str
-    planned_quantity: int
-    cycle_time_seconds: Optional[int] = 30
+
+
+
+
 
 @app.post("/setup")
 async def create_setup(setup: SetupInput, db: Session = Depends(get_db_session)):
