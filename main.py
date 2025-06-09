@@ -27,11 +27,12 @@ from sqlalchemy import func, desc, case, text, or_, and_
 from sqlalchemy.exc import IntegrityError
 
 # Импорт роутеров
-from src.routers import parts, employees, machines
+from src.routers import parts, employees, machines, readings
 # Импорт схем
 from src.schemas.part import PartResponse
 from src.schemas.employee import EmployeeItem
 from src.schemas.machine import MachineItem, OperatorMachineViewItem, BatchLabelInfo, BatchAvailabilityInfo
+from src.schemas.reading import ReadingInput, ReadingResponse
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,7 @@ async def startup_event():
 app.include_router(parts.router)
 app.include_router(employees.router)
 app.include_router(machines.router)
+app.include_router(readings.router)
 
 
 
@@ -114,225 +116,16 @@ async def get_setup_history(machine_id: int, db: Session = Depends(get_db_sessio
         ]
     }
 
-class ReadingInput(BaseModel):
-    machine_id: int
-    operator_id: int
-    value: int
-
-@app.post("/readings")
-async def save_reading(reading_input: ReadingInput, db: Session = Depends(get_db_session)):
-    """
-    Сохранить показания счетчика, обновить статус наладки и создать/обновить батч.
-    """
-    logger.info(f"Received reading save request: {reading_input}")
-    # Используем reading_input вместо reading для ясности
-    
-    # Начинаем транзакцию
-    trans = db.begin_nested() if db.in_transaction() else db.begin()
-    try:
-        # 1. Получаем последнюю активную наладку для станка
-        setup = db.query(SetupDB)\
-            .filter(SetupDB.machine_id == reading_input.machine_id)\
-            .filter(SetupDB.status.in_(['created', 'pending_qc', 'allowed', 'started']))\
-            .filter(SetupDB.end_time.is_(None))\
-            .order_by(SetupDB.created_at.desc())\
-            .first()
-
-        logger.info(f"Found active setup: {setup.id if setup else None}, status: {setup.status if setup else None}")
-
-        if not setup:
-            raise HTTPException(status_code=404, detail="Активная наладка не найдена для этого станка")
-
-        # 2. Сохраняем сами показания
-        reading_db = ReadingDB(
-            employee_id=reading_input.operator_id,
-            machine_id=reading_input.machine_id,
-            reading=reading_input.value,
-            created_at=datetime.now() # Фиксируем время явно
-        )
-        db.add(reading_db)
-        db.flush() # Чтобы получить ID и время, если нужно
-        logger.info(f"Reading record created: ID {reading_db.id}")
-
-        # --- Логика обновления статуса наладки и работы с батчами ---
-        new_setup_status = setup.status
-        batch_message = ""
-
-        # 3. Обновляем статус наладки, если нужно
-        if reading_input.value == 0:
-            if setup.status in ['created', 'allowed']:
-                logger.info(f"Updating setup {setup.id} status from {setup.status} to started (reading is 0)")
-                setup.status = 'started'
-                setup.start_time = reading_db.created_at # Используем время показаний
-                new_setup_status = 'started'
-                batch_message = "Наладка активирована"
-            elif setup.status != 'started':
-                 raise HTTPException(
-                     status_code=400, 
-                     detail=f"Нельзя вводить нулевые показания в статусе {setup.status}"
-                 )
-            # Для статуса 'started' нулевые показания просто сохраняются, батч не создается
-        
-        elif reading_input.value > 0:
-            # Для ненулевых показаний
-            if setup.status in ['created', 'allowed']:
-                # Случай пропуска нуля
-                logger.info(f"Updating setup {setup.id} status from {setup.status} to started (reading > 0, zero skipped)")
-                setup.status = 'started'
-                setup.start_time = reading_db.created_at
-                new_setup_status = 'started'
-                batch_message = ("⚠️ Внимание! В начале работы необходимо вводить нулевые показания. "
-                                 "Наладка автоматически активирована.")
-                
-                # Ищем существующий батч production (на всякий случай, хотя его не должно быть)
-                existing_batch = db.query(BatchDB)\
-                    .filter(BatchDB.setup_job_id == setup.id)\
-                    .filter(BatchDB.current_location == 'production')\
-                    .first()
-                
-                if not existing_batch:
-                    logger.info(f"Creating initial production batch for setup {setup.id} (zero skipped)")
-                    new_batch = BatchDB(
-                        setup_job_id=setup.id,
-                        lot_id=setup.lot_id,
-                        initial_quantity=0, 
-                        current_quantity=reading_input.value, # Текущее кол-во = показаниям
-                        current_location='production',
-                        batch_time=reading_db.created_at,
-                        operator_id=reading_input.operator_id,
-                        created_at=reading_db.created_at # Используем время показаний
-                    )
-                    db.add(new_batch)
-                else:
-                     logger.warning(f"Found existing production batch {existing_batch.id} when zero was skipped. Updating quantity.")
-                     existing_batch.current_quantity = reading_input.value
-                     existing_batch.operator_id = reading_input.operator_id
-                     existing_batch.batch_time = reading_db.created_at
-
-            elif setup.status == 'started':
-                # Наладка уже была начата, ищем предыдущее показание
-                prev_reading_obj = db.query(ReadingDB.reading)\
-                    .filter(ReadingDB.machine_id == reading_input.machine_id)\
-                    .filter(ReadingDB.created_at < reading_db.created_at)\
-                    .order_by(ReadingDB.created_at.desc())\
-                    .first()
-                
-                prev_reading = prev_reading_obj[0] if prev_reading_obj else 0 # Считаем 0, если нет предыдущего
-                quantity_in_batch = reading_input.value - prev_reading
-                logger.info(f"Prev reading: {prev_reading}, Current: {reading_input.value}, Diff: {quantity_in_batch}")
-
-                if quantity_in_batch > 0:
-                    # --- ИСПРАВЛЕНИЕ: Всегда создаем НОВЫЙ батч --- 
-                    logger.info(f"Creating NEW production batch for setup {setup.id} (started state)")
-                    new_batch = BatchDB(
-                        setup_job_id=setup.id,
-                        lot_id=setup.lot_id,
-                        initial_quantity=prev_reading, # Начальное кол-во = предыдущие показания
-                        current_quantity=quantity_in_batch, # Текущее кол-во = разница
-                        current_location='production',
-                        batch_time=reading_db.created_at,
-                        operator_id=reading_input.operator_id,
-                        created_at=reading_db.created_at # Используем время показаний
-                    )
-                    db.add(new_batch)
-                    # --- Конец исправления ---
-                else:
-                     logger.warning(f"Quantity difference is not positive ({quantity_in_batch}), not creating batch.")
-            else: # Статус не 'created', 'allowed', 'started'
-                 raise HTTPException(
-                     status_code=400, 
-                     detail=f"Нельзя вводить показания в статусе {setup.status}"
-                 )
-        else: # reading_input.value < 0
-             raise HTTPException(status_code=400, detail="Показания не могут быть отрицательными")
-
-        # 4. Фиксируем транзакцию
-        trans.commit()
-        logger.info("Transaction committed successfully")
-
-        # 5. Сохраняем в Google Sheets (вне транзакции)
-        try:
-            operator = db.query(EmployeeDB.full_name).filter(EmployeeDB.id == reading_input.operator_id).scalar() or "Unknown"
-            machine = db.query(MachineDB.name).filter(MachineDB.id == reading_input.machine_id).scalar() or "Unknown"
-            asyncio.create_task(save_to_sheets(
-                operator=operator,
-                machine=machine,
-                reading=reading_input.value
-            ))
-        except Exception as sheet_error:
-             logger.error(f"Error saving to Google Sheets: {sheet_error}", exc_info=True)
-             # Не прерываем выполнение из-за ошибки Sheets
-
-        return {
-            "success": True,
-            "message": batch_message if batch_message else "Показания успешно сохранены",
-            "reading": reading_input.model_dump(), # Используем model_dump для Pydantic v2
-            "new_status": new_setup_status
-        }
-
-    except HTTPException as http_exc:
-        trans.rollback()
-        logger.error(f"HTTPException in save_reading: {http_exc.detail}")
-        raise http_exc
-    except Exception as e:
-        trans.rollback()
-        logger.error(f"Error in save_reading: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error while saving reading")
 
 
 
-@app.get("/readings")
-async def get_readings(db: Session = Depends(get_db_session)):
-    """
-    Получить последние показания
-    """
-    logger.info("--- Запрос GET /readings получен ---") # Лог начала
-    try:
-        logger.info("Выполняется запрос к ReadingDB...")
-        readings = db.query(ReadingDB).order_by(ReadingDB.created_at.desc()).limit(100).all()
-        logger.info(f"Запрос к ReadingDB выполнен, получено {len(readings)} записей.")
-        
-        # Формируем ответ
-        response_data = {
-            "readings": [
-                {
-                    "id": r.id,
-                    "machine_id": r.machine_id,
-                    "employee_id": r.employee_id,
-                    "reading": r.reading,
-                    # Преобразуем дату в строку ISO, чтобы избежать проблем сериализации
-                    "created_at": r.created_at.isoformat() if r.created_at else None 
-                } for r in readings
-            ]
-        }
-        logger.info("--- Ответ для GET /readings сформирован успешно --- ")
-        return response_data # Возвращаем словарь, FastAPI сам сделает JSON
-        
-    except Exception as e:
-        logger.error(f"!!! Ошибка в GET /readings: {e}", exc_info=True) # Логируем ошибку
-        # Поднимаем HTTPException, чтобы FastAPI вернул корректный JSON ошибки 500
-        raise HTTPException(status_code=500, detail="Internal server error processing readings")
 
-@app.get("/readings/{machine_id}")
-async def get_machine_readings(machine_id: int, db: Session = Depends(get_db_session)):
-    """
-    Получить показания для конкретного станка
-    """
-    readings = db.query(ReadingDB).filter(
-        ReadingDB.machine_id == machine_id
-    ).order_by(ReadingDB.created_at.desc()).limit(100).all()
-    
-    return {
-        "machine_id": machine_id,
-        "readings": [
-            {
-                "id": r.id,
-                "employee_id": r.employee_id,
-                "reading": r.reading,
-                "created_at": r.created_at
-            } for r in readings
-        ]
-    }
+
+
+
+
+
+
 
 class SetupInput(BaseModel):
     machine_id: int
