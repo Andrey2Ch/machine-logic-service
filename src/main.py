@@ -1369,7 +1369,8 @@ async def accept_batch_on_warehouse(batch_id: int, payload: AcceptWarehousePaylo
         batch.current_location = 'warehouse_counted'
         batch.warehouse_employee_id = payload.warehouse_employee_id
         batch.warehouse_received_at = datetime.now()
-        batch.operator_id = payload.warehouse_employee_id # Обновляем оператора на кладовщика
+        # НЕ МЕНЯЕМ operator_id! Оставляем оригинального оператора для истории
+        # batch.operator_id остается прежним - это оператор, который делал деталь
         batch.updated_at = datetime.now() 
 
         db.commit()
