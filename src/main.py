@@ -1412,7 +1412,8 @@ class LotInfoItem(BaseModel):
 async def get_lots_pending_qc(
     db: Session = Depends(get_db_session), 
     current_user_qa_id: Optional[int] = Query(None, alias="qaId"),
-    hideCompleted: Optional[bool] = Query(False, description="Скрыть завершенные лоты и лоты со всеми проверенными батчами")
+    hideCompleted: Optional[bool] = Query(False, description="Скрыть завершенные лоты и лоты со всеми проверенными батчами"),
+    dateFilter: Optional[str] = Query("all", description="Фильтр по периоду: all, 1month, 2months, 6months")
 ):
     """
     Получить лоты для ОТК (старая логика с оптимизированной фильтрацией).
@@ -1422,18 +1423,36 @@ async def get_lots_pending_qc(
     3. Опционально фильтрует по qaId, если он предоставлен (на основе qa_id в последней наладке).
     4. Опционально скрывает завершенные лоты (hideCompleted=True) - ОПТИМИЗИРОВАНО через SQL.
     """
-    logger.info(f"Запрос /lots/pending-qc получен. qaId: {current_user_qa_id}, hideCompleted: {hideCompleted}")
+    logger.info(f"Запрос /lots/pending-qc получен. qaId: {current_user_qa_id}, hideCompleted: {hideCompleted}, dateFilter: {dateFilter}")
     try:
         # 1. Базовый запрос на получение ID лотов с активными (неархивными) батчами
         base_lot_ids_query = db.query(BatchDB.lot_id)\
             .filter(BatchDB.current_location != 'archived') \
             .distinct()
 
-        # 2. Если включен фильтр hideCompleted, дополнительно исключаем завершенные лоты
+        # 2. Применяем фильтры (JOIN делаем один раз если нужен)
+        needs_lot_join = (dateFilter and dateFilter != "all") or hideCompleted
+        if needs_lot_join:
+            base_lot_ids_query = base_lot_ids_query.join(LotDB, BatchDB.lot_id == LotDB.id)
+        
+        # Применяем фильтр по дате
+        if dateFilter and dateFilter != "all":
+            from datetime import datetime, timedelta
+            filter_date = None
+            if dateFilter == "1month":
+                filter_date = datetime.now() - timedelta(days=30)
+            elif dateFilter == "2months":
+                filter_date = datetime.now() - timedelta(days=60)
+            elif dateFilter == "6months":
+                filter_date = datetime.now() - timedelta(days=180)
+            
+            if filter_date:
+                base_lot_ids_query = base_lot_ids_query.filter(LotDB.created_at >= filter_date)
+
+        # Применяем фильтр hideCompleted
         if hideCompleted:
             # Исключаем лоты со статусом 'completed'
-            base_lot_ids_query = base_lot_ids_query.join(LotDB, BatchDB.lot_id == LotDB.id)\
-                .filter(LotDB.status != 'completed')
+            base_lot_ids_query = base_lot_ids_query.filter(LotDB.status != 'completed')
             
             # Исключаем лоты где ВСЕ батчи проверены
             # Проверенные = НЕ qc_pending И (ЕСТЬ inspector_id ИЛИ в финальных состояниях)
@@ -1540,6 +1559,9 @@ async def get_lots_pending_qc(
 class LotAnalyticsResponse(BaseModel):
     accepted_by_warehouse_quantity: int = 0  # "Принято" (на складе)
     from_machine_quantity: int = 0           # "Со станка" (сырые)
+    good_quantity: int = 0                   # Годные детали
+    defect_quantity: int = 0                 # Бракованные детали
+    total_inspected_quantity: int = 0        # Общее количество проверенных
 
 @app.get("/lots/{lot_id}/analytics", response_model=LotAnalyticsResponse)
 async def get_lot_analytics(lot_id: int, db: Session = Depends(get_db_session)):
@@ -1592,11 +1614,35 @@ async def get_lot_analytics(lot_id: int, db: Session = Depends(get_db_session)):
     else:
         logger.error(f"DEBUG_ANALYTICS: For lot_id {lot_id}, no setup found to determine machine_id for 'from_machine_quantity'")
 
-    logger.error(f"DEBUG_ANALYTICS: For lot_id {lot_id}, accepted_by_warehouse={accepted_by_warehouse_result}, from_machine={from_machine_result}")
+    # Получение данных о качестве (good/defect батчи)
+    good_quantity_result = 0
+    defect_quantity_result = 0
+    
+    # Подсчитываем годные детали из батчей со статусом 'good'
+    good_batches = db.query(BatchDB.current_quantity)\
+        .filter(BatchDB.lot_id == lot_id)\
+        .filter(BatchDB.current_location == 'good')\
+        .all()
+    good_quantity_result = sum(batch[0] for batch in good_batches if batch[0] is not None)
+    
+    # Подсчитываем бракованные детали из батчей со статусом 'defect'
+    defect_batches = db.query(BatchDB.current_quantity)\
+        .filter(BatchDB.lot_id == lot_id)\
+        .filter(BatchDB.current_location == 'defect')\
+        .all()
+    defect_quantity_result = sum(batch[0] for batch in defect_batches if batch[0] is not None)
+    
+    # Общее количество проверенных
+    total_inspected_result = good_quantity_result + defect_quantity_result
+
+    logger.error(f"DEBUG_ANALYTICS: For lot_id {lot_id}, accepted_by_warehouse={accepted_by_warehouse_result}, from_machine={from_machine_result}, good={good_quantity_result}, defect={defect_quantity_result}")
 
     return LotAnalyticsResponse(
         accepted_by_warehouse_quantity=accepted_by_warehouse_result,
-        from_machine_quantity=from_machine_result
+        from_machine_quantity=from_machine_result,
+        good_quantity=good_quantity_result,
+        defect_quantity=defect_quantity_result,
+        total_inspected_quantity=total_inspected_result
     )
 
 # --- END LOT ANALYTICS ENDPOINT ---
