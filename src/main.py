@@ -1425,15 +1425,28 @@ async def get_lots_pending_qc(
     """
     logger.info(f"Запрос /lots/pending-qc получен. qaId: {current_user_qa_id}, hideCompleted: {hideCompleted}, dateFilter: {dateFilter}")
     try:
-        # 1. Базовый запрос на получение ID лотов с активными (неархивными) батчами
-        base_lot_ids_query = db.query(BatchDB.lot_id)\
+        # 1. Базовый запрос: лоты с активными батчами ИЛИ с активными наладками
+        
+        # 1a. Лоты с активными (неархивными) батчами
+        lots_with_active_batches = db.query(BatchDB.lot_id)\
             .filter(BatchDB.current_location != 'archived') \
-            .distinct()
+            .distinct().subquery()
+        
+        # 1b. Лоты с активными наладками (независимо от статуса батчей)
+        lots_with_active_setups = db.query(SetupDB.lot_id)\
+            .filter(SetupDB.status.in_(['created', 'started', 'pending_qa_approval'])) \
+            .distinct().subquery()
+        
+        # 1c. Объединяем: лоты с активными батчами ИЛИ активными наладками
+        base_lot_ids_query = db.query(LotDB.id.label('lot_id'))\
+            .filter(
+                or_(
+                    LotDB.id.in_(lots_with_active_batches),
+                    LotDB.id.in_(lots_with_active_setups)
+                )
+            )
 
-        # 2. Применяем фильтры (JOIN делаем один раз если нужен)
-        needs_lot_join = (dateFilter and dateFilter != "all") or hideCompleted
-        if needs_lot_join:
-            base_lot_ids_query = base_lot_ids_query.join(LotDB, BatchDB.lot_id == LotDB.id)
+        # 2. Применяем фильтры (LotDB уже в запросе)
         
         # Применяем фильтр по дате
         if dateFilter and dateFilter != "all":
@@ -1454,10 +1467,16 @@ async def get_lots_pending_qc(
             # Исключаем лоты со статусом 'completed'
             base_lot_ids_query = base_lot_ids_query.filter(LotDB.status != 'completed')
             
-            # Исключаем лоты где ВСЕ батчи проверены
-            # Проверенные = НЕ qc_pending И (ЕСТЬ inspector_id ИЛИ в финальных состояниях)
-            # Логика: исключаем лот, если НЕТ непроверенных батчей
-            unchecked_batch_exists = db.query(BatchDB.lot_id)\
+            # НО ВАЖНО: не исключаем лоты с активными наладками, даже если все батчи проверены!
+            # Исключаем только лоты БЕЗ активных наладок, где ВСЕ батчи проверены
+            
+            # Лоты с активными наладками (всегда показываем)
+            lots_with_active_setups_query = db.query(SetupDB.lot_id)\
+                .filter(SetupDB.status.in_(['created', 'started', 'pending_qa_approval']))\
+                .distinct().subquery()
+            
+            # Лоты с непроверенными батчами (тоже показываем)
+            lots_with_unchecked_batches = db.query(BatchDB.lot_id)\
                 .filter(
                     or_(
                         BatchDB.current_location == 'qc_pending',  # qc_pending = непроверенный
@@ -1467,11 +1486,15 @@ async def get_lots_pending_qc(
                         )
                     )
                 )\
-                .distinct()\
-                .subquery()
+                .distinct().subquery()
             
-            # Включаем только лоты с непроверенными батчами
-            base_lot_ids_query = base_lot_ids_query.filter(BatchDB.lot_id.in_(unchecked_batch_exists))
+            # Показываем лоты с активными наладками ИЛИ непроверенными батчами
+            base_lot_ids_query = base_lot_ids_query.filter(
+                or_(
+                    LotDB.id.in_(lots_with_active_setups_query),
+                    LotDB.id.in_(lots_with_unchecked_batches)
+                )
+            )
 
         lot_ids_with_active_batches_tuples = base_lot_ids_query.all()
         lot_ids = [item[0] for item in lot_ids_with_active_batches_tuples]
