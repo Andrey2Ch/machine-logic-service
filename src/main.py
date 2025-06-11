@@ -3249,21 +3249,21 @@ async def get_daily_production_report(
             AND m.is_active = true
         ),
         
-        machine_shifts AS (
+        shift_readings AS (
             SELECT 
                 machine_id,
                 machine_name,
                 
-                MAX(CASE WHEN shift_type = 'morning' THEN operator_name END) as morning_operator,
-                MAX(CASE WHEN shift_type = 'morning' THEN quantity END) as morning_end_quantity,
-                MIN(CASE WHEN shift_type = 'morning' THEN quantity END) as morning_start_quantity,
+                -- Начальные показания в 6:00 отчетного дня
+                MAX(CASE WHEN DATE(created_at) = :target_date AND EXTRACT(HOUR FROM created_at) = 6 THEN quantity END) as start_quantity,
                 
-                MAX(CASE WHEN shift_type = 'evening' THEN operator_name END) as evening_operator,
-                MAX(CASE WHEN shift_type = 'evening' THEN quantity END) as evening_end_quantity,
-                MIN(CASE WHEN shift_type = 'evening' THEN quantity END) as evening_start_quantity,
+                -- Утренняя смена: оператор работает 6:00-18:00, показания снимают в 18:00
+                MAX(CASE WHEN DATE(created_at) = :target_date AND EXTRACT(HOUR FROM created_at) = 18 THEN operator_name END) as morning_operator,
+                MAX(CASE WHEN DATE(created_at) = :target_date AND EXTRACT(HOUR FROM created_at) = 18 THEN quantity END) as morning_end_quantity,
                 
-                MIN(quantity) as daily_start_quantity,
-                MAX(quantity) as daily_end_quantity
+                -- Ночная смена: оператор работает 18:00-6:00, показания снимают в 6:00 следующего дня  
+                MAX(CASE WHEN DATE(created_at) = :target_date + INTERVAL '1 day' AND EXTRACT(HOUR FROM created_at) = 6 THEN operator_name END) as evening_operator,
+                MAX(CASE WHEN DATE(created_at) = :target_date + INTERVAL '1 day' AND EXTRACT(HOUR FROM created_at) = 6 THEN quantity END) as evening_end_quantity
                 
             FROM daily_readings
             GROUP BY machine_id, machine_name
@@ -3296,42 +3296,42 @@ async def get_daily_production_report(
         )
         
         SELECT 
-            ROW_NUMBER() OVER (ORDER BY ms.machine_name) as row_number,
+            ROW_NUMBER() OVER (ORDER BY sr.machine_name) as row_number,
             
-            COALESCE(ms.morning_operator, 'нет оператора') as morning_operator_name,
-            COALESCE(ms.evening_operator, 'нет оператора') as evening_operator_name,
+            COALESCE(sr.morning_operator, 'нет оператора') as morning_operator_name,
+            COALESCE(sr.evening_operator, 'нет оператора') as evening_operator_name,
             
-            ms.machine_name,
+            sr.machine_name,
             COALESCE(ls.part_code, '--') as part_code,
             
-            COALESCE(ms.daily_start_quantity, 0) as start_quantity,
-            COALESCE(ms.morning_end_quantity, ms.daily_start_quantity, 0) as morning_end_quantity,
-            COALESCE(ms.evening_end_quantity, ms.morning_end_quantity, ms.daily_start_quantity, 0) as evening_end_quantity,
+            COALESCE(sr.start_quantity, 0) as start_quantity,
+            COALESCE(sr.morning_end_quantity, sr.start_quantity, 0) as morning_end_quantity,
+            COALESCE(sr.evening_end_quantity, sr.morning_end_quantity, sr.start_quantity, 0) as evening_end_quantity,
             
             COALESCE(ls.cycle_time, 0) as cycle_time_seconds,
             
             CASE 
-                WHEN COALESCE(ls.cycle_time, 0) > 0 THEN (11 * 3600) / ls.cycle_time
+                WHEN COALESCE(ls.cycle_time, 0) > 0 THEN (12 * 3600) / ls.cycle_time
                 ELSE NULL
             END as required_quantity_per_shift,
             
-            COALESCE(ms.morning_end_quantity, ms.daily_start_quantity, 0) - COALESCE(ms.daily_start_quantity, 0) as morning_production,
+            COALESCE(sr.morning_end_quantity, sr.start_quantity, 0) - COALESCE(sr.start_quantity, 0) as morning_production,
             
             CASE 
                 WHEN COALESCE(ls.cycle_time, 0) > 0 THEN 
-                    ((COALESCE(ms.morning_end_quantity, ms.daily_start_quantity, 0) - COALESCE(ms.daily_start_quantity, 0)) * 100.0) / 
-                    ((11 * 3600) / ls.cycle_time)
+                    ((COALESCE(sr.morning_end_quantity, sr.start_quantity, 0) - COALESCE(sr.start_quantity, 0)) * 100.0) / 
+                    ((12 * 3600) / ls.cycle_time)
                 ELSE NULL
             END as morning_performance_percent,
             
-            COALESCE(ms.evening_end_quantity, ms.morning_end_quantity, ms.daily_start_quantity, 0) - 
-            COALESCE(ms.morning_end_quantity, ms.daily_start_quantity, 0) as evening_production,
+            COALESCE(sr.evening_end_quantity, sr.morning_end_quantity, sr.start_quantity, 0) - 
+            COALESCE(sr.morning_end_quantity, sr.start_quantity, 0) as evening_production,
             
             CASE 
                 WHEN COALESCE(ls.cycle_time, 0) > 0 THEN 
-                    ((COALESCE(ms.evening_end_quantity, ms.morning_end_quantity, ms.daily_start_quantity, 0) - 
-                      COALESCE(ms.morning_end_quantity, ms.daily_start_quantity, 0)) * 100.0) / 
-                    ((11 * 3600) / ls.cycle_time)
+                    ((COALESCE(sr.evening_end_quantity, sr.morning_end_quantity, sr.start_quantity, 0) - 
+                      COALESCE(sr.morning_end_quantity, sr.start_quantity, 0)) * 100.0) / 
+                    ((12 * 3600) / ls.cycle_time)
                 ELSE NULL
             END as evening_performance_percent,
             
@@ -3341,10 +3341,10 @@ async def get_daily_production_report(
             :target_date as report_date,
             NOW() as generated_at
 
-        FROM machine_shifts ms
-        LEFT JOIN latest_setups ls ON ms.machine_id = ls.machine_id
+        FROM shift_readings sr
+        LEFT JOIN latest_setups ls ON sr.machine_id = ls.machine_id
 
-        ORDER BY ms.machine_name;
+        ORDER BY sr.machine_name;
         """)
         
         # Выполняем запрос
