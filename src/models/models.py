@@ -134,6 +134,7 @@ class ReadingDB(Base):
     employee_id = Column(Integer, ForeignKey("employees.id"))
     machine_id = Column(Integer, ForeignKey("machines.id"))
     reading = Column(Integer)
+    setup_job_id = Column(Integer, ForeignKey("setup_jobs.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.now)
 
 class CardDB(Base):

@@ -219,6 +219,7 @@ async def save_reading(reading_input: ReadingInput, db: Session = Depends(get_db
             employee_id=reading_input.operator_id,
             machine_id=reading_input.machine_id,
             reading=reading_input.value,
+            setup_job_id=setup.id,  # Связываем с активной наладкой
             created_at=datetime.now() # Фиксируем время явно
         )
         db.add(reading_db)
@@ -3270,12 +3271,14 @@ async def get_daily_production_report(
                 sj.employee_id as machinist_id,
                 e.full_name as machinist_name
             FROM machines m
-            LEFT JOIN setup_jobs sj ON m.id = sj.machine_id
+            LEFT JOIN machine_readings mr ON m.id = mr.machine_id 
+                AND DATE(mr.created_at) = :target_date
+                AND mr.setup_job_id IS NOT NULL
+            LEFT JOIN setup_jobs sj ON mr.setup_job_id = sj.id
             LEFT JOIN parts p ON sj.part_id = p.id
             LEFT JOIN employees e ON sj.employee_id = e.id
             WHERE m.is_active = true
-                AND (sj.status IN ('started', 'created', 'allowed', 'pending_qc', 'active', 'approved', 'running') OR sj.id IS NULL)
-            ORDER BY m.id, sj.created_at DESC
+            ORDER BY m.id, mr.created_at DESC
         )
         
         SELECT 
