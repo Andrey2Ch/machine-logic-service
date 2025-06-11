@@ -3229,24 +3229,40 @@ async def get_daily_production_report(
                 m.name as machine_name,
                 
                 CASE 
-                    WHEN EXTRACT(HOUR FROM mr.created_at) BETWEEN 6 AND 17 THEN 'morning'
-                    ELSE 'evening'
+                    WHEN (DATE(mr.created_at) = :target_date AND EXTRACT(HOUR FROM mr.created_at) BETWEEN 6 AND 17) THEN 'morning'
+                    WHEN (DATE(mr.created_at) = :target_date AND EXTRACT(HOUR FROM mr.created_at) >= 18) 
+                         OR (DATE(mr.created_at) = :target_date + INTERVAL '1 day' AND EXTRACT(HOUR FROM mr.created_at) < 6) THEN 'evening'
+                    ELSE NULL
                 END as shift_type
                 
             FROM machine_readings mr
             JOIN employees e ON mr.employee_id = e.id
             JOIN machines m ON mr.machine_id = m.id
             WHERE (
-                -- Утренняя смена: 6:00-18:00 указанного дня
+                -- Утренняя смена: 6:00-17:59 указанного дня
                 (DATE(mr.created_at) = :target_date AND EXTRACT(HOUR FROM mr.created_at) BETWEEN 6 AND 17)
                 OR
-                -- Вечерняя смена: 18:00 указанного дня до 6:00 следующего дня
+                -- Вечерняя смена: 18:00-23:59 указанного дня и 0:00-5:59 следующего дня
                 (DATE(mr.created_at) = :target_date AND EXTRACT(HOUR FROM mr.created_at) >= 18)
                 OR
-                (DATE(mr.created_at) = :target_date + INTERVAL '1 day' AND EXTRACT(HOUR FROM mr.created_at) < 6)
+                (DATE(mr.created_at) = :target_date + INTERVAL '1 day' AND EXTRACT(HOUR FROM mr.created_at) <= 5)
             )
             AND e.is_active = true
             AND m.is_active = true
+        ),
+        
+        start_readings AS (
+            SELECT 
+                m.id as machine_id,
+                m.name as machine_name,
+                COALESCE(
+                    (SELECT mr.reading FROM machine_readings mr 
+                     WHERE mr.machine_id = m.id 
+                     AND mr.created_at <= :target_date + INTERVAL '6 hours'
+                     ORDER BY mr.created_at DESC LIMIT 1), 0
+                ) as start_quantity
+            FROM machines m
+            WHERE m.is_active = true
         ),
         
         shift_readings AS (
@@ -3254,18 +3270,16 @@ async def get_daily_production_report(
                 machine_id,
                 machine_name,
                 
-                -- Начальные показания в 6:00 отчетного дня
-                MAX(CASE WHEN DATE(created_at) = :target_date AND EXTRACT(HOUR FROM created_at) = 6 THEN quantity END) as start_quantity,
+                -- Утренняя смена: данные в диапазоне 6:00-18:00 отчетного дня
+                MAX(CASE WHEN shift_type = 'morning' THEN operator_name END) as morning_operator,
+                MAX(CASE WHEN shift_type = 'morning' THEN quantity END) as morning_end_quantity,
                 
-                -- Утренняя смена: оператор работает 6:00-18:00, показания снимают в 18:00
-                MAX(CASE WHEN DATE(created_at) = :target_date AND EXTRACT(HOUR FROM created_at) = 18 THEN operator_name END) as morning_operator,
-                MAX(CASE WHEN DATE(created_at) = :target_date AND EXTRACT(HOUR FROM created_at) = 18 THEN quantity END) as morning_end_quantity,
-                
-                -- Ночная смена: оператор работает 18:00-6:00, показания снимают в 6:00 следующего дня  
-                MAX(CASE WHEN DATE(created_at) = :target_date + INTERVAL '1 day' AND EXTRACT(HOUR FROM created_at) = 6 THEN operator_name END) as evening_operator,
-                MAX(CASE WHEN DATE(created_at) = :target_date + INTERVAL '1 day' AND EXTRACT(HOUR FROM created_at) = 6 THEN quantity END) as evening_end_quantity
+                -- Вечерняя смена: данные в диапазоне 18:00 отчетного дня - 6:00 следующего
+                MAX(CASE WHEN shift_type = 'evening' THEN operator_name END) as evening_operator,
+                MAX(CASE WHEN shift_type = 'evening' THEN quantity END) as evening_end_quantity
                 
             FROM daily_readings
+            WHERE shift_type IS NOT NULL
             GROUP BY machine_id, machine_name
         ),
         
@@ -3296,17 +3310,17 @@ async def get_daily_production_report(
         )
         
         SELECT 
-            ROW_NUMBER() OVER (ORDER BY sr.machine_name) as row_number,
+            ROW_NUMBER() OVER (ORDER BY COALESCE(sr.machine_name, st.machine_name)) as row_number,
             
             COALESCE(sr.morning_operator, 'нет оператора') as morning_operator_name,
             COALESCE(sr.evening_operator, 'нет оператора') as evening_operator_name,
             
-            sr.machine_name,
+            COALESCE(sr.machine_name, st.machine_name) as machine_name,
             COALESCE(ls.part_code, '--') as part_code,
             
-            COALESCE(sr.start_quantity, 0) as start_quantity,
-            COALESCE(sr.morning_end_quantity, sr.start_quantity, 0) as morning_end_quantity,
-            COALESCE(sr.evening_end_quantity, sr.morning_end_quantity, sr.start_quantity, 0) as evening_end_quantity,
+            COALESCE(st.start_quantity, 0) as start_quantity,
+            COALESCE(sr.morning_end_quantity, st.start_quantity, 0) as morning_end_quantity,
+            COALESCE(sr.evening_end_quantity, sr.morning_end_quantity, st.start_quantity, 0) as evening_end_quantity,
             
             COALESCE(ls.cycle_time, 0) as cycle_time_seconds,
             
@@ -3315,22 +3329,22 @@ async def get_daily_production_report(
                 ELSE NULL
             END as required_quantity_per_shift,
             
-            COALESCE(sr.morning_end_quantity, sr.start_quantity, 0) - COALESCE(sr.start_quantity, 0) as morning_production,
+            COALESCE(sr.morning_end_quantity, st.start_quantity, 0) - COALESCE(st.start_quantity, 0) as morning_production,
             
             CASE 
                 WHEN COALESCE(ls.cycle_time, 0) > 0 THEN 
-                    ((COALESCE(sr.morning_end_quantity, sr.start_quantity, 0) - COALESCE(sr.start_quantity, 0)) * 100.0) / 
+                    ((COALESCE(sr.morning_end_quantity, st.start_quantity, 0) - COALESCE(st.start_quantity, 0)) * 100.0) / 
                     ((12 * 3600) / ls.cycle_time)
                 ELSE NULL
             END as morning_performance_percent,
             
-            COALESCE(sr.evening_end_quantity, sr.morning_end_quantity, sr.start_quantity, 0) - 
-            COALESCE(sr.morning_end_quantity, sr.start_quantity, 0) as evening_production,
+            COALESCE(sr.evening_end_quantity, sr.morning_end_quantity, st.start_quantity, 0) - 
+            COALESCE(sr.morning_end_quantity, st.start_quantity, 0) as evening_production,
             
             CASE 
                 WHEN COALESCE(ls.cycle_time, 0) > 0 THEN 
-                    ((COALESCE(sr.evening_end_quantity, sr.morning_end_quantity, sr.start_quantity, 0) - 
-                      COALESCE(sr.morning_end_quantity, sr.start_quantity, 0)) * 100.0) / 
+                    ((COALESCE(sr.evening_end_quantity, sr.morning_end_quantity, st.start_quantity, 0) - 
+                      COALESCE(sr.morning_end_quantity, st.start_quantity, 0)) * 100.0) / 
                     ((12 * 3600) / ls.cycle_time)
                 ELSE NULL
             END as evening_performance_percent,
@@ -3341,10 +3355,11 @@ async def get_daily_production_report(
             :target_date as report_date,
             NOW() as generated_at
 
-        FROM shift_readings sr
-        LEFT JOIN latest_setups ls ON sr.machine_id = ls.machine_id
+        FROM start_readings st
+        LEFT JOIN shift_readings sr ON st.machine_id = sr.machine_id
+        LEFT JOIN latest_setups ls ON st.machine_id = ls.machine_id
 
-        ORDER BY sr.machine_name;
+        ORDER BY st.machine_name;
         """)
         
         # Выполняем запрос
