@@ -9,6 +9,9 @@ load_dotenv()
 
 from fastapi import FastAPI, HTTPException, Query, Response # Добавил Response для заголовков пагинации, если понадобится
 from fastapi.middleware.cors import CORSMiddleware
+
+# Импорт роутеров
+from .routers.lots import router as lots_management_router
 from src.models.setup import SetupStatus
 from typing import Optional, Dict, List
 from pydantic import BaseModel, Field
@@ -39,6 +42,9 @@ app.add_middleware(
     allow_headers=["*"], 
     expose_headers=["X-Total-Count"]  # <--- ДОБАВЛЕНО ЗДЕСЬ
 )
+
+# Подключение роутеров
+app.include_router(lots_management_router)
 
 
 # Событие startup для инициализации БД
