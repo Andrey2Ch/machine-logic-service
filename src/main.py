@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session, aliased, selectinload
 from fastapi import Depends, Body
 from src.database import Base, initialize_database, get_db_session
 from src.models.models import SetupDB, ReadingDB, MachineDB, EmployeeDB, PartDB, LotDB, BatchDB, CardDB
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 from src.utils.sheets_handler import save_to_sheets
 import asyncio
 import httpx
@@ -3170,3 +3170,267 @@ async def get_batch_label_info(batch_id: int, db: Session = Depends(get_db_sessi
     except Exception as e:
         logger.error(f"Error fetching batch label info for batch {batch_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error while fetching batch label info")
+
+# ===================================================================
+# ЕЖЕДНЕВЫЕ ОТЧЕТЫ ПРОИЗВОДСТВА (аналог Excel листов с датами)
+# ===================================================================
+
+class DailyProductionRecord(BaseModel):
+    """Модель записи ежедневного отчета производства"""
+    row_number: int
+    morning_operator_name: str
+    evening_operator_name: str
+    machine_name: str
+    part_code: str
+    start_quantity: int
+    morning_end_quantity: int
+    evening_end_quantity: int
+    cycle_time_seconds: int
+    required_quantity_per_shift: Optional[float]
+    morning_production: int
+    morning_performance_percent: Optional[float]
+    evening_production: int
+    evening_performance_percent: Optional[float]
+    machinist_name: Optional[str]
+    planned_quantity: Optional[int]
+    report_date: str
+    generated_at: datetime
+
+class DailyProductionReport(BaseModel):
+    """Полный ежедневный отчет"""
+    report_date: str
+    total_machines: int
+    records: List[DailyProductionRecord]
+    summary: Dict
+
+@app.get("/daily-production-report", response_model=DailyProductionReport, tags=["Daily Reports"])
+async def get_daily_production_report(
+    target_date: date = Query(default_factory=date.today, description="Дата для отчета (YYYY-MM-DD)"),
+    db: Session = Depends(get_db_session)
+):
+    """
+    Получить ежедневный отчет производства по дате
+    
+    Аналог Excel листов с датами (10.06.25, 09.06.25, etc.)
+    Показывает производительность операторов по станкам за день
+    """
+    
+    try:
+        # SQL запрос для получения ежедневного отчета
+        sql_query = text("""
+        WITH daily_readings AS (
+            SELECT 
+                mr.employee_id,
+                mr.machine_id,
+                mr.reading as quantity,
+                mr.created_at,
+                e.full_name as operator_name,
+                m.name as machine_name,
+                
+                CASE 
+                    WHEN EXTRACT(HOUR FROM mr.created_at) BETWEEN 6 AND 17 THEN 'morning'
+                    ELSE 'evening'
+                END as shift_type
+                
+            FROM machine_readings mr
+            JOIN employees e ON mr.employee_id = e.id
+            JOIN machines m ON mr.machine_id = m.id
+            WHERE DATE(mr.created_at) = :target_date
+                AND e.is_active = true
+                AND m.is_active = true
+        ),
+        
+        machine_shifts AS (
+            SELECT 
+                machine_id,
+                machine_name,
+                
+                MAX(CASE WHEN shift_type = 'morning' THEN operator_name END) as morning_operator,
+                MAX(CASE WHEN shift_type = 'morning' THEN quantity END) as morning_end_quantity,
+                MIN(CASE WHEN shift_type = 'morning' THEN quantity END) as morning_start_quantity,
+                
+                MAX(CASE WHEN shift_type = 'evening' THEN operator_name END) as evening_operator,
+                MAX(CASE WHEN shift_type = 'evening' THEN quantity END) as evening_end_quantity,
+                MIN(CASE WHEN shift_type = 'evening' THEN quantity END) as evening_start_quantity,
+                
+                MIN(quantity) as daily_start_quantity,
+                MAX(quantity) as daily_end_quantity
+                
+            FROM daily_readings
+            GROUP BY machine_id, machine_name
+        ),
+        
+        latest_setups AS (
+            SELECT DISTINCT ON (m.id)
+                m.id as machine_id,
+                sj.part_id,
+                sj.cycle_time,
+                p.drawing_number as part_code,
+                sj.planned_quantity,
+                sj.employee_id as machinist_id,
+                e.full_name as machinist_name
+            FROM machines m
+            LEFT JOIN setup_jobs sj ON m.id = sj.machine_id
+            LEFT JOIN parts p ON sj.part_id = p.id
+            LEFT JOIN employees e ON sj.employee_id = e.id
+            WHERE m.is_active = true
+                AND (sj.status IN ('started', 'created', 'allowed', 'pending_qc', 'active', 'approved', 'running') OR sj.id IS NULL)
+            ORDER BY m.id, sj.created_at DESC
+        )
+        
+        SELECT 
+            ROW_NUMBER() OVER (ORDER BY ms.machine_name) as row_number,
+            
+            COALESCE(ms.morning_operator, 'нет оператора') as morning_operator_name,
+            COALESCE(ms.evening_operator, 'нет оператора') as evening_operator_name,
+            
+            ms.machine_name,
+            COALESCE(ls.part_code, '--') as part_code,
+            
+            COALESCE(ms.daily_start_quantity, 0) as start_quantity,
+            COALESCE(ms.morning_end_quantity, ms.daily_start_quantity, 0) as morning_end_quantity,
+            COALESCE(ms.evening_end_quantity, ms.morning_end_quantity, ms.daily_start_quantity, 0) as evening_end_quantity,
+            
+            COALESCE(ls.cycle_time, 0) as cycle_time_seconds,
+            
+            CASE 
+                WHEN COALESCE(ls.cycle_time, 0) > 0 THEN (11 * 3600) / ls.cycle_time
+                ELSE NULL
+            END as required_quantity_per_shift,
+            
+            COALESCE(ms.morning_end_quantity, ms.daily_start_quantity, 0) - COALESCE(ms.daily_start_quantity, 0) as morning_production,
+            
+            CASE 
+                WHEN COALESCE(ls.cycle_time, 0) > 0 THEN 
+                    ((COALESCE(ms.morning_end_quantity, ms.daily_start_quantity, 0) - COALESCE(ms.daily_start_quantity, 0)) * 100.0) / 
+                    ((11 * 3600) / ls.cycle_time)
+                ELSE NULL
+            END as morning_performance_percent,
+            
+            COALESCE(ms.evening_end_quantity, ms.morning_end_quantity, ms.daily_start_quantity, 0) - 
+            COALESCE(ms.morning_end_quantity, ms.daily_start_quantity, 0) as evening_production,
+            
+            CASE 
+                WHEN COALESCE(ls.cycle_time, 0) > 0 THEN 
+                    ((COALESCE(ms.evening_end_quantity, ms.morning_end_quantity, ms.daily_start_quantity, 0) - 
+                      COALESCE(ms.morning_end_quantity, ms.daily_start_quantity, 0)) * 100.0) / 
+                    ((11 * 3600) / ls.cycle_time)
+                ELSE NULL
+            END as evening_performance_percent,
+            
+            ls.machinist_name,
+            ls.planned_quantity,
+            
+            :target_date as report_date,
+            NOW() as generated_at
+
+        FROM machine_shifts ms
+        LEFT JOIN latest_setups ls ON ms.machine_id = ls.machine_id
+
+        ORDER BY ms.machine_name;
+        """)
+        
+        # Выполняем запрос
+        result = db.execute(sql_query, {"target_date": target_date})
+        rows = result.fetchall()
+        
+        # Формируем записи
+        records = []
+        for row in rows:
+            record = DailyProductionRecord(
+                row_number=row.row_number,
+                morning_operator_name=row.morning_operator_name,
+                evening_operator_name=row.evening_operator_name,
+                machine_name=row.machine_name,
+                part_code=row.part_code,
+                start_quantity=row.start_quantity,
+                morning_end_quantity=row.morning_end_quantity,
+                evening_end_quantity=row.evening_end_quantity,
+                cycle_time_seconds=row.cycle_time_seconds,
+                required_quantity_per_shift=row.required_quantity_per_shift,
+                morning_production=row.morning_production,
+                morning_performance_percent=row.morning_performance_percent,
+                evening_production=row.evening_production,
+                evening_performance_percent=row.evening_performance_percent,
+                machinist_name=row.machinist_name,
+                planned_quantity=row.planned_quantity,
+                report_date=str(target_date),
+                generated_at=row.generated_at
+            )
+            records.append(record)
+        
+        # Формируем сводку
+        total_morning_production = sum(r.morning_production for r in records)
+        total_evening_production = sum(r.evening_production for r in records)
+        
+        valid_morning_performances = [r.morning_performance_percent for r in records if r.morning_performance_percent is not None]
+        valid_evening_performances = [r.evening_performance_percent for r in records if r.evening_performance_percent is not None]
+        
+        avg_morning_performance = sum(valid_morning_performances) / len(valid_morning_performances) if valid_morning_performances else 0
+        avg_evening_performance = sum(valid_evening_performances) / len(valid_evening_performances) if valid_evening_performances else 0
+        
+        summary = {
+            "total_morning_production": total_morning_production,
+            "total_evening_production": total_evening_production,
+            "total_daily_production": total_morning_production + total_evening_production,
+            "average_morning_performance": round(avg_morning_performance, 2),
+            "average_evening_performance": round(avg_evening_performance, 2),
+            "active_machines": len(records),
+            "machines_with_morning_operators": sum(1 for r in records if r.morning_operator_name != 'нет оператора'),
+            "machines_with_evening_operators": sum(1 for r in records if r.evening_operator_name != 'нет оператора')
+        }
+        
+        return DailyProductionReport(
+            report_date=str(target_date),
+            total_machines=len(records),
+            records=records,
+            summary=summary
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка при генерации ежедневного отчета: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ошибка при генерации отчета: {str(e)}")
+
+@app.get("/daily-production-dates", tags=["Daily Reports"])
+async def get_available_dates(
+    limit: int = Query(30, description="Количество дат для возврата"),
+    db: Session = Depends(get_db_session)
+):
+    """
+    Получить доступные даты для отчетов
+    (дни, когда были записаны показания)
+    """
+    
+    try:
+        sql_query = text("""
+        SELECT DISTINCT 
+            DATE(mr.created_at) as report_date,
+            COUNT(*) as readings_count
+        FROM machine_readings mr
+        JOIN employees e ON mr.employee_id = e.id
+        WHERE e.is_active = true
+        GROUP BY DATE(mr.created_at)
+        ORDER BY DATE(mr.created_at) DESC
+        LIMIT :limit;
+        """)
+        
+        result = db.execute(sql_query, {"limit": limit})
+        rows = result.fetchall()
+        
+        return {
+            "available_dates": [
+                {
+                    "date": str(row.report_date),
+                    "readings_count": row.readings_count
+                }
+                for row in rows
+            ]
+        }
+        
+    except Exception as e:
+        logger.error(f"Ошибка при получении доступных дат: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ошибка при получении доступных дат: {str(e)}")
+
+# ===================================================================
+# КОНЕЦ ЕЖЕДНЕВНЫХ ОТЧЕТОВ ПРОИЗВОДСТВА  
+# ===================================================================
