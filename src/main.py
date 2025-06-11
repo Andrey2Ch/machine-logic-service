@@ -3236,9 +3236,17 @@ async def get_daily_production_report(
             FROM machine_readings mr
             JOIN employees e ON mr.employee_id = e.id
             JOIN machines m ON mr.machine_id = m.id
-            WHERE DATE(mr.created_at) = :target_date
-                AND e.is_active = true
-                AND m.is_active = true
+            WHERE (
+                -- Утренняя смена: 6:00-18:00 указанного дня
+                (DATE(mr.created_at) = :target_date AND EXTRACT(HOUR FROM mr.created_at) BETWEEN 6 AND 17)
+                OR
+                -- Вечерняя смена: 18:00 указанного дня до 6:00 следующего дня
+                (DATE(mr.created_at) = :target_date AND EXTRACT(HOUR FROM mr.created_at) >= 18)
+                OR
+                (DATE(mr.created_at) = :target_date + INTERVAL '1 day' AND EXTRACT(HOUR FROM mr.created_at) < 6)
+            )
+            AND e.is_active = true
+            AND m.is_active = true
         ),
         
         machine_shifts AS (
@@ -3272,7 +3280,13 @@ async def get_daily_production_report(
                 e.full_name as machinist_name
             FROM machines m
             LEFT JOIN machine_readings mr ON m.id = mr.machine_id 
-                AND DATE(mr.created_at) = :target_date
+                AND (
+                    (DATE(mr.created_at) = :target_date AND EXTRACT(HOUR FROM mr.created_at) BETWEEN 6 AND 17)
+                    OR
+                    (DATE(mr.created_at) = :target_date AND EXTRACT(HOUR FROM mr.created_at) >= 18)
+                    OR
+                    (DATE(mr.created_at) = :target_date + INTERVAL '1 day' AND EXTRACT(HOUR FROM mr.created_at) < 6)
+                )
                 AND mr.setup_job_id IS NOT NULL
             LEFT JOIN setup_jobs sj ON mr.setup_job_id = sj.id
             LEFT JOIN parts p ON sj.part_id = p.id
