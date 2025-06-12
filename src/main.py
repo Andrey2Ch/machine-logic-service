@@ -43,8 +43,7 @@ app.add_middleware(
     expose_headers=["X-Total-Count"]  # <--- ДОБАВЛЕНО ЗДЕСЬ
 )
 
-# Подключение роутеров
-app.include_router(lots_management_router)
+# Подключение роутеров будет в конце файла после всех эндпоинтов
 
 
 # Событие startup для инициализации БД
@@ -3703,7 +3702,7 @@ async def get_lots_pending_qc_old(
         logger.error(f"Ошибка в /lots/pending-qc: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера при получении лотов для ОТК")
 
-@app.get("/lots/pending-qc", response_model=List[LotInfoItem], tags=["Quality Control"])
+@app.get("/lots-pending-qc", response_model=List[LotInfoItem], tags=["Quality Control"])
 async def get_lots_pending_qc(
     db: Session = Depends(get_db_session), 
     current_user_qa_id: Optional[int] = Query(None, alias="qaId"),
@@ -3886,3 +3885,6 @@ async def get_lots_pending_qc(
 @app.get("/lots/pending-qc-dup", include_in_schema=False)
 async def _disabled_pending_qc_dup():
     return {"disabled": True}
+
+# Подключение роутеров в конце файла (после всех эндпоинтов main.py)
+app.include_router(lots_management_router)

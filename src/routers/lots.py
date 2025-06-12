@@ -19,7 +19,7 @@ from ..models.models import LotDB, SetupDB, BatchDB
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/lots", tags=["Lots Management"])
+router = APIRouter(prefix="/lots-management", tags=["Lots Management"])
 
 # Pydantic модели для редактирования лотов
 from pydantic import BaseModel, Field
