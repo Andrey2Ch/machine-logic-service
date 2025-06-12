@@ -1408,8 +1408,8 @@ async def accept_batch_on_warehouse(batch_id: int, payload: AcceptWarehousePaylo
 
 class LotInfoItem(BaseModel):
     id: int
-    drawing_number: str
-    lot_number: str
+    drawing_number: Optional[str] = None
+    lot_number: Optional[str] = None
     inspector_name: Optional[str] = None
     planned_quantity: Optional[int] = None
     machine_name: Optional[str] = None
