@@ -65,7 +65,7 @@ def has_production_activity(db: Session, lot_id: int) -> tuple[bool, str]:
     
     return False, "Нет производственной активности"
 
-@router.put("/{lot_id}")
+@router.put("/{lot_id:int}")
 async def update_lot(
     lot_id: int,
     lot_update: LotUpdate,
@@ -122,7 +122,7 @@ async def update_lot(
         logger.error(f"Ошибка при обновлении лота {lot_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Внутренняя ошибка сервера: {str(e)}")
 
-@router.delete("/{lot_id}", response_model=LotDeleteResponse)
+@router.delete("/{lot_id:int}", response_model=LotDeleteResponse)
 async def delete_lot(
     lot_id: int,
     force: bool = Query(False, description="Принудительное удаление (игнорировать производственную активность)"),
@@ -184,7 +184,7 @@ async def delete_lot(
         logger.error(f"Ошибка при удалении лота {lot_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Внутренняя ошибка сервера: {str(e)}")
 
-@router.get("/{lot_id}/can-modify")
+@router.get("/{lot_id:int}/can-modify")
 async def check_lot_modifiable(
     lot_id: int,
     db: Session = Depends(get_db_session)
