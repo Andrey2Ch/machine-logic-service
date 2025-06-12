@@ -3845,3 +3845,8 @@ async def get_lots_pending_qc(
     except Exception as e:
         logger.error(f"Ошибка в /lots/pending-qc: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера при получении лотов для ОТК")
+
+# Дублирующий эндпоинт отключён
+@app.get("/lots/pending-qc-dup", include_in_schema=False)
+async def _disabled_pending_qc_dup():
+    return {"disabled": True}
