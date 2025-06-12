@@ -1546,7 +1546,15 @@ async def get_lots_pending_qc_original(
             passes_qa_filter = True
 
             if latest_setup_details:
-                planned_quantity_val = latest_setup_details.planned_quantity
+                # planned_quantity может быть Decimal – приводим к int для Pydantic
+                planned_quantity_raw = latest_setup_details.planned_quantity
+                if planned_quantity_raw is not None:
+                    try:
+                        planned_quantity_val = int(planned_quantity_raw)
+                    except (ValueError, TypeError):
+                        planned_quantity_val = None
+                else:
+                    planned_quantity_val = None
                 machine_name_val = latest_setup_details.machine_name_from_setup
                 logger.debug(f"Lot ID {lot_obj.id}: setup found, machine_id: {latest_setup_details.setup_machine_id}")
 
@@ -3642,7 +3650,15 @@ async def get_lots_pending_qc_old(
             passes_qa_filter = True
 
             if latest_setup_details:
-                planned_quantity_val = latest_setup_details.planned_quantity
+                # planned_quantity может быть Decimal – приводим к int для Pydantic
+                planned_quantity_raw = latest_setup_details.planned_quantity
+                if planned_quantity_raw is not None:
+                    try:
+                        planned_quantity_val = int(planned_quantity_raw)
+                    except (ValueError, TypeError):
+                        planned_quantity_val = None
+                else:
+                    planned_quantity_val = None
                 machine_name_val = latest_setup_details.machine_name_from_setup
                 logger.debug(f"Lot ID {lot_obj.id}: setup found, machine_id: {latest_setup_details.setup_machine_id}")
 
@@ -3809,7 +3825,15 @@ async def get_lots_pending_qc(
             passes_qa_filter = True
 
             if latest_setup_details:
-                planned_quantity_val = latest_setup_details.planned_quantity
+                # planned_quantity может быть Decimal – приводим к int для Pydantic
+                planned_quantity_raw = latest_setup_details.planned_quantity
+                if planned_quantity_raw is not None:
+                    try:
+                        planned_quantity_val = int(planned_quantity_raw)
+                    except (ValueError, TypeError):
+                        planned_quantity_val = None
+                else:
+                    planned_quantity_val = None
                 machine_name_val = latest_setup_details.machine_name_from_setup
                 logger.debug(f"Lot ID {lot_obj.id}: setup found, machine_id: {latest_setup_details.setup_machine_id}")
 
