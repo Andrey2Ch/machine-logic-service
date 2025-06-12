@@ -44,9 +44,11 @@ async def get_lots_pending_qc(
         if hideCompleted:
             where_lot_filters.append("l.status != 'completed'")
 
-        where_clause = " AND ".join(where_lot_filters)
-        if where_clause:
-            where_clause = "WHERE " + where_clause
+        base_filters = where_lot_filters.copy()
+        # далее мы добавим динамические условия open/empty/setup после сборки SQL
+        where_clause_main = " AND ".join(base_filters)
+        if where_clause_main:
+            where_clause_main = "WHERE " + where_clause_main
 
         # чистый SQL с CTE ranked_setups
         sql = f"""
@@ -78,8 +80,8 @@ async def get_lots_pending_qc(
             JOIN   parts p           ON p.id = l.part_id
             LEFT   JOIN ranked_setups rs ON rs.lot_id = l.id AND rs.rn = 1
             LEFT   JOIN machines m   ON m.id = rs.machine_id
-            {where_clause}
-            AND (
+            {where_clause_main}
+            {'AND' if where_clause_main else 'WHERE'} (
                     l.id IN (SELECT lot_id FROM open_batches)          -- есть хотя бы один "живой" батч
                  OR NOT EXISTS (SELECT 1 FROM batches b WHERE b.lot_id = l.id) -- ещё нет батчей
                  OR rs.qa_id IS NOT NULL                                -- активная наладка
