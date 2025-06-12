@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 # Импорт роутеров
 from .routers.lots import router as lots_management_router
+from .routers.qc import router as qc_router
 from src.models.setup import SetupStatus
 from typing import Optional, Dict, List
 from pydantic import BaseModel, Field
@@ -45,6 +46,7 @@ app.add_middleware(
 
 # Подключение роутеров
 app.include_router(lots_management_router)
+app.include_router(qc_router)
 
 
 # Событие startup для инициализации БД
@@ -1416,8 +1418,8 @@ class LotInfoItem(BaseModel):
         from_attributes = True # Pydantic v2
         populate_by_name = True # Pydantic v2, было allow_population_by_field_name
 
-@app.get("/lots/pending-qc", response_model=List[LotInfoItem])
-async def get_lots_pending_qc(
+@app.get("/lots/pending-qc-original", response_model=List[LotInfoItem], include_in_schema=False)
+async def get_lots_pending_qc_original(
     db: Session = Depends(get_db_session), 
     current_user_qa_id: Optional[int] = Query(None, alias="qaId"),
     hideCompleted: Optional[bool] = Query(False, description="Скрыть завершенные лоты и лоты со всеми проверенными батчами"),
@@ -1952,6 +1954,7 @@ class LotResponse(LotBase):
     created_at: Optional[datetime] = None # <--- СДЕЛАНО ОПЦИОНАЛЬНЫМ
     total_planned_quantity: Optional[int] = None # Общее количество (плановое + дополнительное)
     part: Optional[PartResponse] = None # Для возврата информации о детали вместе с лотом
+    machine_name: Optional[str] = None  # 🔄 Название станка последней активной наладки
 
     class Config:
         from_attributes = True # <--- ИСПРАВЛЕНО с orm_mode
@@ -2098,8 +2101,25 @@ async def get_lots(
     logger.info(f"Запрос списка лотов: search='{search}', part_search='{part_search}', skip={skip}, limit={limit}. Возвращено {len(lots)} из {total_count} лотов.")
     
     response.headers["X-Total-Count"] = str(total_count)
-    # УДАЛЕНО: response.headers["Access-Control-Expose-Headers"] = "X-Total-Count" 
-        
+    # ---------- Добавляем название станка из последней активной наладки ----------
+    if lots:
+        lot_ids = [lot.id for lot in lots]
+        active_statuses = ['created', 'started', 'pending_qc', 'allowed', 'in_production']
+        setup_rows = (
+            db.query(SetupDB.lot_id, MachineDB.name, SetupDB.created_at)
+              .join(MachineDB, SetupDB.machine_id == MachineDB.id)
+              .filter(SetupDB.lot_id.in_(lot_ids))
+              .order_by(SetupDB.lot_id, SetupDB.created_at.desc())
+              .all()
+        )
+        machine_map: Dict[int, str] = {}
+        for lot_id, machine_name, _ in setup_rows:
+            if lot_id not in machine_map:  # берем самый свежий (первый в сортировке)
+                machine_map[lot_id] = machine_name
+
+        for lot in lots:
+            lot.machine_name = machine_map.get(lot.id)
+
     return lots
 
 # <<< НОВЫЙ ЭНДПОИНТ ДЛЯ ОБНОВЛЕНИЯ СТАТУСА ЛОТА >>>
@@ -3235,9 +3255,12 @@ async def get_daily_production_report(
                 m.name as machine_name,
                 
                 CASE 
-                    WHEN (DATE(mr.created_at) = :target_date AND EXTRACT(HOUR FROM mr.created_at) BETWEEN 6 AND 17) THEN 'morning'
-                    WHEN (DATE(mr.created_at) = :target_date AND EXTRACT(HOUR FROM mr.created_at) >= 18) 
-                         OR (DATE(mr.created_at) = :target_date + INTERVAL '1 day' AND EXTRACT(HOUR FROM mr.created_at) < 6) THEN 'evening'
+                    WHEN (DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') = :target_date 
+                          AND EXTRACT(HOUR FROM mr.created_at AT TIME ZONE 'Asia/Jerusalem') BETWEEN 6 AND 17) THEN 'morning'
+                    WHEN (DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') = :target_date 
+                          AND EXTRACT(HOUR FROM mr.created_at AT TIME ZONE 'Asia/Jerusalem') >= 18) 
+                         OR (DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') = :target_date + INTERVAL '1 day' 
+                             AND EXTRACT(HOUR FROM mr.created_at AT TIME ZONE 'Asia/Jerusalem') < 6) THEN 'evening'
                     ELSE NULL
                 END as shift_type
                 
@@ -3245,13 +3268,16 @@ async def get_daily_production_report(
             JOIN employees e ON mr.employee_id = e.id
             JOIN machines m ON mr.machine_id = m.id
             WHERE (
-                -- Утренняя смена: 6:00-17:59 указанного дня
-                (DATE(mr.created_at) = :target_date AND EXTRACT(HOUR FROM mr.created_at) BETWEEN 6 AND 17)
+                -- Утренняя смена: 6:00-17:59 указанного дня (локальное время)
+                (DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') = :target_date 
+                 AND EXTRACT(HOUR FROM mr.created_at AT TIME ZONE 'Asia/Jerusalem') BETWEEN 6 AND 17)
                 OR
-                -- Вечерняя смена: 18:00-23:59 указанного дня и 0:00-5:59 следующего дня
-                (DATE(mr.created_at) = :target_date AND EXTRACT(HOUR FROM mr.created_at) >= 18)
+                -- Вечерняя смена: 18:00-23:59 указанного дня и 0:00-5:59 следующего дня (локальное время)
+                (DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') = :target_date 
+                 AND EXTRACT(HOUR FROM mr.created_at AT TIME ZONE 'Asia/Jerusalem') >= 18)
                 OR
-                (DATE(mr.created_at) = :target_date + INTERVAL '1 day' AND EXTRACT(HOUR FROM mr.created_at) <= 5)
+                (DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') = :target_date + INTERVAL '1 day' 
+                 AND EXTRACT(HOUR FROM mr.created_at AT TIME ZONE 'Asia/Jerusalem') <= 5)
             )
             AND e.is_active = true
             AND m.is_active = true
@@ -3264,7 +3290,7 @@ async def get_daily_production_report(
                 COALESCE(
                     (SELECT mr.reading FROM machine_readings mr 
                      WHERE mr.machine_id = m.id 
-                     AND mr.created_at <= :target_date + INTERVAL '6 hours'
+                     AND mr.created_at <= (:target_date + INTERVAL '6 hours')::timestamp AT TIME ZONE 'Asia/Jerusalem'
                      ORDER BY mr.created_at DESC LIMIT 1), 0
                 ) as start_quantity
             FROM machines m
@@ -3441,14 +3467,23 @@ async def get_available_dates(
     
     try:
         sql_query = text("""
-        SELECT DISTINCT 
-            DATE(mr.created_at) as report_date,
-            COUNT(*) as readings_count
-        FROM machine_readings mr
-        JOIN employees e ON mr.employee_id = e.id
-        WHERE e.is_active = true
-        GROUP BY DATE(mr.created_at)
-        ORDER BY DATE(mr.created_at) DESC
+        WITH localized AS (
+            SELECT 
+                -- если время < 06:00 локальное, относим к предыдущему дню (вечерняя смена)
+                CASE 
+                    WHEN EXTRACT(HOUR FROM mr.created_at AT TIME ZONE 'Asia/Jerusalem') < 6
+                         THEN (mr.created_at AT TIME ZONE 'Asia/Jerusalem' - INTERVAL '6 hour')::date
+                    ELSE (mr.created_at AT TIME ZONE 'Asia/Jerusalem')::date
+                END AS report_date
+            FROM machine_readings mr
+            JOIN employees e ON e.id = mr.employee_id
+            WHERE e.is_active = true
+        )
+        SELECT report_date,
+               COUNT(*) AS readings_count
+        FROM localized
+        GROUP BY report_date
+        ORDER BY report_date DESC
         LIMIT :limit;
         """)
         
@@ -3472,3 +3507,176 @@ async def get_available_dates(
 # ===================================================================
 # КОНЕЦ ЕЖЕДНЕВНЫХ ОТЧЕТОВ ПРОИЗВОДСТВА  
 # ===================================================================
+
+# ===================================================================
+# ВНИМАНИЕ! Файл main.py перегружен. НЕ ДОБАВЛЯЙТЕ сюда новый код.
+# Создавайте новые роутеры в папке src/routers и подключайте их через
+# app.include_router(...).   
+# ===================================================================
+
+@app.get("/lots/pending-qc-old", response_model=List[LotInfoItem], include_in_schema=False)
+async def get_lots_pending_qc_old(
+    db: Session = Depends(get_db_session), 
+    current_user_qa_id: Optional[int] = Query(None, alias="qaId"),
+    hideCompleted: Optional[bool] = Query(False, description="Скрыть завершенные лоты и лоты со всеми проверенными батчами"),
+    dateFilter: Optional[str] = Query("all", description="Фильтр по периоду: all, 1month, 2months, 6months")
+):
+    """
+    Получить лоты для ОТК (старая логика с оптимизированной фильтрацией).
+    
+    1. Находит лоты с активными (неархивными) батчами.
+    2. Для каждого такого лота извлекает детали из последней наладки, включая имя инспектора, плановое количество и имя станка.
+    3. Опционально фильтрует по qaId, если он предоставлен (на основе qa_id в последней наладке).
+    4. Опционально скрывает завершенные лоты (hideCompleted=True) - ОПТИМИЗИРОВАНО через SQL.
+    """
+    logger.info(f"Запрос /lots/pending-qc получен. qaId: {current_user_qa_id}, hideCompleted: {hideCompleted}, dateFilter: {dateFilter}")
+    try:
+        # 1. Базовый запрос: лоты с активными батчами ИЛИ с активными наладками
+        
+        # 1a. Лоты с активными (неархивными) батчами
+        lots_with_active_batches = db.query(BatchDB.lot_id)\
+            .filter(BatchDB.current_location != 'archived') \
+            .distinct().subquery()
+        
+        # 1b. Лоты с активными наладками (независимо от статуса батчей)
+        lots_with_active_setups = db.query(SetupDB.lot_id)\
+            .filter(SetupDB.status.in_(['created', 'started', 'pending_qa_approval'])) \
+            .distinct().subquery()
+        
+        # 1c. Объединяем: лоты с активными батчами ИЛИ активными наладками
+        base_lot_ids_query = db.query(LotDB.id.label('lot_id'))\
+            .filter(
+                or_(
+                    LotDB.id.in_(lots_with_active_batches),
+                    LotDB.id.in_(lots_with_active_setups)
+                )
+            )
+
+        # 2. Применяем фильтры (LotDB уже в запросе)
+        
+        # Применяем фильтр по дате
+        if dateFilter and dateFilter != "all":
+            from datetime import datetime, timedelta
+            filter_date = None
+            if dateFilter == "1month":
+                filter_date = datetime.now() - timedelta(days=30)
+            elif dateFilter == "2months":
+                filter_date = datetime.now() - timedelta(days=60)
+            elif dateFilter == "6months":
+                filter_date = datetime.now() - timedelta(days=180)
+            
+            if filter_date:
+                base_lot_ids_query = base_lot_ids_query.filter(LotDB.created_at >= filter_date)
+
+        # Применяем фильтр hideCompleted
+        if hideCompleted:
+            # Исключаем лоты со статусом 'completed'
+            base_lot_ids_query = base_lot_ids_query.filter(LotDB.status != 'completed')
+            
+            # НО ВАЖНО: не исключаем лоты с активными наладками, даже если все батчи проверены!
+            # Исключаем только лоты БЕЗ активных наладок, где ВСЕ батчи проверены
+            
+            # Лоты с активными наладками (всегда показываем)
+            lots_with_active_setups_query = db.query(SetupDB.lot_id)\
+                .filter(SetupDB.status.in_(['created', 'started', 'pending_qa_approval']))\
+                .distinct().subquery()
+            
+            # Лоты с непроверенными батчами (тоже показываем)
+            lots_with_unchecked_batches = db.query(BatchDB.lot_id)\
+                .filter(
+                    or_(
+                        BatchDB.current_location == 'qc_pending',  # qc_pending = непроверенный
+                        and_(
+                            BatchDB.qc_inspector_id.is_(None),  # НЕТ инспектора
+                            BatchDB.current_location.notin_(['good', 'defect', 'archived'])  # И НЕ в финальных состояниях
+                        )
+                    )
+                )\
+                .distinct().subquery()
+            
+            # Показываем лоты с активными наладками ИЛИ непроверенными батчами
+            base_lot_ids_query = base_lot_ids_query.filter(
+                or_(
+                    LotDB.id.in_(lots_with_active_setups_query),
+                    LotDB.id.in_(lots_with_unchecked_batches)
+                )
+            )
+
+        lot_ids_with_active_batches_tuples = base_lot_ids_query.all()
+        lot_ids = [item[0] for item in lot_ids_with_active_batches_tuples]
+
+        if not lot_ids:
+            logger.info("Не найдено лотов с активными батчами (после фильтрации).")
+            return []
+        
+        logger.info(f"Найдены ID лотов с активными батчами: {lot_ids} (всего: {len(lot_ids)})")
+        
+        # 3. Основной запрос для данных по лотам и деталям
+        lots_query = db.query(LotDB, PartDB).select_from(LotDB)\
+            .join(PartDB, LotDB.part_id == PartDB.id)\
+            .filter(LotDB.id.in_(lot_ids))
+
+        lots_query_result = lots_query.all()
+        logger.info(f"Всего лотов (с деталями) для обработки: {len(lots_query_result)}")
+        
+        result = []
+        for lot_obj, part_obj in lots_query_result:
+            logger.debug(f"Обработка лота ID: {lot_obj.id}, Номер: {lot_obj.lot_number}")
+            
+            planned_quantity_val = None
+            inspector_name_val = None
+            machine_name_val = None
+            
+            # 4. Находим последнюю наладку для данного лота, включая имя станка
+            latest_setup_details = db.query(
+                    SetupDB.planned_quantity,
+                    SetupDB.qa_id,
+                    EmployeeDB.full_name.label("inspector_name_from_setup"),
+                    MachineDB.name.label("machine_name_from_setup"),
+                    SetupDB.machine_id.label("setup_machine_id")
+                )\
+                .outerjoin(EmployeeDB, SetupDB.qa_id == EmployeeDB.id) \
+                .outerjoin(MachineDB, SetupDB.machine_id == MachineDB.id) \
+                .filter(SetupDB.lot_id == lot_obj.id)\
+                .order_by(desc(SetupDB.created_at))\
+                .first()
+
+            passes_qa_filter = True
+
+            if latest_setup_details:
+                planned_quantity_val = latest_setup_details.planned_quantity
+                machine_name_val = latest_setup_details.machine_name_from_setup
+                logger.debug(f"Lot ID {lot_obj.id}: setup found, machine_id: {latest_setup_details.setup_machine_id}")
+
+                if latest_setup_details.qa_id:
+                    inspector_name_val = latest_setup_details.inspector_name_from_setup
+                    if current_user_qa_id is not None and latest_setup_details.qa_id != current_user_qa_id:
+                        passes_qa_filter = False
+                elif current_user_qa_id is not None:
+                    passes_qa_filter = False
+            elif current_user_qa_id is not None:
+                passes_qa_filter = False
+
+            if not passes_qa_filter:
+                continue
+
+            item_data = {
+                'id': lot_obj.id,
+                'drawing_number': part_obj.drawing_number,
+                'lot_number': lot_obj.lot_number,
+                'inspector_name': inspector_name_val,
+                'planned_quantity': planned_quantity_val,
+                'machine_name': machine_name_val,
+            }
+            
+            try:
+                result.append(LotInfoItem.model_validate(item_data))
+            except AttributeError:
+                result.append(LotInfoItem.parse_obj(item_data))
+
+        logger.info(f"Сформировано {len(result)} элементов для ответа /lots/pending-qc (оптимизированная версия).")
+        return result
+
+    except Exception as e:
+        logger.error(f"Ошибка в /lots/pending-qc: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера при получении лотов для ОТК")
