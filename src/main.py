@@ -1433,6 +1433,10 @@ async def get_lots_pending_qc_original(
     """
     logger.info(f"Запрос /lots/pending-qc получен. qaId: {current_user_qa_id}, hideCompleted: {hideCompleted}, dateFilter: {dateFilter}")
     try:
+        # Корректируем тип hideCompleted, если параметр пришёл строкой ('true', '1', 'on', 'yes')
+        if isinstance(hideCompleted, str):
+            hideCompleted = hideCompleted.lower() in {'1', 'true', 'yes', 'on'}
+
         # 1. Базовый запрос: лоты с активными батчами ИЛИ с активными наладками
         
         # 1a. Лоты с активными (неархивными) батчами
@@ -3537,6 +3541,10 @@ async def get_lots_pending_qc_old(
     """
     logger.info(f"Запрос /lots/pending-qc получен. qaId: {current_user_qa_id}, hideCompleted: {hideCompleted}, dateFilter: {dateFilter}")
     try:
+        # Корректируем тип hideCompleted, если параметр пришёл строкой ('true', '1', 'on', 'yes')
+        if isinstance(hideCompleted, str):
+            hideCompleted = hideCompleted.lower() in {'1', 'true', 'yes', 'on'}
+
         # 1. Базовый запрос: лоты с активными батчами ИЛИ с активными наладками
         
         # 1a. Лоты с активными (неархивными) батчами
@@ -3712,6 +3720,10 @@ async def get_lots_pending_qc(
     """
     logger.info(f"Запрос /lots/pending-qc получен. qaId: {current_user_qa_id}, hideCompleted: {hideCompleted}, dateFilter: {dateFilter}")
     try:
+        # Корректируем тип hideCompleted, если параметр пришёл строкой ('true', '1', 'on', 'yes')
+        if isinstance(hideCompleted, str):
+            hideCompleted = hideCompleted.lower() in {'1', 'true', 'yes', 'on'}
+
         # 1. Базовый запрос: лоты с активными батчами ИЛИ с активными наладками
         
         # 1a. Лоты с активными (неархивными) батчами
