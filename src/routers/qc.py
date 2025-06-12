@@ -62,6 +62,11 @@ async def get_lots_pending_qc(
                             s.created_at DESC
                     ) AS rn
                 FROM setup_jobs s
+            ),
+            open_batches AS (
+                SELECT DISTINCT b.lot_id
+                FROM batches b
+                WHERE b.current_location NOT IN ('good', 'defect', 'archived')  -- warehouse_counted считается открытым
             )
             SELECT
                 l.id,
@@ -74,6 +79,11 @@ async def get_lots_pending_qc(
             LEFT   JOIN ranked_setups rs ON rs.lot_id = l.id AND rs.rn = 1
             LEFT   JOIN machines m   ON m.id = rs.machine_id
             {where_clause}
+            AND (
+                    l.id IN (SELECT lot_id FROM open_batches)          -- есть хотя бы один "живой" батч
+                 OR NOT EXISTS (SELECT 1 FROM batches b WHERE b.lot_id = l.id) -- ещё нет батчей
+                 OR rs.qa_id IS NOT NULL                                -- активная наладка
+                )
         """
 
         rows = db.execute(text(sql), params).fetchall()
