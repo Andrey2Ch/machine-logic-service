@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # Импорт роутеров
 from .routers.lots import router as lots_management_router
 from src.models.setup import SetupStatus
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Union
 from pydantic import BaseModel, Field
 from enum import Enum
 from sqlalchemy.orm import Session, aliased, selectinload
@@ -1420,7 +1420,7 @@ class LotInfoItem(BaseModel):
 async def get_lots_pending_qc_original(
     db: Session = Depends(get_db_session), 
     current_user_qa_id: Optional[int] = Query(None, alias="qaId"),
-    hideCompleted: Optional[bool] = Query(False, description="Скрыть завершенные лоты и лоты со всеми проверенными батчами"),
+    hideCompleted: Union[bool, str] = Query(False, description="Скрыть завершенные лоты и лоты со всеми проверенными батчами"),
     dateFilter: Optional[str] = Query("all", description="Фильтр по периоду: all, 1month, 2months, 6months")
 ):
     """
@@ -3528,7 +3528,7 @@ async def get_available_dates(
 async def get_lots_pending_qc_old(
     db: Session = Depends(get_db_session), 
     current_user_qa_id: Optional[int] = Query(None, alias="qaId"),
-    hideCompleted: Optional[bool] = Query(False, description="Скрыть завершенные лоты и лоты со всеми проверенными батчами"),
+    hideCompleted: Union[bool, str] = Query(False, description="Скрыть завершенные лоты и лоты со всеми проверенными батчами"),
     dateFilter: Optional[str] = Query("all", description="Фильтр по периоду: all, 1month, 2months, 6months")
 ):
     """
@@ -3707,7 +3707,7 @@ async def get_lots_pending_qc_old(
 async def get_lots_pending_qc(
     db: Session = Depends(get_db_session), 
     current_user_qa_id: Optional[int] = Query(None, alias="qaId"),
-    hideCompleted: Optional[bool] = Query(False, description="Скрыть завершенные лоты и лоты со всеми проверенными батчами"),
+    hideCompleted: Union[bool, str] = Query(False, description="Скрыть завершенные лоты и лоты со всеми проверенными батчами"),
     dateFilter: Optional[str] = Query("all", description="Фильтр по периоду: all, 1month, 2months, 6months")
 ):
     """
