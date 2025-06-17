@@ -3409,10 +3409,37 @@ async def get_daily_production_report(
                 m.id as machine_id,
                 m.name as machine_name,
                 COALESCE(
+                    -- Берем первые показания после начала последней наладки для отчетного дня
+                    (
+                        WITH latest_setup_for_machine AS (
+                            SELECT sj.id, sj.created_at, sj.machine_id
+                            FROM setup_jobs sj
+                            JOIN machine_readings mr ON mr.setup_job_id = sj.id
+                            WHERE sj.machine_id = m.id
+                            AND (
+                                (DATE(mr.created_at) = :target_date AND EXTRACT(HOUR FROM mr.created_at) BETWEEN 6 AND 17)
+                                OR
+                                (DATE(mr.created_at) = :target_date AND EXTRACT(HOUR FROM mr.created_at) >= 18)
+                                OR
+                                (DATE(mr.created_at) = :target_date + INTERVAL '1 day' AND EXTRACT(HOUR FROM mr.created_at) < 6)
+                            )
+                            ORDER BY sj.created_at DESC
+                            LIMIT 1
+                        )
+                        SELECT mr.reading 
+                        FROM machine_readings mr, latest_setup_for_machine lsm
+                        WHERE mr.machine_id = m.id 
+                        AND mr.setup_job_id = lsm.id
+                        AND mr.created_at >= lsm.created_at
+                        ORDER BY mr.created_at ASC 
+                        LIMIT 1
+                    ), 
+                    -- Если нет показаний с наладкой для отчетного дня, берем последние показания до 6:00
                     (SELECT mr.reading FROM machine_readings mr 
                      WHERE mr.machine_id = m.id 
                      AND mr.created_at <= (:target_date + INTERVAL '6 hours')::timestamp AT TIME ZONE 'Asia/Jerusalem'
-                     ORDER BY mr.created_at DESC LIMIT 1), 0
+                     ORDER BY mr.created_at DESC LIMIT 1), 
+                    0
                 ) as start_quantity
             FROM machines m
             WHERE m.is_active = true
