@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session, aliased, selectinload
 from fastapi import Depends, Body
 from src.database import Base, initialize_database, get_db_session
 from src.models.models import SetupDB, ReadingDB, MachineDB, EmployeeDB, PartDB, LotDB, BatchDB, CardDB
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
 from src.utils.sheets_handler import save_to_sheets
 import asyncio
 import httpx
@@ -1018,7 +1018,7 @@ async def get_batches_for_lot(lot_id: int, db: Session = Depends(get_db_session)
                 'lot_number': lot_obj.lot_number if lot_obj else None,
                 'current_quantity': batch_obj.current_quantity,
                 'current_location': batch_obj.current_location,
-                'batch_time': batch_obj.batch_time,
+                'batch_time': batch_obj.batch_time.replace(tzinfo=timezone.utc).astimezone(timezone(timedelta(hours=3))) if batch_obj.batch_time else None,
                 'warehouse_received_at': batch_obj.warehouse_received_at, 
                 'operator_name': emp_obj.full_name if emp_obj else None, 
             })
@@ -1034,7 +1034,7 @@ async def start_batch_inspection(batch_id: int, payload: StartInspectionPayload,
         batch = db.query(BatchDB).filter(BatchDB.id == batch_id).first()
         if not batch:
             raise HTTPException(status_code=404, detail="Batch not found")
-        if batch.current_location != 'warehouse_counted':
+        if batch.current_location not in ['warehouse_counted', 'sorting_warehouse', 'sorting']:
             raise HTTPException(status_code=400, detail="Batch cannot be inspected in its current state")
         batch.current_location = 'inspection'
         db.commit()
@@ -1054,7 +1054,7 @@ async def inspect_batch(batch_id: int, payload: InspectBatchPayload, db: Session
         batch = db.query(BatchDB).filter(BatchDB.id == batch_id).first()
         if not batch:
             raise HTTPException(status_code=404, detail="Batch not found")
-        if batch.current_location not in ['inspection', 'warehouse_counted']:
+        if batch.current_location not in ['inspection', 'warehouse_counted', 'sorting_warehouse', 'sorting']:
             raise HTTPException(status_code=400, detail="Batch is not in inspection state")
 
         total_requested = payload.good_quantity + payload.rejected_quantity + payload.rework_quantity
@@ -1243,6 +1243,7 @@ class WarehousePendingBatchItem(BaseModel):
     operator_name: Optional[str]
     machine_name: Optional[str]  # Добавляем поле для названия станка
     card_number: Optional[int] = None  # Добавляем номер карточки
+    current_location: str  # Добавляем статус батча для различения обычных и на переборку
 
     class Config:
         from_attributes = True # Pydantic v2, было orm_mode
@@ -1283,7 +1284,8 @@ async def get_warehouse_pending_batches(db: Session = Depends(get_db_session)):
                 'batch_time': batch_obj.batch_time,
                 'operator_name': emp_obj.full_name if emp_obj else None,
                 'machine_name': machine_obj.name if machine_obj else None,
-                'card_number': card_obj.card_number if card_obj else None
+                'card_number': card_obj.card_number if card_obj else None,
+                'current_location': batch_obj.current_location  # Добавляем статус батча
             }
             # Валидируем и добавляем
             result.append(WarehousePendingBatchItem.model_validate(item_data))
@@ -1345,7 +1347,7 @@ async def accept_batch_on_warehouse(batch_id: int, payload: AcceptWarehousePaylo
                 percentage_diff = abs(difference / operator_reported_qty) * 100
                 batch.discrepancy_percentage = round(percentage_diff, 2)
 
-                if percentage_diff > 5.0:
+                if percentage_diff > 10.0:  # 🔄 ИЗМЕНЕНО: порог с 5% на 10%
                     logger.warning(
                         f"Critical discrepancy for batch {batch.id}: "
                         f"Operator Qty: {operator_reported_qty}, "
@@ -1372,7 +1374,13 @@ async def accept_batch_on_warehouse(batch_id: int, payload: AcceptWarehousePaylo
 
         # Обновляем основные поля батча
         batch.current_quantity = recounted_clerk_qty # Актуальное кол-во теперь = пересчитанному кладовщиком
-        batch.current_location = 'warehouse_counted'
+        
+        # Определяем новый статус в зависимости от текущего
+        if batch.current_location == 'sorting':
+            batch.current_location = 'sorting_warehouse'  # Батчи на переборку с склада
+        else:
+            batch.current_location = 'warehouse_counted'  # Обычные батчи
+            
         batch.warehouse_employee_id = payload.warehouse_employee_id
         batch.warehouse_received_at = datetime.now()
         # НЕ МЕНЯЕМ operator_id! Оставляем оригинального оператора для истории
@@ -1847,7 +1855,7 @@ class CreateBatchInput(BaseModel):
     operator_id: int
     machine_id: int
     drawing_number: str
-    status: Optional[str] = 'sorting'
+    status: Optional[str] = 'production'  # Изменено: по умолчанию 'production', а не 'sorting'
 
 class CreateBatchResponse(BaseModel):
     batch_id: int
@@ -1876,16 +1884,29 @@ async def create_batch(payload: CreateBatchInput, db: Session = Depends(get_db_s
     if not operator:
         raise HTTPException(status_code=404, detail="Operator not found")
 
+    # Для батчей на переборку находим активную наладку для связи
+    setup_job_id = None
+    if payload.status == 'sorting':
+        active_setup = db.query(SetupDB).filter(
+            SetupDB.machine_id == payload.machine_id,
+            SetupDB.status.in_(['created', 'pending_qc', 'allowed', 'started']),
+            SetupDB.end_time.is_(None)
+        ).order_by(SetupDB.created_at.desc()).first()
+        
+        if active_setup:
+            setup_job_id = active_setup.id
+
     now = datetime.now()
     hour = now.hour
     shift = "1" if 6 <= hour < 18 else "2"
 
     new_batch = BatchDB(
         lot_id=payload.lot_id,
+        setup_job_id=setup_job_id,  # Связываем с активной наладкой для переборки
         initial_quantity=0, # <--- ИЗМЕНЕНО: ставим 0 по умолчанию для батчей 'sorting'
         current_quantity=0, # <--- ИЗМЕНЕНО: ставим 0 по умолчанию для батчей 'sorting'
         recounted_quantity=None,
-        current_location=payload.status or 'sorting',
+        current_location=payload.status or 'production',  # Изменено: дефолт 'production'
         operator_id=payload.operator_id,
         batch_time=now,
         created_at=now
@@ -2783,6 +2804,25 @@ async def get_batch_availability(machine_id: int, db: Session = Depends(get_db_s
 class CardUseRequest(BaseModel):
     """Запрос на использование карточки"""
     batch_id: int
+    machine_id: Optional[int] = None  # Для батчей на переборку, где нет setup_job_id
+
+class CardReservationRequest(BaseModel):
+    """Запрос на резервирование карточки"""
+    machine_id: int
+    batch_id: int
+    operator_id: int
+
+class CardReservationResponse(BaseModel):
+    """Ответ на резервирование карточки"""
+    card_number: int
+    machine_id: int
+    batch_id: int
+    operator_id: int
+    reserved_until: datetime
+    message: str
+
+    class Config:
+        from_attributes = True
 
 class CardInfo(BaseModel):
     """Информация о карточке"""
@@ -2792,47 +2832,101 @@ class CardInfo(BaseModel):
     status: str
     batch_id: Optional[int] = None
     last_event: datetime
-    
+
     class Config:
         from_attributes = True
 
 def find_machine_by_flexible_code(db: Session, machine_code: str) -> Optional[MachineDB]:
     """
-    Гибкий поиск станка по коду с учетом различных форматов:
-    SR-32, SR32, sr 32, SR 32 и т.д.
+    Гибкий поиск станка по коду (например: SR-32, SR32, sr 32, etc.)
     """
-    # Извлекаем только цифры из кода
-    import re
-    digits = re.findall(r'\d+', machine_code)
-    if not digits:
-        return None
+    # Убираем пробелы и дефисы, приводим к нижнему регистру
+    clean_code = machine_code.replace('-', '').replace(' ', '').lower()
     
-    machine_number = int(digits[0])
+    # Ищем станки и пробуем найти совпадение
+    machines = db.query(MachineDB).all()
     
-    # Ищем станок по номеру в различных форматах
-    possible_names = [
-        f"SR-{machine_number}",
-        f"SR{machine_number}",
-        f"sr-{machine_number}",
-        f"sr{machine_number}",
-        f"Станок {machine_number}",
-        f"Machine {machine_number}",
-        str(machine_number)
-    ]
+    for machine in machines:
+        if machine.name:
+            # Очищаем имя станка для сравнения
+            clean_machine_name = machine.name.replace('-', '').replace(' ', '').lower()
+            
+            # Проверяем точное совпадение
+            if clean_machine_name == clean_code:
+                return machine
+                
+            # Проверяем, содержится ли код в имени (для случаев типа "SR-32 Main")
+            if clean_code in clean_machine_name or clean_machine_name in clean_code:
+                return machine
     
-    for name in possible_names:
-        machine = db.query(MachineDB).filter(
-            func.lower(MachineDB.name) == name.lower()
-        ).first()
-        if machine:
-            return machine
+    return None
+
+@app.post("/cards/reserve", response_model=CardReservationResponse, tags=["Cards"])
+async def reserve_card_transactional(data: CardReservationRequest, db: Session = Depends(get_db_session)):
+    """
+    🎯 НОВЫЙ ЭНДПОИНТ: Резервирование карточки с автоматическим назначением
     
-    # Если точного совпадения нет, ищем по содержанию номера
-    machine = db.query(MachineDB).filter(
-        MachineDB.name.ilike(f"%{machine_number}%")
-    ).first()
-    
-    return machine
+    Решает проблему race condition:
+    1. Атомарно находит и резервирует свободную карточку  
+    2. Возвращает зарезервированную карточку оператору
+    3. Автоматически освобождает карточку через 30 секунд если не использована
+    """
+    try:
+        # Проверяем существование батча
+        batch = db.query(BatchDB).filter(BatchDB.id == data.batch_id).first()
+        if not batch:
+            raise HTTPException(status_code=404, detail="Батч не найден")
+        
+        # Используем транзакцию для атомарного резервирования
+        with db.begin():
+            # Атомарно находим и резервируем первую свободную карточку
+            result = db.execute(
+                text("""UPDATE cards 
+                       SET status = 'in_use', 
+                           batch_id = :batch_id, 
+                           last_event = NOW()
+                       WHERE card_number = (
+                           SELECT card_number 
+                           FROM cards 
+                           WHERE machine_id = :machine_id AND status = 'free' 
+                           ORDER BY card_number 
+                           LIMIT 1
+                       ) AND machine_id = :machine_id AND status = 'free'
+                       RETURNING card_number"""),
+                {"machine_id": data.machine_id, "batch_id": data.batch_id}
+            )
+            
+            reserved_card = result.fetchone()
+            
+            if not reserved_card:
+                raise HTTPException(
+                    status_code=409, 
+                    detail="Нет свободных карточек для этого станка"
+                )
+            
+            card_number = reserved_card[0]
+            
+            # Связь batch-card осуществляется через batch_id в таблице cards (уже обновлено выше)
+        
+        reserved_until = datetime.now() + timedelta(seconds=30)
+        
+        logger.info(f"Card {card_number} reserved for batch {data.batch_id} by operator {data.operator_id}")
+        
+        return CardReservationResponse(
+            card_number=card_number,
+            machine_id=data.machine_id,
+            batch_id=data.batch_id,
+            operator_id=data.operator_id,
+            reserved_until=reserved_until,
+            message=f"Карточка #{card_number} зарезервирована за батчем {data.batch_id}"
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error reserving card for machine {data.machine_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Ошибка резервирования карточки")
 
 @app.get("/cards/free", tags=["Cards"])
 async def get_free_cards(
@@ -2861,12 +2955,16 @@ async def use_card(card_number: int, data: CardUseRequest, db: Session = Depends
         if not batch:
             raise HTTPException(status_code=404, detail="Батч не найден")
         
-        # Получаем machine_id из setup_job
-        setup = db.query(SetupDB).filter(SetupDB.id == batch.setup_job_id).first()
-        if not setup:
-            raise HTTPException(status_code=404, detail="Наладка для батча не найдена")
-        
-        machine_id = setup.machine_id
+        # Получаем machine_id: либо из запроса (для батчей на переборку), либо из setup_job
+        if data.machine_id:
+            # Для батчей на переборку machine_id передается напрямую
+            machine_id = data.machine_id
+        else:
+            # Для обычных батчей получаем machine_id из setup_job
+            setup = db.query(SetupDB).filter(SetupDB.id == batch.setup_job_id).first()
+            if not setup:
+                raise HTTPException(status_code=404, detail="Наладка для батча не найдена")
+            machine_id = setup.machine_id
         
         # Используем optimistic locking для исключения гонок
         result = db.execute(
@@ -2886,6 +2984,8 @@ async def use_card(card_number: int, data: CardUseRequest, db: Session = Depends
                 raise HTTPException(status_code=404, detail="Карточка не найдена для этого станка")
             else:
                 raise HTTPException(status_code=409, detail="Карточка уже занята")
+        
+        # Связь batch-card осуществляется через batch_id в таблице cards (уже обновлено выше)
         
         db.commit()
         
@@ -2910,9 +3010,21 @@ async def return_card(card_number: int, machine_id: int, db: Session = Depends(g
         if not card:
             raise HTTPException(status_code=404, detail="Карточка не найдена")
         
+        # Сохраняем batch_id для очистки поля в батче
+        batch_id = card.batch_id
+        
         card.status = 'free'
         card.batch_id = None
         card.last_event = datetime.now()
+        
+        # Очищаем поле card_number в таблице batches
+        if batch_id:
+            db.execute(
+                text("""UPDATE batches 
+                       SET card_number = NULL
+                       WHERE id = :batch_id"""),
+                {"batch_id": batch_id}
+            )
         
         db.commit()
         
@@ -3746,7 +3858,7 @@ async def get_lots_pending_qc(
 
         # 2. Применяем фильтры (LotDB уже в запросе)
         
-        # Применяем фильтр по дате
+        # Применяем фильтр по дате - фильтруем по дате батчей, а не лотов
         if dateFilter and dateFilter != "all":
             from datetime import datetime, timedelta
             filter_date = None
@@ -3758,7 +3870,13 @@ async def get_lots_pending_qc(
                 filter_date = datetime.now() - timedelta(days=180)
             
             if filter_date:
-                base_lot_ids_query = base_lot_ids_query.filter(LotDB.created_at >= filter_date)
+                # Фильтруем лоты, у которых есть батчи созданные после filter_date
+                lots_with_recent_batches = db.query(BatchDB.lot_id)\
+                    .filter(BatchDB.batch_time >= filter_date)\
+                    .filter(BatchDB.current_location != 'archived')\
+                    .distinct().subquery()
+                
+                base_lot_ids_query = base_lot_ids_query.filter(LotDB.id.in_(lots_with_recent_batches))
 
         # Применяем фильтр hideCompleted
         if hideCompleted:
