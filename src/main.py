@@ -3409,37 +3409,10 @@ async def get_daily_production_report(
                 m.id as machine_id,
                 m.name as machine_name,
                 COALESCE(
-                    -- Берем первые показания после начала последней наладки для отчетного дня
-                    (
-                        WITH latest_setup_for_machine AS (
-                            SELECT sj.id, sj.created_at, sj.machine_id
-                            FROM setup_jobs sj
-                            JOIN machine_readings mr ON mr.setup_job_id = sj.id
-                            WHERE sj.machine_id = m.id
-                            AND (
-                                (DATE(mr.created_at) = :target_date AND EXTRACT(HOUR FROM mr.created_at) BETWEEN 6 AND 17)
-                                OR
-                                (DATE(mr.created_at) = :target_date AND EXTRACT(HOUR FROM mr.created_at) >= 18)
-                                OR
-                                (DATE(mr.created_at) = :target_date + INTERVAL '1 day' AND EXTRACT(HOUR FROM mr.created_at) < 6)
-                            )
-                            ORDER BY sj.created_at DESC
-                            LIMIT 1
-                        )
-                        SELECT mr.reading 
-                        FROM machine_readings mr, latest_setup_for_machine lsm
-                        WHERE mr.machine_id = m.id 
-                        AND mr.setup_job_id = lsm.id
-                        AND mr.created_at >= lsm.created_at
-                        ORDER BY mr.created_at ASC 
-                        LIMIT 1
-                    ), 
-                    -- Если нет показаний с наладкой для отчетного дня, берем последние показания до 6:00
                     (SELECT mr.reading FROM machine_readings mr 
                      WHERE mr.machine_id = m.id 
                      AND mr.created_at <= (:target_date + INTERVAL '6 hours')::timestamp AT TIME ZONE 'Asia/Jerusalem'
-                     ORDER BY mr.created_at DESC LIMIT 1), 
-                    0
+                     ORDER BY mr.created_at DESC LIMIT 1), 0
                 ) as start_quantity
             FROM machines m
             WHERE m.is_active = true
@@ -3463,6 +3436,28 @@ async def get_daily_production_report(
             GROUP BY machine_id, machine_name
         ),
         
+        production_calc AS (
+            SELECT
+                st.machine_id,
+                
+                -- Вычисляем утреннее производство с учетом сброса счетчика
+                CASE
+                    WHEN COALESCE(sr.morning_end_quantity, st.start_quantity, 0) < COALESCE(st.start_quantity, 0)
+                    THEN COALESCE(sr.morning_end_quantity, st.start_quantity, 0) -- Если счетчик сброшен, производство = конечное значение
+                    ELSE COALESCE(sr.morning_end_quantity, st.start_quantity, 0) - COALESCE(st.start_quantity, 0)
+                END as morning_production,
+                
+                -- Вычисляем вечернее производство с учетом сброса счетчика
+                CASE
+                    WHEN COALESCE(sr.evening_end_quantity, sr.morning_end_quantity, st.start_quantity, 0) < COALESCE(sr.morning_end_quantity, st.start_quantity, 0)
+                    THEN COALESCE(sr.evening_end_quantity, sr.morning_end_quantity, st.start_quantity, 0) -- Если счетчик сброшен, производство = конечное значение
+                    ELSE COALESCE(sr.evening_end_quantity, sr.morning_end_quantity, st.start_quantity, 0) - COALESCE(sr.morning_end_quantity, st.start_quantity, 0)
+                END as evening_production
+                
+            FROM start_readings st
+            LEFT JOIN shift_readings sr ON st.machine_id = sr.machine_id
+        ),
+
         latest_setups AS (
             SELECT DISTINCT ON (m.id)
                 m.id as machine_id,
@@ -3498,6 +3493,7 @@ async def get_daily_production_report(
             COALESCE(sr.machine_name, st.machine_name) as machine_name,
             COALESCE(ls.part_code, '--') as part_code,
             
+            -- Исходные показания для отображения
             COALESCE(st.start_quantity, 0) as start_quantity,
             COALESCE(sr.morning_end_quantity, st.start_quantity, 0) as morning_end_quantity,
             COALESCE(sr.evening_end_quantity, sr.morning_end_quantity, st.start_quantity, 0) as evening_end_quantity,
@@ -3509,23 +3505,21 @@ async def get_daily_production_report(
                 ELSE NULL
             END as required_quantity_per_shift,
             
-            COALESCE(sr.morning_end_quantity, st.start_quantity, 0) - COALESCE(st.start_quantity, 0) as morning_production,
+            -- Используем вычисленное производство
+            pc.morning_production,
             
             CASE 
                 WHEN COALESCE(ls.cycle_time, 0) > 0 THEN 
-                    ((COALESCE(sr.morning_end_quantity, st.start_quantity, 0) - COALESCE(st.start_quantity, 0)) * 100.0) / 
-                    ((12 * 3600) / ls.cycle_time)
+                    (pc.morning_production * 100.0) / ((12 * 3600) / ls.cycle_time)
                 ELSE NULL
             END as morning_performance_percent,
             
-            COALESCE(sr.evening_end_quantity, sr.morning_end_quantity, st.start_quantity, 0) - 
-            COALESCE(sr.morning_end_quantity, st.start_quantity, 0) as evening_production,
+            -- Используем вычисленное производство
+            pc.evening_production,
             
             CASE 
                 WHEN COALESCE(ls.cycle_time, 0) > 0 THEN 
-                    ((COALESCE(sr.evening_end_quantity, sr.morning_end_quantity, st.start_quantity, 0) - 
-                      COALESCE(sr.morning_end_quantity, st.start_quantity, 0)) * 100.0) / 
-                    ((12 * 3600) / ls.cycle_time)
+                    (pc.evening_production * 100.0) / ((12 * 3600) / ls.cycle_time)
                 ELSE NULL
             END as evening_performance_percent,
             
@@ -3538,6 +3532,7 @@ async def get_daily_production_report(
         FROM start_readings st
         LEFT JOIN shift_readings sr ON st.machine_id = sr.machine_id
         LEFT JOIN latest_setups ls ON st.machine_id = ls.machine_id
+        LEFT JOIN production_calc pc ON st.machine_id = pc.machine_id
 
         ORDER BY st.machine_name;
         """)
