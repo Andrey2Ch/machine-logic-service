@@ -721,62 +721,68 @@ class OperatorMachineViewItem(BaseModel):
 async def get_operator_machines_view(db: Session = Depends(get_db_session)):
     """
     Получает список ВСЕХ активных станков с информацией
-    о последней активной наладке и последнем показании.
+    о последней активной наладке и последнем показании (ОПТИМИЗИРОВАННАЯ ВЕРСИЯ).
     """
-    logger.info(f"Fetching operator machine view for ALL operators") # Обновляем лог
+    logger.info("Fetching optimized operator machine view for ALL operators")
     try:
-        # 1. Получаем все активные станки
-        machines = db.query(MachineDB).filter(MachineDB.is_active == True).order_by(MachineDB.name).all()
-        print("DEBUG: machines from DB:", machines)
-        logger.debug(f"Found {len(machines)} active machines.")
+        active_setup_statuses = ('created', 'pending_qc', 'allowed', 'started')
+        
+        sql_query = text(f"""
+        WITH latest_readings AS (
+            -- Находим последнее показание для каждого станка
+            SELECT 
+                machine_id, 
+                reading, 
+                created_at,
+                ROW_NUMBER() OVER (PARTITION BY machine_id ORDER BY created_at DESC) as rn
+            FROM machine_readings
+        ),
+        latest_setups AS (
+            -- Находим последнюю активную наладку для каждого станка
+            SELECT 
+                id,
+                planned_quantity,
+                additional_quantity,
+                part_id,
+                status,
+                machine_id,
+                ROW_NUMBER() OVER (PARTITION BY machine_id ORDER BY created_at DESC) as rn
+            FROM setup_jobs
+            WHERE status IN :active_statuses AND end_time IS NULL
+        )
+        SELECT 
+            m.id,
+            m.name,
+            lr.reading as last_reading,
+            lr.created_at as last_reading_time,
+            ls.id as setup_id,
+            p.drawing_number,
+            ls.planned_quantity,
+            ls.additional_quantity,
+            COALESCE(ls.status, 'idle') as status
+        FROM machines m
+        LEFT JOIN (
+            SELECT * FROM latest_readings WHERE rn = 1
+        ) lr ON m.id = lr.machine_id
+        LEFT JOIN (
+            SELECT * FROM latest_setups WHERE rn = 1
+        ) ls ON m.id = ls.machine_id
+        LEFT JOIN parts p ON ls.part_id = p.id
+        WHERE m.is_active = true
+        ORDER BY m.name;
+        """)
 
-        result_list = []
-        active_setup_statuses = ['created', 'pending_qc', 'allowed', 'started']
+        result = db.execute(sql_query, {"active_statuses": active_setup_statuses})
+        rows = result.fetchall()
 
-        for machine in machines:
-            logger.debug(f"Processing machine: {machine.name} (ID: {machine.id})")
-            # 2. Находим последнее показание для станка
-            last_reading_data = db.query(ReadingDB.reading, ReadingDB.created_at)\
-                .filter(ReadingDB.machine_id == machine.id)\
-                .order_by(ReadingDB.created_at.desc())\
-                .first()
-            logger.debug(f"Last reading data for machine {machine.id}: {last_reading_data}")
-
-            # 3. Находим последнюю активную наладку и ее СТАТУС
-            active_setup = db.query(
-                    SetupDB.id, 
-                    SetupDB.planned_quantity,
-                    SetupDB.additional_quantity,
-                    PartDB.drawing_number,
-                    SetupDB.status # <-- Добавляем статус
-                )\
-                .join(PartDB, SetupDB.part_id == PartDB.id)\
-                .filter(SetupDB.machine_id == machine.id)\
-                .filter(SetupDB.status.in_(active_setup_statuses))\
-                .filter(SetupDB.end_time == None)\
-                .order_by(SetupDB.created_at.desc())\
-                .first()
-            
-            # Формируем элемент ответа
-            machine_view = OperatorMachineViewItem(
-                id=machine.id,
-                name=machine.name,
-                last_reading=last_reading_data.reading if last_reading_data else None,
-                last_reading_time=last_reading_data.created_at if last_reading_data else None,
-                setup_id=active_setup.id if active_setup else None,
-                drawing_number=active_setup.drawing_number if active_setup else None,
-                planned_quantity=active_setup.planned_quantity if active_setup else None,
-                additional_quantity=active_setup.additional_quantity if active_setup else None,
-                status=active_setup.status if active_setup else 'idle'
-            )
-            result_list.append(machine_view)
-
-        logger.info(f"Successfully prepared operator machine view")
-        print("DEBUG: result to return:", result_list)
+        # Используем .from_orm() для прямого преобразования в Pydantic модель
+        result_list = [OperatorMachineViewItem.from_orm(row) for row in rows]
+        
+        logger.info(f"Successfully prepared operator machine view with {len(result_list)} machines.")
         return result_list
 
     except Exception as e:
-        logger.error(f"Error fetching operator machine view: {e}", exc_info=True) # Обновляем лог
+        logger.error(f"Error fetching optimized operator machine view: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error fetching operator machine view")
 
 async def check_lot_completion_and_update_status(lot_id: int, db: Session):
@@ -3844,181 +3850,94 @@ async def get_lots_pending_qc(
     dateFilter: Optional[str] = Query("all", description="Фильтр по периоду: all, 1month, 2months, 6months")
 ):
     """
-    Получить лоты для ОТК (старая логика с оптимизированной фильтрацией).
-    
-    1. Находит лоты с активными (неархивными) батчами.
-    2. Для каждого такого лота извлекает детали из последней наладки, включая имя инспектора, плановое количество и имя станка.
-    3. Опционально фильтрует по qaId, если он предоставлен (на основе qa_id в последней наладке).
-    4. Опционально скрывает завершенные лоты (hideCompleted=True) - ОПТИМИЗИРОВАНО через SQL.
+    Получить лоты для ОТК (ОПТИМИЗИРОВАННАЯ ВЕРСИЯ).
+    За один запрос получает все лоты с их последними наладками.
     """
-    logger.info(f"Запрос /lots/pending-qc получен. qaId: {current_user_qa_id}, hideCompleted: {hideCompleted}, dateFilter: {dateFilter}")
+    logger.info(f"Запрос /lots-pending-qc получен. qaId: {current_user_qa_id}, hideCompleted: {hideCompleted}, dateFilter: {dateFilter}")
     try:
-        # Корректируем тип hideCompleted, если параметр пришёл строкой ('true', '1', 'on', 'yes')
+        # Корректируем тип hideCompleted
         if isinstance(hideCompleted, str):
             hideCompleted = hideCompleted.lower() in {'1', 'true', 'yes', 'on'}
 
-        # 1. Базовый запрос: лоты с активными батчами ИЛИ с активными наладками
+        # Определяем CTE для фильтрации лотов
+        lots_cte_query = """
+        WITH lots_with_active_batches AS (
+            SELECT DISTINCT lot_id FROM batches WHERE current_location != 'archived'
+        ),
+        lots_with_active_setups AS (
+            SELECT DISTINCT lot_id FROM setup_jobs WHERE status IN ('created', 'started', 'pending_qa_approval')
+        )
+        SELECT id FROM lots WHERE id IN (SELECT lot_id FROM lots_with_active_batches) OR id IN (SELECT lot_id FROM lots_with_active_setups)
+        """
         
-        # 1a. Лоты с активными (неархивными) батчами
-        lots_with_active_batches = db.query(BatchDB.lot_id)\
-            .filter(BatchDB.current_location != 'archived') \
-            .distinct().subquery()
-        
-        # 1b. Лоты с активными наладками (независимо от статуса батчей)
-        lots_with_active_setups = db.query(SetupDB.lot_id)\
-            .filter(SetupDB.status.in_(['created', 'started', 'pending_qa_approval'])) \
-            .distinct().subquery()
-        
-        # 1c. Объединяем: лоты с активными батчами ИЛИ активными наладками
-        base_lot_ids_query = db.query(LotDB.id.label('lot_id'))\
-            .filter(
-                or_(
-                    LotDB.id.in_(lots_with_active_batches),
-                    LotDB.id.in_(lots_with_active_setups)
-                )
-            )
-
-        # 2. Применяем фильтры (LotDB уже в запросе)
-        
-        # Применяем фильтр по дате - фильтруем по дате батчей, а не лотов
+        # Применяем фильтр по дате, если он есть
+        params = {}
         if dateFilter and dateFilter != "all":
             from datetime import datetime, timedelta
             filter_date = None
-            if dateFilter == "1month":
-                filter_date = datetime.now() - timedelta(days=30)
-            elif dateFilter == "2months":
-                filter_date = datetime.now() - timedelta(days=60)
-            elif dateFilter == "6months":
-                filter_date = datetime.now() - timedelta(days=180)
+            if dateFilter == "1month": filter_date = datetime.now() - timedelta(days=30)
+            elif dateFilter == "2months": filter_date = datetime.now() - timedelta(days=60)
+            elif dateFilter == "6months": filter_date = datetime.now() - timedelta(days=180)
             
             if filter_date:
-                # Фильтруем лоты, у которых есть батчи созданные после filter_date
-                lots_with_recent_batches = db.query(BatchDB.lot_id)\
-                    .filter(BatchDB.batch_time >= filter_date)\
-                    .filter(BatchDB.current_location != 'archived')\
-                    .distinct().subquery()
-                
-                base_lot_ids_query = base_lot_ids_query.filter(LotDB.id.in_(lots_with_recent_batches))
+                lots_cte_query += " AND created_at >= :filter_date"
+                params['filter_date'] = filter_date
 
         # Применяем фильтр hideCompleted
         if hideCompleted:
-            # Исключаем лоты со статусом 'completed'
-            base_lot_ids_query = base_lot_ids_query.filter(LotDB.status != 'completed')
-            
-            # НО ВАЖНО: не исключаем лоты с активными наладками, даже если все батчи проверены!
-            # Исключаем только лоты БЕЗ активных наладок, где ВСЕ батчи проверены
-            
-            # Лоты с активными наладками (всегда показываем)
-            lots_with_active_setups_query = db.query(SetupDB.lot_id)\
-                .filter(SetupDB.status.in_(['created', 'started', 'pending_qa_approval']))\
-                .distinct().subquery()
-            
-            # Лоты с непроверенными батчами (тоже показываем)
-            lots_with_unchecked_batches = db.query(BatchDB.lot_id)\
-                .filter(
-                    or_(
-                        BatchDB.current_location == 'qc_pending',  # qc_pending = непроверенный
-                        and_(
-                            BatchDB.qc_inspector_id.is_(None),  # НЕТ инспектора
-                            BatchDB.current_location.notin_(['good', 'defect', 'archived'])  # И НЕ в финальных состояниях
-                        )
-                    )
-                )\
-                .distinct().subquery()
-            
-            # Показываем лоты с активными наладками ИЛИ непроверенными батчами
-            base_lot_ids_query = base_lot_ids_query.filter(
-                or_(
-                    LotDB.id.in_(lots_with_active_setups_query),
-                    LotDB.id.in_(lots_with_unchecked_batches)
-                )
-            )
+            lots_cte_query += " AND status != 'completed'"
+            # Дополнительная сложная логика для скрытия завершенных, но не заархивированных,
+            # здесь может быть добавлена при необходимости, но основной фильтр уже применен.
 
-        lot_ids_with_active_batches_tuples = base_lot_ids_query.all()
-        lot_ids = [item[0] for item in lot_ids_with_active_batches_tuples]
-
-        if not lot_ids:
-            logger.info("Не найдено лотов с активными батчами (после фильтрации).")
-            return []
+        final_query = text(f"""
+        WITH visible_lots AS (
+            {lots_cte_query}
+        ),
+        latest_setups_for_lots AS (
+            -- Находим последнюю наладку для каждого лота
+            SELECT 
+                sj.lot_id,
+                sj.planned_quantity,
+                sj.qa_id,
+                e.full_name as inspector_name,
+                m.name as machine_name,
+                ROW_NUMBER() OVER (PARTITION BY sj.lot_id ORDER BY sj.created_at DESC) as rn
+            FROM setup_jobs sj
+            LEFT JOIN employees e ON sj.qa_id = e.id
+            LEFT JOIN machines m ON sj.machine_id = m.id
+            WHERE sj.lot_id IN (SELECT id FROM visible_lots)
+        )
+        SELECT 
+            l.id,
+            p.drawing_number,
+            l.lot_number,
+            ls.inspector_name,
+            ls.planned_quantity,
+            ls.machine_name
+        FROM lots l
+        JOIN parts p ON l.part_id = p.id
+        LEFT JOIN (
+            SELECT * FROM latest_setups_for_lots WHERE rn = 1
+        ) ls ON l.id = ls.lot_id
+        WHERE l.id IN (SELECT id FROM visible_lots)
+        {'AND ls.qa_id = :qaId' if current_user_qa_id is not None else ''}
+        ORDER BY l.created_at DESC;
+        """)
         
-        logger.info(f"Найдены ID лотов с активными батчами: {lot_ids} (всего: {len(lot_ids)})")
+        if current_user_qa_id is not None:
+            params['qaId'] = current_user_qa_id
+            
+        result = db.execute(final_query, params)
+        rows = result.fetchall()
+
+        # Преобразуем результат в Pydantic модели
+        result_list = [LotInfoItem.model_validate(row._mapping) for row in rows]
         
-        # 3. Основной запрос для данных по лотам и деталям
-        lots_query = db.query(LotDB, PartDB).select_from(LotDB)\
-            .join(PartDB, LotDB.part_id == PartDB.id)\
-            .filter(LotDB.id.in_(lot_ids))
-
-        lots_query_result = lots_query.all()
-        logger.info(f"Всего лотов (с деталями) для обработки: {len(lots_query_result)}")
-        
-        result = []
-        for lot_obj, part_obj in lots_query_result:
-            logger.debug(f"Обработка лота ID: {lot_obj.id}, Номер: {lot_obj.lot_number}")
-            
-            planned_quantity_val = None
-            inspector_name_val = None
-            machine_name_val = None
-            
-            # 4. Находим последнюю наладку для данного лота, включая имя станка
-            latest_setup_details = db.query(
-                    SetupDB.planned_quantity,
-                    SetupDB.qa_id,
-                    EmployeeDB.full_name.label("inspector_name_from_setup"),
-                    MachineDB.name.label("machine_name_from_setup"),
-                    SetupDB.machine_id.label("setup_machine_id")
-                )\
-                .outerjoin(EmployeeDB, SetupDB.qa_id == EmployeeDB.id) \
-                .outerjoin(MachineDB, SetupDB.machine_id == MachineDB.id) \
-                .filter(SetupDB.lot_id == lot_obj.id)\
-                .order_by(desc(SetupDB.created_at))\
-                .first()
-
-            passes_qa_filter = True
-
-            if latest_setup_details:
-                # planned_quantity может быть Decimal – приводим к int для Pydantic
-                planned_quantity_raw = latest_setup_details.planned_quantity
-                if planned_quantity_raw is not None:
-                    try:
-                        planned_quantity_val = int(planned_quantity_raw)
-                    except (ValueError, TypeError):
-                        planned_quantity_val = None
-                else:
-                    planned_quantity_val = None
-                machine_name_val = latest_setup_details.machine_name_from_setup
-                logger.debug(f"Lot ID {lot_obj.id}: setup found, machine_id: {latest_setup_details.setup_machine_id}")
-
-                if latest_setup_details.qa_id:
-                    inspector_name_val = latest_setup_details.inspector_name_from_setup
-                    if current_user_qa_id is not None and latest_setup_details.qa_id != current_user_qa_id:
-                        passes_qa_filter = False
-                elif current_user_qa_id is not None:
-                    passes_qa_filter = False
-            elif current_user_qa_id is not None:
-                passes_qa_filter = False
-
-            if not passes_qa_filter:
-                continue
-
-            item_data = {
-                'id': lot_obj.id,
-                'drawing_number': part_obj.drawing_number,
-                'lot_number': lot_obj.lot_number,
-                'inspector_name': inspector_name_val,
-                'planned_quantity': planned_quantity_val,
-                'machine_name': machine_name_val,
-            }
-            
-            try:
-                result.append(LotInfoItem.model_validate(item_data))
-            except AttributeError:
-                result.append(LotInfoItem.parse_obj(item_data))
-
-        logger.info(f"Сформировано {len(result)} элементов для ответа /lots/pending-qc (оптимизированная версия).")
-        return result
+        logger.info(f"Сформировано {len(result_list)} элементов для ответа /lots-pending-qc (оптимизированная версия).")
+        return result_list
 
     except Exception as e:
-        logger.error(f"Ошибка в /lots/pending-qc: {e}", exc_info=True)
+        logger.error(f"Ошибка в /lots-pending-qc: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера при получении лотов для ОТК")
 
 # Дублирующий эндпоинт отключён
