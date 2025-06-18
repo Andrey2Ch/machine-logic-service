@@ -3470,11 +3470,11 @@ async def get_daily_production_report(
             FROM machines m
             LEFT JOIN machine_readings mr ON m.id = mr.machine_id 
                 AND (
-                    (DATE(mr.created_at) = :target_date AND EXTRACT(HOUR FROM mr.created_at) BETWEEN 6 AND 17)
+                    (DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') = :target_date AND EXTRACT(HOUR FROM mr.created_at AT TIME ZONE 'Asia/Jerusalem') BETWEEN 6 AND 17)
                     OR
-                    (DATE(mr.created_at) = :target_date AND EXTRACT(HOUR FROM mr.created_at) >= 18)
+                    (DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') = :target_date AND EXTRACT(HOUR FROM mr.created_at AT TIME ZONE 'Asia/Jerusalem') >= 18)
                     OR
-                    (DATE(mr.created_at) = :target_date + INTERVAL '1 day' AND EXTRACT(HOUR FROM mr.created_at) < 6)
+                    (DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') = :target_date + INTERVAL '1 day' AND EXTRACT(HOUR FROM mr.created_at AT TIME ZONE 'Asia/Jerusalem') < 6)
                 )
                 AND mr.setup_job_id IS NOT NULL
             LEFT JOIN setup_jobs sj ON mr.setup_job_id = sj.id
