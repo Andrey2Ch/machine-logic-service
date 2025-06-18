@@ -1393,6 +1393,19 @@ async def accept_batch_on_warehouse(batch_id: int, payload: AcceptWarehousePaylo
         # batch.operator_id остается прежним - это оператор, который делал деталь
         batch.updated_at = datetime.now() 
 
+        # --- АВТОМАТИЧЕСКИЙ ВОЗВРАТ КАРТОЧКИ ---
+        # Ищем карточку, которая была привязана к этому батчу
+        card = db.query(CardDB).filter(CardDB.batch_id == batch_id).first()
+        if card:
+            logger.info(f"Card #{card.card_number} (machine {card.machine_id}) was associated with batch {batch_id}. Returning to circulation.")
+            card.status = 'free'
+            card.batch_id = None
+            card.last_event = datetime.now()
+        else:
+            # Это может быть нормально, если батч был создан без карточки (например, старая система)
+            logger.info(f"No card found for accepted batch {batch_id}. Nothing to return.")
+        # -----------------------------------------
+
         db.commit()
         db.refresh(batch)
 
@@ -3943,7 +3956,58 @@ async def get_lots_pending_qc(
 # Дублирующий эндпоинт отключён
 @app.get("/lots/pending-qc-dup", include_in_schema=False)
 async def _disabled_pending_qc_dup():
-    return {"disabled": True}
+    # Этот эндпоинт теперь отключен и переименован, чтобы избежать конфликта
+    raise HTTPException(status_code=404, detail="This endpoint is disabled.")
+
+# --- ADMIN UTILITY ENDPOINTS ---
+
+class ResetCardsPayload(BaseModel):
+    machine_name: str
+
+@app.post("/admin/reset-cards-for-machine", tags=["Admin Tools"], summary="Экстренный сброс карточек станка")
+async def reset_cards_for_machine(payload: ResetCardsPayload, db: Session = Depends(get_db_session)):
+    """
+    ЭКСТРЕННЫЙ ИНСТРУМЕНТ: Сбрасывает все 'in_use' карточки для указанного станка в статус 'free'.
+    Использовать для исправления застрявших карточек после старой ошибки.
+    """
+    machine_name = payload.machine_name
+    logger.warning(f"Starting emergency reset for machine '{machine_name}'...")
+
+    try:
+        machine = db.query(MachineDB).filter(func.lower(MachineDB.name) == func.lower(machine_name)).first()
+        if not machine:
+            raise HTTPException(status_code=404, detail=f"Станок с именем '{machine_name}' не найден.")
+
+        cards_to_reset = db.query(CardDB).filter(
+            CardDB.machine_id == machine.id,
+            CardDB.status == 'in_use'
+        ).all()
+
+        if not cards_to_reset:
+            return {"message": f"Для станка '{machine_name}' нет карточек в статусе 'in_use'. Ничего не сделано."}
+
+        count = 0
+        for card in cards_to_reset:
+            card.status = 'free'
+            card.batch_id = None
+            card.last_event = datetime.now()
+            count += 1
+        
+        db.commit()
+        
+        message = f"Успешно сброшено {count} карточек для станка '{machine_name}'."
+        logger.warning(message)
+        return {"message": message}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error during emergency reset for machine {machine_name}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Внутренняя ошибка сервера при сбросе карточек для станка {machine_name}")
 
 # Подключение роутеров в конце файла (после всех эндпоинтов main.py)
-app.include_router(lots_management_router)
+from .routers import lots, admin # ❗️ Добавлен импорт нового роутера
+
+app.include_router(lots.router)
+app.include_router(admin.router) # ❗️ Подключен новый роутер
