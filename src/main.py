@@ -1107,44 +1107,6 @@ async def inspect_batch(batch_id: int, payload: InspectBatchPayload, db: Session
         db.rollback()
         raise HTTPException(status_code=500, detail="Internal server error while inspecting batch")
 
-@app.post("/batches/merge")
-async def merge_batches(payload: BatchMergePayload, db: Session = Depends(get_db_session)):
-    """Слить несколько батчей в один."""
-    try:
-        if len(payload.batch_ids) < 2:
-            raise HTTPException(status_code=400, detail="Need at least two batches to merge")
-        batches = db.query(BatchDB).filter(BatchDB.id.in_(payload.batch_ids)).all()
-        if len(batches) != len(payload.batch_ids):
-            raise HTTPException(status_code=404, detail="Some batches not found")
-        lot_ids = set(b.lot_id for b in batches)
-        if len(lot_ids) != 1:
-            raise HTTPException(status_code=400, detail="Batches belong to different lots")
-
-        total_qty = sum(b.current_quantity for b in batches)
-        new_batch = BatchDB(
-            setup_job_id=batches[0].setup_job_id,
-            lot_id=batches[0].lot_id,
-            initial_quantity=total_qty,
-            current_quantity=total_qty,
-            current_location=payload.target_location,
-            operator_id=None,
-            parent_batch_id=None,
-            batch_time=datetime.now()
-        )
-        db.add(new_batch)
-        db.flush()
-
-        for b in batches:
-            b.current_location = 'archived'
-        db.commit()
-        return {'success': True, 'new_batch_id': new_batch.id}
-    except HTTPException as http_exc:
-        raise http_exc
-    except Exception as e:
-        logger.error(f"Error merging batches: {e}", exc_info=True)
-        db.rollback()
-        raise HTTPException(status_code=500, detail="Internal server error while merging batches")
-
 # --- NEW BATCH MOVE ENDPOINT ---
 class BatchMovePayload(BaseModel):
     target_location: str
