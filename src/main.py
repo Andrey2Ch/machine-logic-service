@@ -3820,15 +3820,37 @@ async def get_lots_pending_qc(
         if isinstance(hideCompleted, str):
             hideCompleted = hideCompleted.lower() in {'1', 'true', 'yes', 'on'}
 
+        # В зависимости от флага hideCompleted, мы по-разному определяем "активные" батчи
+        if hideCompleted:
+            # Показываем лоты, только если у них есть батчи, реально требующие инспекции
+            # (т.е. не в финальных статусах 'good', 'defect' или 'archived')
+            active_batches_condition = "current_location NOT IN ('good', 'defect', 'archived')"
+        else:
+            # Показываем все лоты, у которых батчи просто не в архиве
+            active_batches_condition = "current_location != 'archived'"
+        
+        # Определяем условия видимости лота
+        visibility_conditions = [
+            "id IN (SELECT lot_id FROM lots_with_active_batches)",
+            "id IN (SELECT lot_id FROM lots_with_active_setups)"
+        ]
+        
+        # Собираем основной WHERE-блок
+        where_clause = f"WHERE ({' OR '.join(visibility_conditions)})"
+
+        # Добавляем фильтр по статусу, если нужно скрыть завершенные
+        if hideCompleted:
+            where_clause += " AND status != 'completed'"
+
         # Определяем CTE для фильтрации лотов
-        lots_cte_query = """
+        lots_cte_query = f"""
         WITH lots_with_active_batches AS (
-            SELECT DISTINCT lot_id FROM batches WHERE current_location != 'archived'
+            SELECT DISTINCT lot_id FROM batches WHERE {active_batches_condition}
         ),
         lots_with_active_setups AS (
             SELECT DISTINCT lot_id FROM setup_jobs WHERE status IN ('created', 'started', 'pending_qa_approval')
         )
-        SELECT id FROM lots WHERE id IN (SELECT lot_id FROM lots_with_active_batches) OR id IN (SELECT lot_id FROM lots_with_active_setups)
+        SELECT id FROM lots {where_clause}
         """
         
         # Применяем фильтр по дате, если он есть
@@ -3844,11 +3866,8 @@ async def get_lots_pending_qc(
                 lots_cte_query += " AND created_at >= :filter_date"
                 params['filter_date'] = filter_date
 
-        # Применяем фильтр hideCompleted
         if hideCompleted:
             lots_cte_query += " AND status != 'completed'"
-            # Дополнительная сложная логика для скрытия завершенных, но не заархивированных,
-            # здесь может быть добавлена при необходимости, но основной фильтр уже применен.
 
         final_query = text(f"""
         WITH visible_lots AS (
