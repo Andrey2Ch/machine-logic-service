@@ -1627,7 +1627,7 @@ async def get_lots_pending_qc_original(
 
 class LotAnalyticsResponse(BaseModel):
     accepted_by_warehouse_quantity: int = 0  # "Принято" (на складе)
-    from_machine_quantity: int = 0           # "Со станка" (сырые)
+    from_machine_quantity: int = 0           # "Произведено" (со станка)
     good_quantity: int = 0                   # Годные детали
     defect_quantity: int = 0                 # Бракованные детали
     total_inspected_quantity: int = 0        # Общее количество проверенных
@@ -1637,7 +1637,7 @@ async def get_lot_analytics(lot_id: int, db: Session = Depends(get_db_session)):
     """
     Получить сводную аналитику по указанному лоту.
     "Принято" (accepted_by_warehouse_quantity) - сумма recounted_quantity по всем партиям лота, прошедшим приемку складом.
-    "Со станка" (from_machine_quantity) - сумма current_quantity для "сырых" батчей (до приемки складом).
+    "Произведено" (from_machine_quantity) - общая сумма деталей во всех неархивированных батчах лота.
     """
     logger.error(f"DEBUG_ANALYTICS: Fetching simplified analytics for lot_id: {lot_id}")
     
@@ -1658,30 +1658,13 @@ async def get_lot_analytics(lot_id: int, db: Session = Depends(get_db_session)):
     
     accepted_by_warehouse_result = sum(accepted_quantities_list)
 
-    # from_machine_quantity: Последнее показание счетчика для машины, связанной с последней наладкой этого лота.
-    from_machine_result = 0 # Значение по умолчанию
-    
-    # 1. Найти последнюю наладку для лота
-    latest_setup_for_lot = db.query(SetupDB.machine_id)\
-        .filter(SetupDB.lot_id == lot_id)\
-        .order_by(SetupDB.created_at.desc())\
-        .first()
-    
-    if latest_setup_for_lot:
-        machine_id_for_lot = latest_setup_for_lot.machine_id
-        # 2. Найти последнее показание для этой машины
-        latest_reading_for_machine = db.query(ReadingDB.reading)\
-            .filter(ReadingDB.machine_id == machine_id_for_lot)\
-            .order_by(ReadingDB.created_at.desc())\
-            .first()
-        
-        if latest_reading_for_machine:
-            from_machine_result = latest_reading_for_machine.reading or 0 # Берем показание или 0, если None
-            logger.error(f"DEBUG_ANALYTICS: For lot_id {lot_id}, found latest reading for machine {machine_id_for_lot}: {from_machine_result}")
-        else:
-            logger.error(f"DEBUG_ANALYTICS: For lot_id {lot_id}, no readings found for machine {machine_id_for_lot} (from latest setup)")
-    else:
-        logger.error(f"DEBUG_ANALYTICS: For lot_id {lot_id}, no setup found to determine machine_id for 'from_machine_quantity'")
+    # from_machine_quantity: Сумма current_quantity для всех партий лота, которые не архивированы.
+    from_machine_quantities = db.query(func.sum(BatchDB.current_quantity))\
+        .filter(BatchDB.lot_id == lot_id)\
+        .filter(BatchDB.current_location != 'archived')\
+        .scalar()
+    from_machine_result = from_machine_quantities or 0
+    logger.error(f"DEBUG_ANALYTICS: For lot_id {lot_id}, summed current_quantity for 'from_machine_quantity': {from_machine_result}")
 
     # Получение данных о качестве (good/defect батчи)
     good_quantity_result = 0
