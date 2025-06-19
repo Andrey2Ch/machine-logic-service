@@ -1397,6 +1397,7 @@ class LotInfoItem(BaseModel):
     drawing_number: Optional[str] = None
     lot_number: Optional[str] = None
     inspector_name: Optional[str] = None
+    machinist_name: Optional[str] = None # <--- ДОБАВЛЕНО
     planned_quantity: Optional[int] = None
     machine_name: Optional[str] = None
 
@@ -1567,6 +1568,7 @@ async def get_lots_pending_qc_original(
                 'drawing_number': part_obj.drawing_number,
                 'lot_number': lot_obj.lot_number,
                 'inspector_name': inspector_name_val,
+                'machinist_name': latest_setup_details.machinist_name if latest_setup_details else None,
                 'planned_quantity': planned_quantity_val,
                 'machine_name': machine_name_val,
             }
@@ -3784,6 +3786,7 @@ async def get_lots_pending_qc_old(
                 'drawing_number': part_obj.drawing_number,
                 'lot_number': lot_obj.lot_number,
                 'inspector_name': inspector_name_val,
+                'machinist_name': latest_setup_details.machinist_name if latest_setup_details else None,
                 'planned_quantity': planned_quantity_val,
                 'machine_name': machine_name_val,
             }
@@ -3857,11 +3860,13 @@ async def get_lots_pending_qc(
                 sj.lot_id,
                 sj.planned_quantity,
                 sj.qa_id,
-                e.full_name as inspector_name,
+                e_inspector.full_name as inspector_name,
+                e_machinist.full_name as machinist_name, -- <--- ИСПРАВЛЕНО
                 m.name as machine_name,
                 ROW_NUMBER() OVER (PARTITION BY sj.lot_id ORDER BY sj.created_at DESC) as rn
             FROM setup_jobs sj
-            LEFT JOIN employees e ON sj.qa_id = e.id
+            LEFT JOIN employees e_inspector ON sj.qa_id = e_inspector.id
+            LEFT JOIN employees e_machinist ON sj.employee_id = e_machinist.id -- <--- ИСПРАВЛЕНО: machinist_id -> employee_id
             LEFT JOIN machines m ON sj.machine_id = m.id
             WHERE sj.lot_id IN (SELECT id FROM visible_lots)
         )
@@ -3870,6 +3875,7 @@ async def get_lots_pending_qc(
             p.drawing_number,
             l.lot_number,
             ls.inspector_name,
+            ls.machinist_name, -- <--- ДОБАВЛЕНО
             ls.planned_quantity,
             ls.machine_name
         FROM lots l
