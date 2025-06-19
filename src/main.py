@@ -1451,7 +1451,7 @@ async def get_lots_pending_qc(
         .join(PartDB, LotDB.part_id == PartDB.id)\
         .outerjoin(SetupDB, LotDB.id == SetupDB.lot_id) \
         .outerjoin(Inspector, SetupDB.qa_id == Inspector.id) \
-        .outerjoin(Machinist, SetupDB.operator_id == Machinist.id) \
+        .outerjoin(Machinist, SetupDB.employee_id == Machinist.id) \
         .outerjoin(MachineDB, SetupDB.machine_id == MachineDB.id)
 
         # Условия для выборки "активных" лотов
