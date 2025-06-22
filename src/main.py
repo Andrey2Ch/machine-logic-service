@@ -1225,37 +1225,46 @@ class AcceptWarehousePayload(BaseModel):
 async def get_warehouse_pending_batches(db: Session = Depends(get_db_session)):
     """Получить список батчей, ожидающих приемки на склад (статус 'production' или 'sorting')."""
     try:
-        batches = (
-            db.query(BatchDB, PartDB, LotDB, EmployeeDB, MachineDB, CardDB)
-            .select_from(BatchDB)
+        # Используем алиасы для большей читаемости и избежания конфликтов
+        SetupAlias = aliased(SetupDB)
+        MachineAlias = aliased(MachineDB)
+
+        batches_query = (
+            db.query(
+                BatchDB,
+                PartDB.drawing_number,
+                LotDB.lot_number,
+                EmployeeDB.full_name.label("operator_name"),
+                MachineAlias.name.label("machine_name"),
+                CardDB.card_number
+            )
             .join(LotDB, BatchDB.lot_id == LotDB.id)
             .join(PartDB, LotDB.part_id == PartDB.id)
             .outerjoin(EmployeeDB, BatchDB.operator_id == EmployeeDB.id)
-            .outerjoin(SetupDB, BatchDB.setup_job_id == SetupDB.id)
-            .outerjoin(MachineDB, SetupDB.machine_id == MachineDB.id)
+            .outerjoin(SetupAlias, BatchDB.setup_job_id == SetupAlias.id)
+            .outerjoin(MachineAlias, SetupAlias.machine_id == MachineAlias.id)
             .outerjoin(CardDB, BatchDB.id == CardDB.batch_id)
-            .filter(BatchDB.current_location.in_(['production', 'sorting'])) # Включены 'production' и 'sorting'
+            .filter(BatchDB.current_location.in_(['production', 'sorting']))
             .order_by(BatchDB.batch_time.asc())
-            .all()
         )
+        
+        batches_data = batches_query.all()
 
         result = []
-        for row in batches:
-            batch_obj, part_obj, lot_obj, emp_obj, machine_obj, card_obj = row
-            # Собираем данные как есть из БД
+        for row in batches_data:
+            batch_obj, drawing_number, lot_number, operator_name, machine_name, card_number = row
             item_data = {
                 'id': batch_obj.id,
                 'lot_id': batch_obj.lot_id,
-                'drawing_number': part_obj.drawing_number if part_obj else None,
-                'lot_number': lot_obj.lot_number if lot_obj else None,
-                'current_quantity': batch_obj.current_quantity, # Теперь имя совпадает
+                'drawing_number': drawing_number,
+                'lot_number': lot_number,
+                'current_quantity': batch_obj.current_quantity,
                 'batch_time': batch_obj.batch_time,
-                'operator_name': emp_obj.full_name if emp_obj else None,
-                'machine_name': machine_obj.name if machine_obj else None,
-                'card_number': card_obj.card_number if card_obj else None,
-                'current_location': batch_obj.current_location  # Добавляем статус батча
+                'operator_name': operator_name,
+                'machine_name': machine_name,
+                'card_number': card_number,
+                'current_location': batch_obj.current_location,
             }
-            # Валидируем и добавляем
             result.append(WarehousePendingBatchItem.model_validate(item_data))
         return result
     except Exception as e:
@@ -1731,6 +1740,12 @@ class BatchLabelInfo(BaseModel):
     warehouse_received_at: Optional[datetime] = None
     warehouse_employee_name: Optional[str] = None
     recounted_quantity: Optional[int] = None
+    qa_inspector_name: Optional[str] = None # Имя контролера ОТК
+
+class BatchLabelInfoResponse(BatchLabelInfo):
+     class Config:
+        from_attributes = True # Pydantic v2
+        populate_by_name = True # Pydantic v2, было allow_population_by_field_name
 
 @app.get("/machines/{machine_id}/active-batch-label", response_model=BatchLabelInfo)
 async def get_active_batch_label(machine_id: int, db: Session = Depends(get_db_session)):
@@ -1813,7 +1828,8 @@ async def get_active_batch_label(machine_id: int, db: Session = Depends(get_db_s
         batch_quantity=final_batch_quantity,
         warehouse_received_at=active_batch.warehouse_received_at,
         warehouse_employee_name=active_batch.operator_name,
-        recounted_quantity=active_batch.recounted_quantity
+        recounted_quantity=active_batch.recounted_quantity,
+        qa_inspector_name=active_batch.qc_inspector_name
     )
 
 class CreateBatchInput(BaseModel):
@@ -2753,7 +2769,8 @@ async def get_batch_availability(machine_id: int, db: Session = Depends(get_db_s
             batch_quantity=final_batch_quantity,
             warehouse_received_at=last_batch.warehouse_received_at,
             warehouse_employee_name=last_batch.operator_name,
-            recounted_quantity=last_batch.recounted_quantity
+            recounted_quantity=last_batch.recounted_quantity,
+            qa_inspector_name=last_batch.qc_inspector_name
         )
 
     return BatchAvailabilityInfo(
@@ -3259,6 +3276,11 @@ async def get_batch_label_info(batch_id: int, db: Session = Depends(get_db_sessi
             else:
                 calculated_shift = "2"  # Ночная смена
 
+        # Получаем имя инспектора ОТК, если он есть в наладке
+        qa_inspector = None
+        if setup and setup.qa_id:
+            qa_inspector = db.query(EmployeeDB).filter(EmployeeDB.id == setup.qa_id).first()
+
         return BatchLabelInfo(
             id=batch.id,
             lot_id=batch.lot_id,
@@ -3276,7 +3298,8 @@ async def get_batch_label_info(batch_id: int, db: Session = Depends(get_db_sessi
             batch_quantity=batch_quantity,
             warehouse_received_at=batch.warehouse_received_at,
             warehouse_employee_name=warehouse_employee.full_name if warehouse_employee else None,
-            recounted_quantity=batch.recounted_quantity
+            recounted_quantity=batch.recounted_quantity,
+            qa_inspector_name=qa_inspector.full_name if qa_inspector else None # <-- ДОБАВЛЕНО
         )
 
     except HTTPException as http_exc:
