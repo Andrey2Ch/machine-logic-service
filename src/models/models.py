@@ -80,6 +80,10 @@ class SetupDB(Base):
 
     # Добавляем обратную связь к BatchDB
     batches = relationship("BatchDB", back_populates="setup_job")
+    
+    # Добавляем связи для доступа к данным станка и оператора
+    machine = relationship("MachineDB")
+    operator = relationship("EmployeeDB", foreign_keys=[employee_id])
 
 class BatchDB(Base):
     __tablename__ = "batches"

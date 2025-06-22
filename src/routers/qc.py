@@ -1,125 +1,103 @@
-from typing import List, Optional
+import logging
+from typing import List, Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import text
+from sqlalchemy import text, desc
 
 from src.database import get_db_session
-from src.models.models import EmployeeDB
+from src.services.lot_service import get_active_lot_ids
+from src.models.models import LotDB, PartDB, SetupDB, EmployeeDB, MachineDB
 from pydantic import BaseModel
 
-router = APIRouter(prefix="/lots", tags=["Quality Control"])
+logger = logging.getLogger(__name__)
+router = APIRouter(tags=["Quality Control"])
+
 
 class LotInfoItem(BaseModel):
     id: int
-    drawing_number: str
-    lot_number: str
+    drawing_number: Optional[str] = None
+    lot_number: Optional[str] = None
     inspector_name: Optional[str] = None
+    machinist_name: Optional[str] = None
     planned_quantity: Optional[int] = None
     machine_name: Optional[str] = None
 
     class Config:
         from_attributes = True
+        populate_by_name = True
 
-@router.get("/pending-qc", response_model=List[LotInfoItem])
+
+@router.get("/lots-pending-qc", response_model=List[LotInfoItem])
 async def get_lots_pending_qc(
     db: Session = Depends(get_db_session),
     current_user_qa_id: Optional[int] = Query(None, alias="qaId"),
-    hideCompleted: Optional[bool] = Query(False, description="Скрыть завершённые лоты"),
-    dateFilter: Optional[str] = Query("all", description="all | 1month | 2months | 6months"),
+    hide_completed: bool = Query(True, description="Скрыть лоты, где все партии проверены"),
+    date_filter: Optional[str] = Query("all", description="Фильтр по периоду: all, 1month, 2months, 6months")
 ):
-    """Новая версия выборки лотов для ОТК с корректным machine_name"""
-
+    """
+    Получить лоты, ожидающие контроля качества (ОТК).
+    Использует централизованную логику для определения "активных" лотов.
+    """
+    logger.info(f"Запрос /qc/lots-pending. qaId: {current_user_qa_id}, hide_completed: {hide_completed}, date_filter: {date_filter}")
     try:
-        # динамически собираем WHERE для фильтров (кроме QA)
-        where_lot_filters: List[str] = []
-        params = {}
+        # 1. Получаем ID активных лотов с помощью сервисной функции
+        # Для ОТК всегда используем строгую проверку (for_qc=True)
+        active_lot_ids = get_active_lot_ids(db, for_qc=hide_completed)
 
-        if dateFilter != "all":
-            where_lot_filters.append("l.created_at >= :date_from")
-            from datetime import datetime, timedelta
-            days = {"1month": 30, "2months": 60, "6months": 180}.get(dateFilter, 0)
-            params["date_from"] = datetime.utcnow() - timedelta(days=days)
-
-        if hideCompleted:
-            where_lot_filters.append("l.status != 'completed'")
-
-        base_filters = where_lot_filters.copy()
-        # далее мы добавим динамические условия open/empty/setup после сборки SQL
-        where_clause_main = " AND ".join(base_filters)
-        if where_clause_main:
-            where_clause_main = "WHERE " + where_clause_main
-
-        # чистый SQL с CTE ranked_setups
-        sql = f"""
-            WITH ranked_setups AS (
-                SELECT
-                    s.lot_id,
-                    s.machine_id,
-                    s.qa_id,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY s.lot_id
-                        ORDER BY
-                            CASE WHEN s.status IN ('created','started','pending_qa_approval') THEN 0 ELSE 1 END,
-                            s.created_at DESC
-                    ) AS rn
-                FROM setup_jobs s
-            ),
-            open_batches AS (
-                SELECT DISTINCT b.lot_id
-                FROM batches b
-                WHERE b.current_location NOT IN ('good', 'defect', 'archived')  -- warehouse_counted считается открытым
-            )
-            SELECT
-                l.id,
-                l.lot_number,
-                p.drawing_number,
-                m.name                AS machine_name,
-                rs.qa_id              AS qa_id
-            FROM   lots l
-            JOIN   parts p           ON p.id = l.part_id
-            LEFT   JOIN ranked_setups rs ON rs.lot_id = l.id AND rs.rn = 1
-            LEFT   JOIN machines m   ON m.id = rs.machine_id
-            {where_clause_main}
-            {'AND' if where_clause_main else 'WHERE'} (
-                    l.id IN (SELECT lot_id FROM open_batches)          -- есть хотя бы один "живой" батч
-                 OR NOT EXISTS (SELECT 1 FROM batches b WHERE b.lot_id = l.id) -- ещё нет батчей
-                 OR rs.qa_id IS NOT NULL                                -- активная наладка
-                )
-        """
-
-        rows = db.execute(text(sql), params).fetchall()
-        if not rows:
+        if not active_lot_ids:
+            logger.info("Активных лотов для ОТК не найдено.")
             return []
 
-        result: List[LotInfoItem] = []
-        qa_cache = {}
-        if current_user_qa_id:
-            qa_cache[current_user_qa_id] = db.query(EmployeeDB.full_name).filter(EmployeeDB.id == current_user_qa_id).scalar()
+        # 2. Основной запрос для получения деталей по найденным лотам
+        query = db.query(
+            LotDB,
+            PartDB.drawing_number,
+            (SetupDB.planned_quantity + SetupDB.additional_quantity).label('total_planned_quantity'),
+            MachineDB.name.label('machine_name'),
+            EmployeeDB.full_name.label('machinist_name')
+        ).select_from(LotDB)\
+         .join(PartDB, LotDB.part_id == PartDB.id)\
+         .outerjoin(SetupDB, LotDB.id == SetupDB.lot_id)\
+         .outerjoin(MachineDB, SetupDB.machine_id == MachineDB.id)\
+         .outerjoin(EmployeeDB, SetupDB.employee_id == EmployeeDB.id)\
+         .filter(LotDB.id.in_(active_lot_ids))\
+         .order_by(desc(LotDB.created_at))
 
-        for row in rows:
-            qa_id = row.qa_id
-            # фильтр "только мои"
-            if current_user_qa_id is not None and qa_id != current_user_qa_id:
-                continue
+        # Применяем фильтр по дате, если он есть
+        params = {}
+        if date_filter and date_filter != "all":
+            from datetime import datetime, timedelta
+            filter_date = None
+            if date_filter == "1month": filter_date = datetime.now() - timedelta(days=30)
+            elif date_filter == "2months": filter_date = datetime.now() - timedelta(days=60)
+            elif date_filter == "6months": filter_date = datetime.now() - timedelta(days=180)
+            
+            if filter_date:
+                query = query.filter(LotDB.created_at >= filter_date)
 
-            inspector_name = None
-            if qa_id:
-                if qa_id not in qa_cache:
-                    qa_cache[qa_id] = db.query(EmployeeDB.full_name).filter(EmployeeDB.id == qa_id).scalar()
-                inspector_name = qa_cache[qa_id]
+        # TODO: Добавить фильтрацию по current_user_qa_id, если потребуется
 
-            result.append(
+        results = query.all()
+        
+        # Собираем ответ
+        response_items = []
+        for lot, drawing_number, planned_quantity, machine_name, machinist_name in results:
+            response_items.append(
                 LotInfoItem(
-                    id=row.id,
-                    drawing_number=row.drawing_number,
-                    lot_number=row.lot_number,
-                    planned_quantity=None,
-                    inspector_name=inspector_name,
-                    machine_name=row.machine_name,
+                    id=lot.id,
+                    drawing_number=drawing_number,
+                    lot_number=lot.lot_number,
+                    planned_quantity=planned_quantity,
+                    machine_name=machine_name,
+                    machinist_name=machinist_name,
+                    inspector_name=None # TODO: Add inspector name logic if needed
                 )
             )
-        return result
+
+        logger.info(f"Сформировано {len(response_items)} элементов для ответа /qc/lots-pending.")
+        return response_items
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) 
+        logger.error(f"Ошибка в /qc/lots-pending: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера при получении лотов для ОТК") 

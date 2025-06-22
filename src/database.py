@@ -2,20 +2,22 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy import create_engine, Engine
 from pydantic_settings import BaseSettings
-from pydantic import Field
 import os
+from typing import Generator
 
+# ИЗМЕНЕННАЯ Pydantic модель для настроек
 class DatabaseSettings(BaseSettings):
-    # Считываем URL из переменной окружения DATABASE_URL
-    # Предоставляем значение по умолчанию для локальной разработки, если переменная не установлена
-    url: str = Field(default=os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/isramat_bot"), alias='DATABASE_URL')
+    # Явное объявление переменной, которую мы ожидаем из окружения.
+    # Pydantic автоматически найдет переменную окружения с таким же именем (регистр не важен).
+    # Значение по умолчанию используется ТОЛЬКО если переменная не найдена.
+    DATABASE_URL: str = "postgresql://postgres:postgres@localhost:5432/isramat_bot"
 
     class Config:
-        # Если вы храните URL в .env файле для локальной разработки
+        # Указываем, что нужно также искать переменные в .env файле
         env_file = '.env'
         extra = 'ignore'
 
-# Создаем экземпляр настроек
+# Создаем единственный экземпляр настроек
 db_settings = DatabaseSettings()
 
 # Объявляем Base здесь
@@ -29,13 +31,16 @@ def initialize_database():
     """Инициализирует engine и SessionLocal после загрузки конфигурации."""
     global engine, SessionLocal
     if engine is None:
-        engine = create_engine(db_settings.url)
+        # Используем атрибут из нашего объекта настроек
+        engine = create_engine(db_settings.DATABASE_URL)
         SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
         # Важно: НЕ вызываем create_all здесь. Миграции должны управляться отдельно.
         # Base.metadata.create_all(bind=engine) 
-    print(f"Database engine initialized with URL: {db_settings.url[:15]}...") # Логируем часть URL для проверки
+    # Логируем часть URL для проверки, используем напрямую из объекта настроек
+    # Увеличил длину выводимого URL для лучшей диагностики
+    print(f"Database engine initialized with URL: {db_settings.DATABASE_URL[:40]}...") 
 
-def get_db_session() -> Session:
+def get_db_session() -> Generator[Session, None, None]:
     """FastAPI dependency to get a DB session."""
     if SessionLocal is None:
         # Это не должно происходить, если initialize_database вызван при старте

@@ -86,3 +86,27 @@ class Setup(BaseModel):
             SetupStatus.QUEUED: [SetupStatus.CREATED],
         }
         return new_status in allowed_transitions.get(self.status, [])
+
+class BatchLabelInfo(BaseModel):
+    """Информация для печати этикетки батча"""
+    id: int
+    lot_id: int
+    drawing_number: str
+    lot_number: str
+    machine_name: str
+    operator_name: str
+    operator_id: Optional[int]
+    batch_time: Optional[datetime]
+    shift: str
+    start_time: Optional[str]
+    end_time: Optional[str]
+    initial_quantity: int
+    current_quantity: int
+    batch_quantity: int
+    warehouse_received_at: Optional[datetime]
+    warehouse_employee_name: Optional[str]
+    recounted_quantity: Optional[int]
+    qa_inspector_name: Optional[str]
+
+    class Config:
+        from_attributes = True
