@@ -1,0 +1,23 @@
+# See https://docs.docker.com/engine/reference/builder/#dockerignore-file
+.dockerignore
+Dockerfile
+.env
+.git
+.gitignore
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+.venv/
+env/
+# Database files
+*.db
+*.db-journal
+*.sql
+# Node.js specific (in case they are not needed)
+node_modules/
+package.json
+package-lock.json
+# Logs
+*.log 
