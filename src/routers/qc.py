@@ -50,17 +50,23 @@ async def get_lots_pending_qc(
             return []
 
         # 2. Основной запрос для получения деталей по найденным лотам
+        # Создаем алиасы для разных ролей сотрудников
+        machinist_alias = db.query(EmployeeDB).subquery().alias('machinist')
+        inspector_alias = db.query(EmployeeDB).subquery().alias('inspector')
+        
         query = db.query(
             LotDB,
             PartDB.drawing_number,
             (SetupDB.planned_quantity + SetupDB.additional_quantity).label('total_planned_quantity'),
             MachineDB.name.label('machine_name'),
-            EmployeeDB.full_name.label('machinist_name')
+            machinist_alias.c.full_name.label('machinist_name'),
+            inspector_alias.c.full_name.label('inspector_name')
         ).select_from(LotDB)\
          .join(PartDB, LotDB.part_id == PartDB.id)\
          .outerjoin(SetupDB, LotDB.id == SetupDB.lot_id)\
          .outerjoin(MachineDB, SetupDB.machine_id == MachineDB.id)\
-         .outerjoin(EmployeeDB, SetupDB.employee_id == EmployeeDB.id)\
+         .outerjoin(machinist_alias, SetupDB.employee_id == machinist_alias.c.id)\
+         .outerjoin(inspector_alias, SetupDB.qa_id == inspector_alias.c.id)\
          .filter(LotDB.id.in_(active_lot_ids))\
          .order_by(desc(LotDB.created_at))
 
@@ -82,7 +88,7 @@ async def get_lots_pending_qc(
         
         # Собираем ответ
         response_items = []
-        for lot, drawing_number, planned_quantity, machine_name, machinist_name in results:
+        for lot, drawing_number, planned_quantity, machine_name, machinist_name, inspector_name in results:
             response_items.append(
                 LotInfoItem(
                     id=lot.id,
@@ -91,7 +97,7 @@ async def get_lots_pending_qc(
                     planned_quantity=planned_quantity,
                     machine_name=machine_name,
                     machinist_name=machinist_name,
-                    inspector_name=None # TODO: Add inspector name logic if needed
+                    inspector_name=inspector_name
                 )
             )
 

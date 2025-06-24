@@ -38,7 +38,13 @@ def initialize_database():
         # Base.metadata.create_all(bind=engine) 
     # Логируем часть URL для проверки, используем напрямую из объекта настроек
     # Увеличил длину выводимого URL для лучшей диагностики
-    print(f"Database engine initialized with URL: {db_settings.DATABASE_URL[:40]}...") 
+    print(f"Current working directory: {os.getcwd()}")
+    print(f".env file exists: {os.path.exists('.env')}")
+    if os.path.exists('.env'):
+        with open('.env', 'r') as f:
+            print(f".env content: {f.read()}")
+    print(f"DATABASE_URL from env: {os.getenv('DATABASE_URL')}")
+    print(f"Database engine initialized with URL: {db_settings.DATABASE_URL}") 
 
 def get_db_session() -> Generator[Session, None, None]:
     """FastAPI dependency to get a DB session."""
