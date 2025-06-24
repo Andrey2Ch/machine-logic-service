@@ -21,8 +21,12 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # This copies the contents of the 'src' directory into a 'src' subdir in WORKDIR
 COPY src/ ./src/
 
+# Copy entrypoint script
+COPY entrypoint.sh ./
+RUN chmod +x entrypoint.sh
+
 # The command to run the application
 # Было:
 # CMD ["gunicorn", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "src.main:app", "-b", "0.0.0.0:8000"]
 
-CMD ["sh", "-c", "uvicorn src.main:app --host 0.0.0.0 --port ${PORT:-8000}"] 
+CMD ["./entrypoint.sh"] 
