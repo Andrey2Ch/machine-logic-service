@@ -22,5 +22,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY src/ ./src/
 
 # The command to run the application
-# We tell Gunicorn to run the 'app' object from the 'main' module inside the 'src' package.
-CMD ["gunicorn", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "src.main:app", "-b", "0.0.0.0:8000"] 
+# Было:
+# CMD ["gunicorn", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "src.main:app", "-b", "0.0.0.0:8000"]
+
+CMD ["sh", "-c", "gunicorn -w 4 -k uvicorn.workers.UvicornWorker src.main:app -b 0.0.0.0:${PORT}"] 
