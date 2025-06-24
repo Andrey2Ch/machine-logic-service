@@ -29,4 +29,4 @@ RUN chmod +x entrypoint.sh
 # Было:
 # CMD ["gunicorn", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "src.main:app", "-b", "0.0.0.0:8000"]
 
-CMD ["./entrypoint.sh"] 
+ENTRYPOINT ["./entrypoint.sh"] 
