@@ -40,6 +40,8 @@ async def get_lots_pending_qc(
     Использует централизованную логику для определения "активных" лотов.
     """
     logger.info(f"Запрос /qc/lots-pending. qaId: {current_user_qa_id}, hide_completed: {hide_completed}, date_filter: {date_filter}")
+    if current_user_qa_id is not None:
+        logger.info(f"Применяется фильтрация по QA ID: {current_user_qa_id}")
     try:
         # 1. Получаем ID активных лотов с помощью сервисной функции
         # Для ОТК всегда используем строгую проверку (for_qc=True)
@@ -83,6 +85,10 @@ async def get_lots_pending_qc(
                 query = query.filter(LotDB.created_at >= filter_date)
 
         # TODO: Добавить фильтрацию по current_user_qa_id, если потребуется
+
+        # Фильтрация по QA ID если параметр передан
+        if current_user_qa_id is not None:
+            query = query.filter(SetupDB.qa_id == current_user_qa_id)
 
         results = query.all()
         
