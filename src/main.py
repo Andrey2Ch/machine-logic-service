@@ -2510,17 +2510,12 @@ async def get_batch_label_info(batch_id: int, db: Session = Depends(get_db_sessi
             elif setup and setup.start_time: # Fallback
                 determined_start_time = setup.start_time.strftime("%H:%M")
 
-        # Расчет количеств - ИСПРАВЛЕННАЯ ЛОГИКА V3
-        # batch.initial_quantity - начальное показание счетчика  
-        # batch.current_quantity - количество деталей в батче (из БД) - НЕ ИСПОЛЬЗУЕМ для этикетки!
-        # Для этикетки нужно:
-        # initial_quantity - начальное показание счетчика
-        # current_quantity - последние РЕАЛЬНЫЕ показания со станка (из readings)
-        # batch_quantity - РАЗНОСТЬ показаний счетчика (current - initial)
+        # Расчет количеств - ОКОНЧАТЕЛЬНАЯ ЛОГИКА
+        # Для этикетки כמות нужно количество оператора = batch.operator_reported_quantity из БД
         
         initial_quantity = batch.initial_quantity  # Начальное показание счетчика
 
-        # Получаем последние реальные показания со станка из таблицы readings
+        # Получаем последние показания со станка (для информации)
         if setup and setup.machine_id:
             last_reading = db.query(ReadingDB.reading).filter(
                 ReadingDB.machine_id == setup.machine_id
@@ -2531,8 +2526,8 @@ async def get_batch_label_info(batch_id: int, db: Session = Depends(get_db_sessi
             # Fallback если нет setup или machine_id
             current_quantity = batch.initial_quantity + batch.current_quantity
 
-        # ПРАВИЛЬНЫЙ расчет batch_quantity как разности показаний
-        batch_quantity = current_quantity - initial_quantity
+        # ПРАВИЛЬНЫЙ batch_quantity = количество оператора из БД
+        batch_quantity = batch.operator_reported_quantity or batch.current_quantity
 
         # Вычисляем смену (копируем логику из active-batch-label)
         calculated_shift = "N/A"
