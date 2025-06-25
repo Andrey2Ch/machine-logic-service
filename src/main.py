@@ -547,10 +547,10 @@ async def approve_setup(
         if not setup:
             raise HTTPException(status_code=404, detail=f"Наладка с ID {setup_id} не найдена")
 
-        if setup.status != 'pending_qc':
+        if setup.status not in ['pending_qc', 'created']:
             raise HTTPException(
                 status_code=400,
-                detail=f"Нельзя разрешить наладку в статусе '{setup.status}'. Ожидался статус 'pending_qc'"
+                detail=f"Нельзя разрешить наладку в статусе '{setup.status}'. Ожидался статус 'pending_qc' или 'created'"
             )
 
         qa_employee_check = db.query(EmployeeDB).filter(EmployeeDB.id == payload.qa_id).first()
@@ -2556,6 +2556,7 @@ async def get_batch_label_info(batch_id: int, db: Session = Depends(get_db_sessi
             machine_name=machine.name if machine else "N/A",
             operator_name=operator.full_name if operator else "N/A",
             operator_id=batch.operator_id,
+            factory_number=operator.factory_number if operator else None,
             batch_time=batch.batch_time,
             shift=calculated_shift,
             start_time=determined_start_time,

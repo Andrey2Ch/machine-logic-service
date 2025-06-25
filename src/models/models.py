@@ -25,6 +25,7 @@ class EmployeeDB(Base):
     full_name = Column(String(255))
     username = Column(String(255))
     role_id = Column(Integer)
+    factory_number = Column(String(50), nullable=True, unique=True)  # Заводской номер оператора
     created_at = Column(DateTime, default=datetime.now)
     added_by = Column(Integer)
     is_active = Column(Boolean, default=True)

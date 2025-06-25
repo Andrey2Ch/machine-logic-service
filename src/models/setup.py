@@ -96,6 +96,7 @@ class BatchLabelInfo(BaseModel):
     machine_name: str
     operator_name: str
     operator_id: Optional[int]
+    factory_number: Optional[str]  # Заводской номер оператора
     batch_time: Optional[datetime]
     shift: str
     start_time: Optional[str]
