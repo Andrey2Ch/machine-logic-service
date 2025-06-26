@@ -1619,6 +1619,26 @@ async def update_lot_quantity(
         
         # Обновить total_planned_quantity
         lot.total_planned_quantity = new_total_quantity
+        
+        # 🎯 СИНХРОНИЗАЦИЯ: обновляем additional_quantity в setup_jobs для этого лота
+        try:
+            result = db.execute(
+                text("""UPDATE setup_jobs 
+                       SET additional_quantity = :additional_quantity
+                       WHERE lot_id = :lot_id 
+                       AND end_time IS NULL"""),
+                {"additional_quantity": quantity_update.additional_quantity, "lot_id": lot_id}
+            )
+            
+            if result.rowcount > 0:
+                logger.info(f"Updated {result.rowcount} setup_jobs for lot {lot_id} with additional_quantity {quantity_update.additional_quantity}")
+            else:
+                logger.warning(f"No active setup_jobs found for lot {lot_id} to update additional_quantity")
+                
+        except Exception as sync_error:
+            logger.error(f"Failed to sync setup_jobs.additional_quantity for lot {lot_id}: {sync_error}")
+            # Не прерываем выполнение, продолжаем обновление лота
+        
         db.commit()
         db.refresh(lot)
         
