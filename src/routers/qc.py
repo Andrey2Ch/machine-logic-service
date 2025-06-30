@@ -9,7 +9,7 @@ from src.database import get_db_session
 from src.services.lot_service import get_active_lot_ids
 from src.models.models import LotDB, PartDB, SetupDB, EmployeeDB, MachineDB
 from pydantic import BaseModel
-from src.services.telegram_client import new_telegram_client
+from src.services.telegram_client import send_telegram_message
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Quality Control"])
@@ -183,12 +183,11 @@ async def notify_setup_allowed(
         )
 
         # 5. Отправить уведомления
-        telegram_client = new_telegram_client()
         successful_sends = 0
         for user_id in ids_to_notify:
             try:
                 message_to_send = machinist_message if user_id == machinist_telegram_id else general_message
-                await telegram_client.send_message(
+                await send_telegram_message(
                     chat_id=user_id,
                     text=message_to_send
                 )
