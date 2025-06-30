@@ -9,6 +9,8 @@ from src.database import get_db_session
 from src.services.lot_service import get_active_lot_ids
 from src.models.models import LotDB, PartDB, SetupDB, EmployeeDB, MachineDB
 from pydantic import BaseModel
+from src.services.notification_service import NotificationService
+from src.services.telegram_client import new_telegram_client
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Quality Control"])
@@ -26,6 +28,10 @@ class LotInfoItem(BaseModel):
     class Config:
         from_attributes = True
         populate_by_name = True
+
+
+class NotifyRequest(BaseModel):
+    setup_id: int
 
 
 @router.get("/lots-pending-qc", response_model=List[LotInfoItem])
@@ -112,4 +118,91 @@ async def get_lots_pending_qc(
 
     except Exception as e:
         logger.error(f"Ошибка в /qc/lots-pending: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера при получении лотов для ОТК") 
+        raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера при получении лотов для ОТК")
+
+
+@router.post("/setups/notify-allowed", summary="Отправить уведомление о разрешении наладки")
+async def notify_setup_allowed(
+    request: NotifyRequest,
+    db: Session = Depends(get_db_session)
+):
+    """
+    Принимает ID наладки и отправляет уведомление наладчику о том,
+    что его наладка разрешена ОТК и можно начинать работу.
+    """
+    setup_id = request.setup_id
+    logger.info(f"Получен запрос на уведомление о разрешении для наладки ID: {setup_id}")
+    
+    try:
+        # 1. Найти наладку и связанную информацию
+        setup_info = db.query(
+            SetupDB.id,
+            SetupDB.status,
+            EmployeeDB.telegram_id,
+            EmployeeDB.full_name.label("machinist_name"),
+            MachineDB.name.label("machine_name"),
+            PartDB.drawing_number
+        ).select_from(SetupDB)\
+         .join(EmployeeDB, SetupDB.employee_id == EmployeeDB.id)\
+         .join(MachineDB, SetupDB.machine_id == MachineDB.id)\
+         .join(LotDB, SetupDB.lot_id == LotDB.id)\
+         .join(PartDB, LotDB.part_id == PartDB.id)\
+         .filter(SetupDB.id == setup_id)\
+         .first()
+
+        if not setup_info:
+            logger.error(f"Наладка с ID {setup_id} не найдена для отправки уведомления.")
+            raise HTTPException(status_code=404, detail="Наладка не найдена")
+
+        # 2. Проверить статус
+        if setup_info.status != 'allowed':
+            logger.warning(f"Попытка уведомить о наладке в статусе '{setup_info.status}', а не 'allowed'. Уведомление не отправлено.")
+            return {"message": "Уведомление не отправлено, так как статус наладки не 'allowed'."}
+
+        # 3. Получить всех получателей (наладчик, админы, операторы)
+        other_recipients = db.query(EmployeeDB.telegram_id).filter(
+            EmployeeDB.role_id.in_([1, 3]),  # 1=Оператор, 3=Админ
+            EmployeeDB.is_active == True,
+            EmployeeDB.telegram_id.isnot(None)
+        ).all()
+        
+        ids_to_notify = {recipient.telegram_id for recipient in other_recipients}
+        machinist_telegram_id = setup_info.telegram_id
+        if machinist_telegram_id:
+            ids_to_notify.add(machinist_telegram_id)
+
+        logger.info(f"Всего получателей уведомления: {len(ids_to_notify)}")
+
+        # 4. Сформировать сообщения
+        machinist_message = (
+            f"✅ **Ваша** наладка на станке <b>{setup_info.machine_name}</b> для детали <b>{setup_info.drawing_number}</b> одобрена ОТК.\\n\\n"
+            f"Можно начинать работу!"
+        )
+        general_message = (
+            f"ℹ️ Наладка на станке <b>{setup_info.machine_name}</b> для детали <b>{setup_info.drawing_number}</b> (наладчик: {setup_info.machinist_name}) одобрена ОТК.\\n\\n"
+            f"Операторы могут начинать работу."
+        )
+
+        # 5. Отправить уведомления
+        telegram_client = new_telegram_client()
+        successful_sends = 0
+        for user_id in ids_to_notify:
+            try:
+                message_to_send = machinist_message if user_id == machinist_telegram_id else general_message
+                await telegram_client.send_message(
+                    chat_id=user_id,
+                    text=message_to_send
+                )
+                logger.info(f"Уведомление успешно отправлено пользователю ID: {user_id}")
+                successful_sends += 1
+            except Exception as send_error:
+                logger.error(f"Не удалось отправить уведомление пользователю {user_id}: {send_error}")
+
+        return {"success": True, "message": f"Уведомления отправлены {successful_sends} из {len(ids_to_notify)} получателей."}
+
+    except HTTPException as e:
+        # Перебрасываем HTTP исключения
+        raise e
+    except Exception as e:
+        logger.error(f"Ошибка при отправке уведомления для наладки {setup_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера при отправке уведомления") 
