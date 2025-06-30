@@ -9,7 +9,6 @@ from src.database import get_db_session
 from src.services.lot_service import get_active_lot_ids
 from src.models.models import LotDB, PartDB, SetupDB, EmployeeDB, MachineDB
 from pydantic import BaseModel
-from src.services.notification_service import NotificationService
 from src.services.telegram_client import new_telegram_client
 
 logger = logging.getLogger(__name__)
