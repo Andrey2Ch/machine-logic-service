@@ -71,11 +71,11 @@ async def normalize_operator_name(operator: str) -> str:
         'Roman': 'Roman',
         'Misha V': 'Misha V',
         'Misha Z': 'Misha Z',
-        'Sergey K': 'Sergey K',
+
         'Vova': 'Vova',
         'Alex': 'Alex',
         'Sergey M': 'Sergey M',
-        'Sergey Z': 'Sergey Z',
+        'Viktor': 'Viktor',
         'Kavanim': 'Kavanim'
     }
     return operator_mappings.get(operator, operator)
