@@ -412,11 +412,20 @@ async def get_readings(db: Session = Depends(get_db_session)):
 @app.get("/readings/{machine_id}")
 async def get_machine_readings(machine_id: int, db: Session = Depends(get_db_session)):
     """
-    Получить показания для конкретного станка
+    Получить показания для конкретного станка (только для активной наладки)
     """
-    readings = db.query(ReadingDB).filter(
-        ReadingDB.machine_id == machine_id
-    ).order_by(ReadingDB.created_at.desc()).limit(100).all()
+    # ИСПРАВЛЕНО: Берем показания только для активной наладки
+    readings = db.execute(text("""
+        SELECT mr.id, mr.employee_id, mr.reading, mr.created_at
+        FROM machine_readings mr
+        JOIN setup_jobs sj ON mr.setup_job_id = sj.id
+        WHERE sj.machine_id = :machine_id
+          AND sj.status = 'started'
+          AND sj.end_time IS NULL
+          AND mr.setup_job_id IS NOT NULL
+        ORDER BY mr.created_at DESC
+        LIMIT 100
+    """), {"machine_id": machine_id}).fetchall()
     
     return {
         "machine_id": machine_id,
@@ -663,13 +672,15 @@ async def get_operator_machines_view(db: Session = Depends(get_db_session)):
         
         sql_query = text(f"""
         WITH latest_readings AS (
-            -- Находим последнее показание для каждого станка
+            -- Находим последнее показание для каждой АКТИВНОЙ наладки
             SELECT 
-                machine_id, 
-                reading, 
-                created_at,
-                ROW_NUMBER() OVER (PARTITION BY machine_id ORDER BY created_at DESC) as rn
-            FROM machine_readings
+                mr.setup_job_id,
+                mr.machine_id,
+                mr.reading, 
+                mr.created_at,
+                ROW_NUMBER() OVER (PARTITION BY mr.setup_job_id ORDER BY mr.created_at DESC) as rn
+            FROM machine_readings mr
+            WHERE mr.setup_job_id IS NOT NULL
         ),
         latest_setups AS (
             -- Находим последнюю активную наладку для каждого станка
@@ -696,11 +707,11 @@ async def get_operator_machines_view(db: Session = Depends(get_db_session)):
             COALESCE(ls.status, 'idle') as status
         FROM machines m
         LEFT JOIN (
-            SELECT * FROM latest_readings WHERE rn = 1
-        ) lr ON m.id = lr.machine_id
-        LEFT JOIN (
             SELECT * FROM latest_setups WHERE rn = 1
         ) ls ON m.id = ls.machine_id
+        LEFT JOIN (
+            SELECT * FROM latest_readings WHERE rn = 1
+        ) lr ON ls.id = lr.setup_job_id  -- 🔧 СВЯЗЫВАЕМ ПО НАЛАДКЕ, А НЕ ПО СТАНКУ
         LEFT JOIN parts p ON ls.part_id = p.id
         WHERE m.is_active = true
         ORDER BY m.name;
@@ -2660,6 +2671,7 @@ async def get_daily_production_report(
             FROM machine_readings mr
             JOIN employees e ON mr.employee_id = e.id
             JOIN machines m ON mr.machine_id = m.id
+            JOIN setup_jobs sj ON mr.setup_job_id = sj.id
             WHERE (
                 -- Утренняя смена: 6:00-17:59 указанного дня (локальное время)
                 (DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') = :target_date 
@@ -2672,6 +2684,9 @@ async def get_daily_production_report(
                 (DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') = :target_date + INTERVAL '1 day' 
                  AND EXTRACT(HOUR FROM mr.created_at AT TIME ZONE 'Asia/Jerusalem') <= 5)
             )
+            AND mr.setup_job_id IS NOT NULL
+            AND sj.status = 'started'
+            AND sj.end_time IS NULL
             AND e.is_active = true
             AND m.is_active = true
         ),
@@ -2681,10 +2696,15 @@ async def get_daily_production_report(
                 m.id as machine_id,
                 m.name as machine_name,
                 COALESCE(
-                    (SELECT mr.reading FROM machine_readings mr 
-                     WHERE mr.machine_id = m.id 
-                     AND mr.created_at <= (:target_date + INTERVAL '6 hours')::timestamp AT TIME ZONE 'Asia/Jerusalem'
-                     ORDER BY mr.created_at DESC LIMIT 1), 0
+                    (SELECT mr.reading 
+                     FROM machine_readings mr 
+                     JOIN setup_jobs sj ON mr.setup_job_id = sj.id
+                     WHERE sj.machine_id = m.id 
+                       AND sj.status = 'started'
+                       AND sj.end_time IS NULL
+                       AND mr.created_at <= (:target_date + INTERVAL '6 hours')::timestamp AT TIME ZONE 'Asia/Jerusalem'
+                     ORDER BY mr.created_at DESC 
+                     LIMIT 1), 0
                 ) as start_quantity
             FROM machines m
             WHERE m.is_active = true
@@ -2740,27 +2760,20 @@ async def get_daily_production_report(
                 sj.employee_id as machinist_id,
                 e.full_name as machinist_name
             FROM machines m
-            LEFT JOIN machine_readings mr ON m.id = mr.machine_id 
-                AND (
-                    (DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') = :target_date AND EXTRACT(HOUR FROM mr.created_at AT TIME ZONE 'Asia/Jerusalem') BETWEEN 6 AND 17)
-                    OR
-                    (DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') = :target_date AND EXTRACT(HOUR FROM mr.created_at AT TIME ZONE 'Asia/Jerusalem') >= 18)
-                    OR
-                    (DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') = :target_date + INTERVAL '1 day' AND EXTRACT(HOUR FROM mr.created_at AT TIME ZONE 'Asia/Jerusalem') < 6)
-                )
-                AND mr.setup_job_id IS NOT NULL
-            LEFT JOIN setup_jobs sj ON mr.setup_job_id = sj.id
+            LEFT JOIN setup_jobs sj ON m.id = sj.machine_id 
+                AND sj.status = 'started'
+                AND sj.end_time IS NULL
             LEFT JOIN parts p ON sj.part_id = p.id
             LEFT JOIN employees e ON sj.employee_id = e.id
             WHERE m.is_active = true
-            ORDER BY m.id, mr.created_at DESC
+            ORDER BY m.id, sj.created_at DESC
         )
         
         SELECT 
             ROW_NUMBER() OVER (ORDER BY COALESCE(sr.machine_name, st.machine_name)) as row_number,
             
-            COALESCE(sr.morning_operator, 'нет оператора') as morning_operator_name,
-            COALESCE(sr.evening_operator, 'нет оператора') as evening_operator_name,
+            COALESCE(sr.morning_operator, '--') as morning_operator_name,
+            COALESCE(sr.evening_operator, '--') as evening_operator_name,
             
             COALESCE(sr.machine_name, st.machine_name) as machine_name,
             COALESCE(ls.part_code, '--') as part_code,

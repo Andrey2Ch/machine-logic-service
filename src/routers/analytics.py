@@ -7,6 +7,7 @@
 import logging
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, selectinload
+from sqlalchemy import text
 from typing import List
 from datetime import datetime, timezone
 
@@ -37,9 +38,22 @@ async def get_lot_analytics(lot_id: int, db: Session = Depends(get_db_session)):
         # Получаем все батчи для лота
         batches = db.query(BatchDB).filter(BatchDB.lot_id == lot_id).all()
         
-        # Подсчет количеств
-        total_produced_quantity = sum(batch.current_quantity for batch in batches 
-                                    if batch.current_location in ['warehouse_counted', 'good', 'defect', 'rework_repair'])
+        # 🔧 ИСПРАВЛЕНО: Получаем последние показания для АКТИВНОЙ наладки этого лота
+        # Логика: найти активную наладку (статус='started') и взять последние показания именно для неё
+        last_reading_result = db.execute(text("""
+            SELECT COALESCE(
+                (SELECT mr.reading 
+                 FROM machine_readings mr
+                 JOIN setup_jobs sj ON mr.setup_job_id = sj.id
+                 WHERE sj.lot_id = :lot_id 
+                   AND sj.status = 'started'
+                   AND mr.setup_job_id IS NOT NULL
+                 ORDER BY mr.created_at DESC
+                 LIMIT 1), 
+                0) as last_reading
+        """), {"lot_id": lot_id}).fetchone()
+        
+        total_produced_quantity = last_reading_result.last_reading if last_reading_result else 0
         
         total_good_quantity = sum(batch.current_quantity for batch in batches 
                                 if batch.current_location == 'good')
