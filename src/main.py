@@ -2217,10 +2217,29 @@ async def get_free_cards(
 ):
     """Получить список свободных карточек для станка (по умолчанию первые 4)"""
     try:
-        cards = db.query(CardDB).filter(
-            CardDB.machine_id == machine_id,
-            CardDB.status == 'free'
-        ).order_by(CardDB.card_number).limit(limit).all()
+        # ПРАВИЛЬНАЯ ЛОГИКА: карточка занята ТОЛЬКО когда батч в 'production' или 'sorting'
+        # После 'received' (принято на склад) карточка сразу освобождается!
+        cards = db.execute(
+            text("""
+                SELECT c.card_number 
+                FROM cards c
+                LEFT JOIN batches b ON c.batch_id = b.id
+                WHERE c.machine_id = :machine_id
+                AND (
+                    c.status = 'free' 
+                    OR (
+                        c.status = 'in_use' 
+                        AND (
+                            b.id IS NULL 
+                            OR b.current_location NOT IN ('production', 'sorting')
+                        )
+                    )
+                )
+                ORDER BY c.card_number
+                LIMIT :limit
+            """),
+            {"machine_id": machine_id, "limit": limit}
+        ).fetchall()
         
         return {"cards": [card.card_number for card in cards]}
     except Exception as e:
