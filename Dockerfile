@@ -1,32 +1,61 @@
-# Dockerfile for machine-logic-service (FastAPI Backend)
+# Dockerfile for machine-logic-service (FastAPI Backend) - Optimized
 
-# 1. Base Image
-FROM python:3.10-slim
+# 1. Build Stage
+FROM python:3.10-alpine AS builder
+
+# Install build dependencies
+RUN apk add --no-cache \
+    gcc \
+    musl-dev \
+    postgresql-dev \
+    python3-dev \
+    libffi-dev
 
 # Set environment variables
-ENV PYTHONDONTWRITEBYTECODE 1
-ENV PYTHONUNBUFFERED 1
-ENV PYTHONPATH "${PYTHONPATH}:/app"
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH="${PYTHONPATH}:/app"
 
-# Set the working directory
 WORKDIR /app
 
-# Install dependencies
-# Copy requirements file first to leverage Docker cache
+# Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir --user -r requirements.txt
 
-# Copy the application source code
-# This copies the contents of the 'src' directory into a 'src' subdir in WORKDIR
+# 2. Production Stage
+FROM python:3.10-alpine AS runner
+
+# Install runtime dependencies only
+RUN apk add --no-cache \
+    postgresql-libs \
+    && rm -rf /var/cache/apk/*
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH="${PYTHONPATH}:/app"
+ENV PATH="/root/.local/bin:${PATH}"
+
+# Create non-root user
+RUN addgroup -g 1001 -S appgroup && \
+    adduser -u 1001 -S appuser -G appgroup
+
+WORKDIR /app
+
+# Copy Python packages from builder
+COPY --from=builder /root/.local /root/.local
+
+# Copy application files
 COPY src/ ./src/
-
-# Copy entrypoint script
 COPY entrypoint.sh ./
 RUN chmod +x entrypoint.sh
 
-# The command to run the application
-# Было:
-# CMD ["gunicorn", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "src.main:app", "-b", "0.0.0.0:8000"]
+# Change ownership
+RUN chown -R appuser:appgroup /app
+
+USER appuser
+
+EXPOSE 8000
 
 ENTRYPOINT ["./entrypoint.sh"] 
