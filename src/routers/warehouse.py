@@ -40,6 +40,7 @@ class BatchOut(BaseModel):
     current_quantity: int
     current_location: str
     created_at: Optional[datetime.datetime] = None
+    warehouse_received_at: Optional[datetime.datetime] = None # Дата приемки на склад
     lot: LotOut
 
     class Config:
