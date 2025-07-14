@@ -17,10 +17,10 @@ ENV PYTHONPATH="${PYTHONPATH}:/app"
 
 WORKDIR /app
 
-# Install Python dependencies
+# Install Python dependencies system-wide
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir --user -r requirements.txt
+    pip install --no-cache-dir -r requirements.txt
 
 # 2. Production Stage
 FROM python:3.10-slim-bookworm AS runner
@@ -35,7 +35,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH="${PYTHONPATH}:/app"
-ENV PATH="/home/appuser/.local/bin:${PATH}"
 
 # Create non-root user
 RUN addgroup --system --gid 1001 appgroup && \
@@ -44,7 +43,8 @@ RUN addgroup --system --gid 1001 appgroup && \
 WORKDIR /app
 
 # Copy Python packages from builder
-COPY --from=builder /root/.local /home/appuser/.local
+COPY --from=builder /usr/local/lib/python3.10/site-packages /usr/local/lib/python3.10/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
 
 # Copy application files
 COPY src/ ./src/
@@ -52,7 +52,7 @@ COPY entrypoint.sh ./
 RUN dos2unix entrypoint.sh && chmod +x entrypoint.sh
 
 # Change ownership
-RUN chown -R appuser:appgroup /app /home/appuser/.local
+RUN chown -R appuser:appgroup /app
 
 USER appuser
 
