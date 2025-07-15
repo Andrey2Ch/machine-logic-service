@@ -10,7 +10,7 @@ from sqlalchemy import or_, and_
 from src.database import get_db_session
 from typing import List, Optional
 from pydantic import BaseModel
-from src.models.models import BatchDB, PartDB, LotDB # Импортируем модели SQLAlchemy
+from src.models.models import BatchDB, PartDB, LotDB, SetupDB, MachineDB # Импортируем модели SQLAlchemy
 import datetime
 
 router = APIRouter(
@@ -33,6 +33,12 @@ class LotOut(BaseModel):
     class Config:
         from_attributes = True
 
+class MachineOut(BaseModel):
+    name: str
+
+    class Config:
+        from_attributes = True
+
 class BatchOut(BaseModel):
     id: int
     initial_quantity: int
@@ -43,6 +49,7 @@ class BatchOut(BaseModel):
     created_at: Optional[datetime.datetime] = None
     warehouse_received_at: Optional[datetime.datetime] = None # Дата приемки на склад
     lot: LotOut
+    machine_name: Optional[str] = None  # Добавляем название станка
 
     class Config:
         from_attributes = True
@@ -81,10 +88,11 @@ def get_accepted_batches(
     elif date_to is None:
         date_to = datetime.date.today()
     
-    # Базовый запрос
+    # Базовый запрос с включением информации о станке
     query = db.query(BatchDB)\
         .options(
-            joinedload(BatchDB.lot).joinedload(LotDB.part)
+            joinedload(BatchDB.lot).joinedload(LotDB.part),
+            joinedload(BatchDB.setup_job).joinedload(SetupDB.machine)
         )\
         .filter(BatchDB.current_location.in_(accepted_statuses))
     
@@ -117,10 +125,27 @@ def get_accepted_batches(
         .limit(per_page)\
         .all()
     
+    # Преобразуем результаты, добавляя информацию о станке
+    batch_results = []
+    for batch in batches:
+        batch_dict = {
+            'id': batch.id,
+            'initial_quantity': batch.initial_quantity,
+            'operator_reported_quantity': batch.operator_reported_quantity,
+            'recounted_quantity': batch.recounted_quantity,
+            'current_quantity': batch.current_quantity,
+            'current_location': batch.current_location,
+            'created_at': batch.created_at,
+            'warehouse_received_at': batch.warehouse_received_at,
+            'lot': batch.lot,
+            'machine_name': batch.setup_job.machine.name if batch.setup_job and batch.setup_job.machine else None
+        }
+        batch_results.append(BatchOut(**batch_dict))
+    
     total_pages = (total + per_page - 1) // per_page
     
     return PaginatedBatchesResponse(
-        batches=batches,
+        batches=batch_results,
         total=total,
         page=page,
         per_page=per_page,
@@ -132,7 +157,13 @@ def update_batch_quantity(batch_id: int, payload: UpdateQuantityPayload, db: Ses
     """
     Обновляет фактическое количество (current_quantity) для указанной партии.
     """
-    batch = db.query(BatchDB).filter(BatchDB.id == batch_id).first()
+    batch = db.query(BatchDB)\
+        .options(
+            joinedload(BatchDB.lot).joinedload(LotDB.part),
+            joinedload(BatchDB.setup_job).joinedload(SetupDB.machine)
+        )\
+        .filter(BatchDB.id == batch_id)\
+        .first()
 
     if not batch:
         raise HTTPException(status_code=404, detail=f"Batch with id {batch_id} not found")
@@ -142,10 +173,23 @@ def update_batch_quantity(batch_id: int, payload: UpdateQuantityPayload, db: Ses
     try:
         db.commit()
         db.refresh(batch)
+        
+        # Возвращаем обновленный батч с информацией о станке
+        batch_dict = {
+            'id': batch.id,
+            'initial_quantity': batch.initial_quantity,
+            'operator_reported_quantity': batch.operator_reported_quantity,
+            'recounted_quantity': batch.recounted_quantity,
+            'current_quantity': batch.current_quantity,
+            'current_location': batch.current_location,
+            'created_at': batch.created_at,
+            'warehouse_received_at': batch.warehouse_received_at,
+            'lot': batch.lot,
+            'machine_name': batch.setup_job.machine.name if batch.setup_job and batch.setup_job.machine else None
+        }
+        return BatchOut(**batch_dict)
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to update batch quantity: {str(e)}")
-
-    return batch
 
 # Эндпоинты будут добавлены на следующем шаге 
