@@ -21,6 +21,7 @@ class LotDetailReport(BaseModel):
     initial_planned_quantity: Optional[int]
     total_produced_quantity: int
     total_warehouse_quantity: int  # Пересчитанное количество на складе
+    declared_quantity_at_warehouse_recount: int  # Заявленное операторами количество на момент пересчета склада
     total_good_quantity: int
     total_defect_quantity: int
     total_rework_quantity: int

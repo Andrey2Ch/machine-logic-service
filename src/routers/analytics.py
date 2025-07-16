@@ -57,6 +57,28 @@ async def get_lot_analytics(lot_id: int, db: Session = Depends(get_db_session)):
         # Подсчет пересчитанного количества на складе (все батчи)
         total_warehouse_quantity = sum(batch.current_quantity for batch in batches)
         
+        # Определение заявленного количества на момент пересчета склада
+        # Ищем последнее время изменения батчей для этого лота
+        declared_quantity_at_warehouse_recount = 0
+        if batches:
+            last_batch_update = max(batch.updated_at for batch in batches if batch.updated_at)
+            
+            # Получаем показания операторов на момент последнего пересчета склада
+            declared_reading_result = db.execute(text("""
+                SELECT COALESCE(
+                    (SELECT mr.reading 
+                     FROM machine_readings mr
+                     JOIN setup_jobs sj ON mr.setup_job_id = sj.id
+                     WHERE sj.lot_id = :lot_id 
+                       AND mr.setup_job_id IS NOT NULL
+                       AND mr.created_at <= :warehouse_recount_time
+                     ORDER BY mr.created_at DESC
+                     LIMIT 1), 
+                    0) as declared_reading
+            """), {"lot_id": lot_id, "warehouse_recount_time": last_batch_update}).fetchone()
+            
+            declared_quantity_at_warehouse_recount = declared_reading_result.declared_reading if declared_reading_result else 0
+        
         total_good_quantity = sum(batch.current_quantity for batch in batches 
                                 if batch.current_location == 'good')
         
@@ -98,6 +120,7 @@ async def get_lot_analytics(lot_id: int, db: Session = Depends(get_db_session)):
             initial_planned_quantity=lot.initial_planned_quantity,
             total_produced_quantity=total_produced_quantity,
             total_warehouse_quantity=total_warehouse_quantity,
+            declared_quantity_at_warehouse_recount=declared_quantity_at_warehouse_recount,
             total_good_quantity=total_good_quantity,
             total_defect_quantity=total_defect_quantity,
             total_rework_quantity=total_rework_quantity,
