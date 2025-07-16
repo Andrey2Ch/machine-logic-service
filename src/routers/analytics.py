@@ -38,15 +38,14 @@ async def get_lot_analytics(lot_id: int, db: Session = Depends(get_db_session)):
         # Получаем все батчи для лота
         batches = db.query(BatchDB).filter(BatchDB.lot_id == lot_id).all()
         
-        # 🔧 ИСПРАВЛЕНО: Получаем последние показания для АКТИВНОЙ наладки этого лота
-        # Логика: найти активную наладку (статус='started') и взять последние показания именно для неё
+        # 🔧 ИСПРАВЛЕНО: Получаем последние показания для ВСЕХ наладок этого лота
+        # Логика: берем последние показания для всех наладок лота, не только активных
         last_reading_result = db.execute(text("""
             SELECT COALESCE(
                 (SELECT mr.reading 
                  FROM machine_readings mr
                  JOIN setup_jobs sj ON mr.setup_job_id = sj.id
                  WHERE sj.lot_id = :lot_id 
-                   AND sj.status = 'started'
                    AND mr.setup_job_id IS NOT NULL
                  ORDER BY mr.created_at DESC
                  LIMIT 1), 
@@ -54,6 +53,9 @@ async def get_lot_analytics(lot_id: int, db: Session = Depends(get_db_session)):
         """), {"lot_id": lot_id}).fetchone()
         
         total_produced_quantity = last_reading_result.last_reading if last_reading_result else 0
+        
+        # Подсчет пересчитанного количества на складе (все батчи)
+        total_warehouse_quantity = sum(batch.current_quantity for batch in batches)
         
         total_good_quantity = sum(batch.current_quantity for batch in batches 
                                 if batch.current_location == 'good')
@@ -95,6 +97,7 @@ async def get_lot_analytics(lot_id: int, db: Session = Depends(get_db_session)):
             status=lot.status or 'unknown',
             initial_planned_quantity=lot.initial_planned_quantity,
             total_produced_quantity=total_produced_quantity,
+            total_warehouse_quantity=total_warehouse_quantity,
             total_good_quantity=total_good_quantity,
             total_defect_quantity=total_defect_quantity,
             total_rework_quantity=total_rework_quantity,

@@ -20,6 +20,7 @@ class LotDetailReport(BaseModel):
     status: str
     initial_planned_quantity: Optional[int]
     total_produced_quantity: int
+    total_warehouse_quantity: int  # Пересчитанное количество на складе
     total_good_quantity: int
     total_defect_quantity: int
     total_rework_quantity: int
