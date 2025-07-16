@@ -54,14 +54,15 @@ async def get_lot_analytics(lot_id: int, db: Session = Depends(get_db_session)):
         
         total_produced_quantity = last_reading_result.last_reading if last_reading_result else 0
         
-        # Подсчет пересчитанного количества на складе (все батчи)
-        total_warehouse_quantity = sum(batch.current_quantity for batch in batches)
+        # Подсчет пересчитанного количества на складе (ТОЛЬКО батчи, которые были на складе)
+        warehouse_batches = [batch for batch in batches if batch.warehouse_received_at is not None]
+        total_warehouse_quantity = sum(batch.recounted_quantity or 0 for batch in warehouse_batches)
         
         # Определение заявленного количества на момент пересчета склада
-        # Ищем последнее время изменения батчей для этого лота
         declared_quantity_at_warehouse_recount = 0
-        if batches:
-            last_batch_update = max(batch.updated_at for batch in batches if batch.updated_at)
+        if warehouse_batches:
+            # Берем последнее время пересчета батчей на складе
+            last_warehouse_recount = max(batch.warehouse_received_at for batch in warehouse_batches)
             
             # Получаем показания операторов на момент последнего пересчета склада
             declared_reading_result = db.execute(text("""
@@ -75,7 +76,7 @@ async def get_lot_analytics(lot_id: int, db: Session = Depends(get_db_session)):
                      ORDER BY mr.created_at DESC
                      LIMIT 1), 
                     0) as declared_reading
-            """), {"lot_id": lot_id, "warehouse_recount_time": last_batch_update}).fetchone()
+            """), {"lot_id": lot_id, "warehouse_recount_time": last_warehouse_recount}).fetchone()
             
             declared_quantity_at_warehouse_recount = declared_reading_result.declared_reading if declared_reading_result else 0
         
