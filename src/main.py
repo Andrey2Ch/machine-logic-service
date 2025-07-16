@@ -1599,70 +1599,111 @@ async def get_lot(lot_id: int, db: Session = Depends(get_db_session)):
     
     return lot
 
-@app.patch("/lots/{lot_id}/quantity", response_model=LotResponse, tags=["Lots"])
+@app.patch("/lots/{lot_id}/quantity")
 async def update_lot_quantity(
-    lot_id: int, 
-    quantity_update: LotQuantityUpdate, 
+    lot_id: int,
+    quantity_update: LotQuantityUpdate,
     db: Session = Depends(get_db_session)
 ):
     """
-    Обновить дополнительное количество для лота.
-    Доступно только для лотов в статусах 'new' и 'in_production'.
-    total_planned_quantity = initial_planned_quantity + additional_quantity
+    Обновляет дополнительное количество для лота.
+    Сохраняет additional_quantity в setup_jobs и пересчитывает total_planned_quantity в lots.
     """
     try:
         # Найти лот
-        lot = db.query(LotDB).options(selectinload(LotDB.part)).filter(LotDB.id == lot_id).first()
+        lot = db.query(LotDB).filter(LotDB.id == lot_id).first()
         if not lot:
-            raise HTTPException(status_code=404, detail=f"Лот с ID {lot_id} не найден")
+            raise HTTPException(status_code=404, detail="Лот не найден")
         
-        # Проверить, что лот в подходящем статусе
-        allowed_statuses = [LotStatus.NEW, LotStatus.IN_PRODUCTION]
-        if lot.status not in allowed_statuses:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Изменение количества доступно только для статусов: {', '.join(allowed_statuses)}. Текущий статус: '{lot.status}'"
-            )
+        # Найти setup_job для этого лота
+        setup_job = db.query(SetupDB).filter(SetupDB.lot_id == lot_id).first()
+        if not setup_job:
+            raise HTTPException(status_code=404, detail="Наладка для лота не найдена")
         
-        # Рассчитать новое общее количество
+        # Обновить additional_quantity в setup_jobs
+        setup_job.additional_quantity = quantity_update.additional_quantity
+        
+        # Пересчитать total_planned_quantity в lots
         initial_quantity = lot.initial_planned_quantity or 0
-        new_total_quantity = initial_quantity + quantity_update.additional_quantity
+        lot.total_planned_quantity = initial_quantity + quantity_update.additional_quantity
         
-        # Обновить total_planned_quantity
-        lot.total_planned_quantity = new_total_quantity
-        
-        # 🎯 СИНХРОНИЗАЦИЯ: обновляем additional_quantity в setup_jobs для этого лота
-        try:
-            result = db.execute(
-                text("""UPDATE setup_jobs 
-                       SET additional_quantity = :additional_quantity
-                       WHERE lot_id = :lot_id 
-                       AND end_time IS NULL"""),
-                {"additional_quantity": quantity_update.additional_quantity, "lot_id": lot_id}
-            )
-            
-            if result.rowcount > 0:
-                logger.info(f"Updated {result.rowcount} setup_jobs for lot {lot_id} with additional_quantity {quantity_update.additional_quantity}")
-            else:
-                logger.warning(f"No active setup_jobs found for lot {lot_id} to update additional_quantity")
-                
-        except Exception as sync_error:
-            logger.error(f"Failed to sync setup_jobs.additional_quantity for lot {lot_id}: {sync_error}")
-            # Не прерываем выполнение, продолжаем обновление лота
-        
+        # Сохранить изменения
         db.commit()
-        db.refresh(lot)
         
-        logger.info(f"Количество лота {lot_id} обновлено: initial={initial_quantity}, additional={quantity_update.additional_quantity}, total={new_total_quantity}")
+        logger.info(f"Обновлено количество для лота {lot_id}: additional={quantity_update.additional_quantity}, total={lot.total_planned_quantity}")
         
-        return lot
+        return {
+            "success": True,
+            "message": "Количество успешно обновлено",
+            "lot_id": lot_id,
+            "initial_planned_quantity": initial_quantity,
+            "additional_quantity": quantity_update.additional_quantity,
+            "total_planned_quantity": lot.total_planned_quantity
+        }
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Ошибка при обновлении количества лота {lot_id}: {str(e)}")
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Внутренняя ошибка сервера при обновлении количества: {str(e)}")
+        logger.error(f"Ошибка при обновлении количества лота {lot_id}: {e}")
+        raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера")
+
+# Pydantic модель для обновления начального количества
+class LotInitialQuantityUpdate(BaseModel):
+    """Модель для обновления начального количества лота"""
+    initial_planned_quantity: int = Field(ge=1, description="Начальное планируемое количество")
+
+@app.patch("/lots/{lot_id}/initial-quantity")
+async def update_lot_initial_quantity(
+    lot_id: int,
+    quantity_update: LotInitialQuantityUpdate,
+    db: Session = Depends(get_db_session)
+):
+    """
+    Обновляет начальное количество для лота.
+    Синхронизирует с setup_jobs.planned_quantity и пересчитывает total_planned_quantity.
+    """
+    try:
+        # Найти лот
+        lot = db.query(LotDB).filter(LotDB.id == lot_id).first()
+        if not lot:
+            raise HTTPException(status_code=404, detail="Лот не найден")
+        
+        # Найти setup_job для этого лота
+        setup_job = db.query(SetupDB).filter(SetupDB.lot_id == lot_id).first()
+        if not setup_job:
+            raise HTTPException(status_code=404, detail="Наладка для лота не найдена")
+        
+        # Обновить initial_planned_quantity в lots
+        lot.initial_planned_quantity = quantity_update.initial_planned_quantity
+        
+        # Синхронизировать с setup_jobs.planned_quantity
+        setup_job.planned_quantity = quantity_update.initial_planned_quantity
+        
+        # Пересчитать total_planned_quantity
+        additional_quantity = setup_job.additional_quantity or 0
+        lot.total_planned_quantity = quantity_update.initial_planned_quantity + additional_quantity
+        
+        # Сохранить изменения
+        db.commit()
+        
+        logger.info(f"Обновлено начальное количество для лота {lot_id}: initial={quantity_update.initial_planned_quantity}, total={lot.total_planned_quantity}")
+        
+        return {
+            "success": True,
+            "message": "Начальное количество успешно обновлено",
+            "lot_id": lot_id,
+            "initial_planned_quantity": quantity_update.initial_planned_quantity,
+            "additional_quantity": additional_quantity,
+            "total_planned_quantity": lot.total_planned_quantity
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Ошибка при обновлении начального количества лота {lot_id}: {e}")
+        raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера")
 
 @app.patch("/lots/{lot_id}/close", response_model=LotResponse, tags=["Lots"])
 async def close_lot(lot_id: int, db: Session = Depends(get_db_session)):
@@ -3067,4 +3108,61 @@ async def update_lot_quantity(
     except Exception as e:
         db.rollback()
         logger.error(f"Ошибка при обновлении количества лота {lot_id}: {e}")
+        raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера")
+
+# Pydantic модель для обновления начального количества
+class LotInitialQuantityUpdate(BaseModel):
+    """Модель для обновления начального количества лота"""
+    initial_planned_quantity: int = Field(ge=1, description="Начальное планируемое количество")
+
+@app.patch("/lots/{lot_id}/initial-quantity")
+async def update_lot_initial_quantity(
+    lot_id: int,
+    quantity_update: LotInitialQuantityUpdate,
+    db: Session = Depends(get_db_session)
+):
+    """
+    Обновляет начальное количество для лота.
+    Синхронизирует с setup_jobs.planned_quantity и пересчитывает total_planned_quantity.
+    """
+    try:
+        # Найти лот
+        lot = db.query(LotDB).filter(LotDB.id == lot_id).first()
+        if not lot:
+            raise HTTPException(status_code=404, detail="Лот не найден")
+        
+        # Найти setup_job для этого лота
+        setup_job = db.query(SetupDB).filter(SetupDB.lot_id == lot_id).first()
+        if not setup_job:
+            raise HTTPException(status_code=404, detail="Наладка для лота не найдена")
+        
+        # Обновить initial_planned_quantity в lots
+        lot.initial_planned_quantity = quantity_update.initial_planned_quantity
+        
+        # Синхронизировать с setup_jobs.planned_quantity
+        setup_job.planned_quantity = quantity_update.initial_planned_quantity
+        
+        # Пересчитать total_planned_quantity
+        additional_quantity = setup_job.additional_quantity or 0
+        lot.total_planned_quantity = quantity_update.initial_planned_quantity + additional_quantity
+        
+        # Сохранить изменения
+        db.commit()
+        
+        logger.info(f"Обновлено начальное количество для лота {lot_id}: initial={quantity_update.initial_planned_quantity}, total={lot.total_planned_quantity}")
+        
+        return {
+            "success": True,
+            "message": "Начальное количество успешно обновлено",
+            "lot_id": lot_id,
+            "initial_planned_quantity": quantity_update.initial_planned_quantity,
+            "additional_quantity": additional_quantity,
+            "total_planned_quantity": lot.total_planned_quantity
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Ошибка при обновлении начального количества лота {lot_id}: {e}")
         raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера")
