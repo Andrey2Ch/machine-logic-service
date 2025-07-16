@@ -47,6 +47,7 @@ class BatchOut(BaseModel):
     current_quantity: int
     current_location: str
     created_at: Optional[datetime.datetime] = None
+    batch_time: Optional[datetime.datetime] = None # Время производства батча
     warehouse_received_at: Optional[datetime.datetime] = None # Дата приемки на склад
     lot: LotOut
     machine_name: Optional[str] = None  # Добавляем название станка
@@ -136,6 +137,7 @@ def get_accepted_batches(
             'current_quantity': batch.current_quantity,
             'current_location': batch.current_location,
             'created_at': batch.created_at,
+            'batch_time': batch.batch_time,
             'warehouse_received_at': batch.warehouse_received_at,
             'lot': batch.lot,
             'machine_name': batch.setup_job.machine.name if batch.setup_job and batch.setup_job.machine else None
@@ -183,6 +185,7 @@ def update_batch_quantity(batch_id: int, payload: UpdateQuantityPayload, db: Ses
             'current_quantity': batch.current_quantity,
             'current_location': batch.current_location,
             'created_at': batch.created_at,
+            'batch_time': batch.batch_time,
             'warehouse_received_at': batch.warehouse_received_at,
             'lot': batch.lot,
             'machine_name': batch.setup_job.machine.name if batch.setup_job and batch.setup_job.machine else None

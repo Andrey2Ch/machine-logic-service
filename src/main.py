@@ -3014,3 +3014,57 @@ app.include_router(qc_router.router)
 app.include_router(admin_router.router)
 app.include_router(analytics_router.router)
 app.include_router(warehouse_router.router)
+
+# Pydantic модель для обновления количества лота
+class LotQuantityUpdate(BaseModel):
+    """Модель для обновления дополнительного количества лота"""
+    additional_quantity: int = Field(description="Дополнительное количество")
+
+@app.patch("/lots/{lot_id}/quantity")
+async def update_lot_quantity(
+    lot_id: int,
+    quantity_update: LotQuantityUpdate,
+    db: Session = Depends(get_db_session)
+):
+    """
+    Обновляет дополнительное количество для лота.
+    Сохраняет additional_quantity в setup_jobs и пересчитывает total_planned_quantity в lots.
+    """
+    try:
+        # Найти лот
+        lot = db.query(LotDB).filter(LotDB.id == lot_id).first()
+        if not lot:
+            raise HTTPException(status_code=404, detail="Лот не найден")
+        
+        # Найти setup_job для этого лота
+        setup_job = db.query(SetupDB).filter(SetupDB.lot_id == lot_id).first()
+        if not setup_job:
+            raise HTTPException(status_code=404, detail="Наладка для лота не найдена")
+        
+        # Обновить additional_quantity в setup_jobs
+        setup_job.additional_quantity = quantity_update.additional_quantity
+        
+        # Пересчитать total_planned_quantity в lots
+        initial_quantity = lot.initial_planned_quantity or 0
+        lot.total_planned_quantity = initial_quantity + quantity_update.additional_quantity
+        
+        # Сохранить изменения
+        db.commit()
+        
+        logger.info(f"Обновлено количество для лота {lot_id}: additional={quantity_update.additional_quantity}, total={lot.total_planned_quantity}")
+        
+        return {
+            "success": True,
+            "message": "Количество успешно обновлено",
+            "lot_id": lot_id,
+            "initial_planned_quantity": initial_quantity,
+            "additional_quantity": quantity_update.additional_quantity,
+            "total_planned_quantity": lot.total_planned_quantity
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Ошибка при обновлении количества лота {lot_id}: {e}")
+        raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера")
