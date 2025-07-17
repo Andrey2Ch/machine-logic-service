@@ -2999,6 +2999,119 @@ async def get_available_dates(
 # КОНЕЦ ЕЖЕДНЕВНЫХ ОТЧЕТОВ ПРОИЗВОДСТВА  
 # ===================================================================
 
+@app.get("/daily-completed-setups", tags=["Daily Reports"])
+async def get_daily_completed_setups(
+    target_date: date = Query(default_factory=date.today, description="Дата для получения завершенных сетапов"),
+    db: Session = Depends(get_db_session)
+):
+    """
+    Получить завершенные сетапы за конкретную дату.
+    Аналогично логике morning report, но для конкретной даты.
+    """
+    
+    try:
+        sql_query = text("""
+        WITH 
+        last_readings AS (
+            SELECT DISTINCT ON (sj.id)
+                sj.id as setup_job_id,
+                mr.reading as last_quantity,
+                mr.created_at as last_reading_time
+            FROM setup_jobs sj
+            LEFT JOIN machine_readings mr ON sj.id = mr.setup_job_id
+            WHERE sj.status = 'completed'
+                AND DATE(sj.end_time AT TIME ZONE 'Asia/Jerusalem') = :target_date
+                AND mr.setup_job_id IS NOT NULL
+            ORDER BY sj.id, mr.created_at DESC
+        ),
+        completed_setups AS (
+            SELECT 
+                sj.id as setup_job_id,
+                m.name as machine_name,
+                p.drawing_number as part_code,
+                l.lot_number,
+                sj.planned_quantity,
+                sj.additional_quantity,
+                sj.cycle_time,
+                sj.created_at as setup_created_at,
+                sj.end_time as setup_completed_at,
+                e.full_name as machinist_name,
+                lr.last_quantity,
+                EXTRACT(EPOCH FROM (sj.end_time - sj.created_at)) / 3600 as setup_duration_hours
+            FROM setup_jobs sj
+            JOIN machines m ON sj.machine_id = m.id
+            LEFT JOIN parts p ON sj.part_id = p.id
+            LEFT JOIN lots l ON sj.lot_id = l.id
+            LEFT JOIN employees e ON sj.employee_id = e.id
+            LEFT JOIN last_readings lr ON sj.id = lr.setup_job_id
+            WHERE sj.status = 'completed'
+                AND DATE(sj.end_time AT TIME ZONE 'Asia/Jerusalem') = :target_date
+                AND m.is_active = true
+        )
+        SELECT 
+            ROW_NUMBER() OVER (ORDER BY setup_completed_at DESC) as row_number,
+            setup_job_id,
+            machine_name,
+            COALESCE(part_code, '-') as part_code,
+            COALESCE(lot_number, '-') as lot_number,
+            planned_quantity,
+            COALESCE(additional_quantity, 0) as additional_quantity,
+            (planned_quantity + COALESCE(additional_quantity, 0)) as total_planned_quantity,
+            COALESCE(last_quantity, 0) as final_quantity,
+            cycle_time,
+            setup_created_at,
+            setup_completed_at,
+            COALESCE(machinist_name, '-') as machinist_name,
+            ROUND(setup_duration_hours::numeric, 2) as setup_duration_hours,
+            
+            -- Процент выполнения
+            CASE 
+                WHEN (planned_quantity + COALESCE(additional_quantity, 0)) > 0 THEN
+                    ROUND((COALESCE(last_quantity, 0) * 100.0) / (planned_quantity + COALESCE(additional_quantity, 0)), 1)
+                ELSE 0
+            END as completion_percent
+            
+        FROM completed_setups
+        ORDER BY setup_completed_at DESC;
+        """)
+        
+        result = db.execute(sql_query, {"target_date": target_date})
+        rows = result.fetchall()
+        
+        # Формируем записи
+        completed_setups = []
+        for row in rows:
+            setup = {
+                "row_number": row.row_number,
+                "setup_job_id": row.setup_job_id,
+                "machine_name": row.machine_name,
+                "part_code": row.part_code,
+                "lot_number": row.lot_number,
+                "planned_quantity": row.planned_quantity,
+                "additional_quantity": row.additional_quantity,
+                "total_planned_quantity": row.total_planned_quantity,
+                "final_quantity": row.final_quantity,
+                "cycle_time": row.cycle_time,
+                "setup_created_at": row.setup_created_at,
+                "setup_completed_at": row.setup_completed_at,
+                "machinist_name": row.machinist_name,
+                "setup_duration_hours": float(row.setup_duration_hours),
+                "completion_percent": float(row.completion_percent)
+            }
+            completed_setups.append(setup)
+        
+        return {
+            "date": str(target_date),
+            "total_completed_setups": len(completed_setups),
+            "completed_setups": completed_setups
+        }
+        
+    except Exception as e:
+        logger.error(f"Ошибка при получении завершенных сетапов: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ошибка при получении завершенных сетапов: {str(e)}")
+
+# ===================================================================
+
 # ===================================================================
 # ВНИМАНИЕ! Файл main.py перегружен. НЕ ДОБАВЛЯЙТЕ сюда новый код.
 # Создавайте новые роутеры в папке src/routers и подключайте их через
