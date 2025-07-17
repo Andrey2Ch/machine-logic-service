@@ -1620,11 +1620,14 @@ async def update_lot_quantity(
         if not setup_job:
             raise HTTPException(status_code=404, detail="Наладка для лота не найдена")
         
+        # ЖЕЛЕЗНАЯ СИНХРОНИЗАЦИЯ: planned_quantity = initial_planned_quantity
+        initial_quantity = lot.initial_planned_quantity or 0
+        setup_job.planned_quantity = initial_quantity
+        
         # Обновить additional_quantity в setup_jobs
         setup_job.additional_quantity = quantity_update.additional_quantity
         
         # Пересчитать total_planned_quantity в lots
-        initial_quantity = lot.initial_planned_quantity or 0
         lot.total_planned_quantity = initial_quantity + quantity_update.additional_quantity
         
         # Сохранить изменения
