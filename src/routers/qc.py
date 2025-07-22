@@ -134,18 +134,23 @@ async def notify_setup_allowed(
     
     try:
         # 1. Найти наладку и связанную информацию
+        from sqlalchemy.orm import aliased
+        QaEmployee = aliased(EmployeeDB)
+        
         setup_info = db.query(
             SetupDB.id,
             SetupDB.status,
             EmployeeDB.telegram_id,
             EmployeeDB.full_name.label("machinist_name"),
             MachineDB.name.label("machine_name"),
-            PartDB.drawing_number
+            PartDB.drawing_number,
+            QaEmployee.full_name.label("qa_name")
         ).select_from(SetupDB)\
          .join(EmployeeDB, SetupDB.employee_id == EmployeeDB.id)\
          .join(MachineDB, SetupDB.machine_id == MachineDB.id)\
          .join(LotDB, SetupDB.lot_id == LotDB.id)\
          .join(PartDB, LotDB.part_id == PartDB.id)\
+         .join(QaEmployee, SetupDB.qa_id == QaEmployee.id)\
          .filter(SetupDB.id == setup_id)\
          .first()
 
@@ -174,11 +179,11 @@ async def notify_setup_allowed(
 
         # 4. Сформировать сообщения
         machinist_message = (
-            f"✅ **Ваша** наладка на станке <b>{setup_info.machine_name}</b> для детали <b>{setup_info.drawing_number}</b> одобрена ОТК.\\n\\n"
+            f"✅ **Ваша** наладка на станке <b>{setup_info.machine_name}</b> для детали <b>{setup_info.drawing_number}</b> одобрена ОТК ({setup_info.qa_name}).\n\n"
             f"Можно начинать работу!"
         )
         general_message = (
-            f"ℹ️ Наладка на станке <b>{setup_info.machine_name}</b> для детали <b>{setup_info.drawing_number}</b> (наладчик: {setup_info.machinist_name}) одобрена ОТК.\\n\\n"
+            f"ℹ️ Наладка на станке <b>{setup_info.machine_name}</b> для детали <b>{setup_info.drawing_number}</b> (наладчик: {setup_info.machinist_name}) одобрена ОТК ({setup_info.qa_name}).\n\n"
             f"Операторы могут начинать работу."
         )
 

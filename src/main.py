@@ -2766,18 +2766,33 @@ async def get_daily_production_report(
                 m.id as machine_id,
                 m.name as machine_name,
                 COALESCE(
-                    -- ИСПРАВЛЕНО: правильная логика часовых поясов
-                    -- Берем последнее показание до 6:00 отчетного дня по местному времени
+                    -- ПРИОРИТЕТ 1: Показания до 6:00 утра отчетного дня
                     (SELECT mr.reading
                      FROM machine_readings mr 
                      WHERE mr.machine_id = m.id 
-                       -- ПРАВИЛЬНОЕ ИСПРАВЛЕНИЕ: сравниваем времена в местном часовом поясе
-                       -- а не конвертируем в UTC, где логика нарушается
                        AND (mr.created_at AT TIME ZONE 'Asia/Jerusalem')::time < '06:00:00'::time
                        AND DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') = :target_date
                      ORDER BY mr.created_at DESC 
                      LIMIT 1
-                    ), 0
+                    ),
+                    -- ПРИОРИТЕТ 2: Последнее показание предыдущего дня
+                    (SELECT mr.reading
+                     FROM machine_readings mr 
+                     WHERE mr.machine_id = m.id 
+                       AND DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') = :target_date - INTERVAL '1 day'
+                     ORDER BY mr.created_at DESC 
+                     LIMIT 1
+                    ),
+                    -- ПРИОРИТЕТ 3: Последнее известное показание вообще (для случаев простоя >1 дня)
+                    (SELECT mr.reading
+                     FROM machine_readings mr 
+                     WHERE mr.machine_id = m.id 
+                       AND DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') < :target_date
+                     ORDER BY mr.created_at DESC 
+                     LIMIT 1
+                    ),
+                    -- ПРИОРИТЕТ 4: Последний резерв: 0
+                    0
                 ) as start_quantity
             FROM machines m
             WHERE m.is_active = true
