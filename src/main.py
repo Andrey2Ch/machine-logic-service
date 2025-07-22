@@ -2765,35 +2765,76 @@ async def get_daily_production_report(
             SELECT 
                 m.id as machine_id,
                 m.name as machine_name,
-                COALESCE(
-                    -- ПРИОРИТЕТ 1: Показания до 6:00 утра отчетного дня
-                    (SELECT mr.reading
-                     FROM machine_readings mr 
-                     WHERE mr.machine_id = m.id 
-                       AND (mr.created_at AT TIME ZONE 'Asia/Jerusalem')::time < '06:00:00'::time
-                       AND DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') = :target_date
-                     ORDER BY mr.created_at DESC 
-                     LIMIT 1
-                    ),
-                    -- ПРИОРИТЕТ 2: Последнее показание предыдущего дня
-                    (SELECT mr.reading
-                     FROM machine_readings mr 
-                     WHERE mr.machine_id = m.id 
-                       AND DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') = :target_date - INTERVAL '1 day'
-                     ORDER BY mr.created_at DESC 
-                     LIMIT 1
-                    ),
-                    -- ПРИОРИТЕТ 3: Последнее известное показание вообще (для случаев простоя >1 дня)
-                    (SELECT mr.reading
-                     FROM machine_readings mr 
-                     WHERE mr.machine_id = m.id 
-                       AND DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') < :target_date
-                     ORDER BY mr.created_at DESC 
-                     LIMIT 1
-                    ),
-                    -- ПРИОРИТЕТ 4: Последний резерв: 0
-                    0
-                ) as start_quantity
+                CASE 
+                    -- Показываем начальные показания только для актуальных станков
+                    WHEN (
+                        -- Станки с показаниями в отчетный период
+                        EXISTS (
+                            SELECT 1 FROM machine_readings mr 
+                            WHERE mr.machine_id = m.id 
+                            AND (
+                                -- Утренняя смена: 6:00-17:59 отчетного дня
+                                (DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') = :target_date 
+                                 AND EXTRACT(HOUR FROM mr.created_at AT TIME ZONE 'Asia/Jerusalem') BETWEEN 6 AND 17)
+                                OR
+                                -- Вечерняя смена: 18:00+ отчетного дня или до 5:59 следующего дня
+                                (DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') = :target_date 
+                                 AND EXTRACT(HOUR FROM mr.created_at AT TIME ZONE 'Asia/Jerusalem') >= 18)
+                                OR
+                                (DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') = :target_date + INTERVAL '1 day' 
+                                 AND EXTRACT(HOUR FROM mr.created_at AT TIME ZONE 'Asia/Jerusalem') <= 5)
+                            )
+                        )
+                        OR
+                        -- Станки с активными наладками
+                        EXISTS (
+                            SELECT 1 FROM setup_jobs sj 
+                            WHERE sj.machine_id = m.id 
+                            AND sj.status IN ('started', 'created', 'pending_qc', 'allowed')
+                            AND sj.end_time IS NULL
+                        )
+                        OR  
+                        -- Станки с наладками, завершенными в отчетный день
+                        EXISTS (
+                            SELECT 1 FROM setup_jobs sj 
+                            WHERE sj.machine_id = m.id 
+                            AND sj.status = 'completed'
+                            AND DATE(sj.end_time AT TIME ZONE 'Asia/Jerusalem') = :target_date
+                        )
+                    ) THEN 
+                        COALESCE(
+                            -- ПРИОРИТЕТ 1: Показания до 6:00 утра отчетного дня
+                            (SELECT mr.reading
+                             FROM machine_readings mr 
+                             WHERE mr.machine_id = m.id 
+                               AND (mr.created_at AT TIME ZONE 'Asia/Jerusalem')::time < '06:00:00'::time
+                               AND DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') = :target_date
+                             ORDER BY mr.created_at DESC 
+                             LIMIT 1
+                            ),
+                            -- ПРИОРИТЕТ 2: Последнее показание предыдущего дня
+                            (SELECT mr.reading
+                             FROM machine_readings mr 
+                             WHERE mr.machine_id = m.id 
+                               AND DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') = :target_date - INTERVAL '1 day'
+                             ORDER BY mr.created_at DESC 
+                             LIMIT 1
+                            ),
+                            -- ПРИОРИТЕТ 3: Последнее известное показание вообще (для случаев простоя >1 дня)
+                            (SELECT mr.reading
+                             FROM machine_readings mr 
+                             WHERE mr.machine_id = m.id 
+                               AND DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') < :target_date
+                             ORDER BY mr.created_at DESC 
+                             LIMIT 1
+                            ),
+                            -- ПРИОРИТЕТ 4: Последний резерв: 0
+                            0
+                        )
+                    ELSE 
+                        -- Для неактуальных станков показываем NULL (прочерк)
+                        NULL
+                END as start_quantity
             FROM machines m
             WHERE m.is_active = true
         ),
@@ -2820,15 +2861,17 @@ async def get_daily_production_report(
             SELECT
                 st.machine_id,
                 
-                -- Вычисляем утреннее производство с учетом сброса счетчика
+                -- Вычисляем утреннее производство (NULL для неактуальных станков)
                 CASE
+                    WHEN st.start_quantity IS NULL THEN NULL  -- Неактуальные станки
                     WHEN COALESCE(sr.morning_end_quantity, st.start_quantity, 0) < COALESCE(st.start_quantity, 0)
                     THEN COALESCE(sr.morning_end_quantity, st.start_quantity, 0) -- Если счетчик сброшен, производство = конечное значение
                     ELSE COALESCE(sr.morning_end_quantity, st.start_quantity, 0) - COALESCE(st.start_quantity, 0)
                 END as morning_production,
                 
-                -- Вычисляем вечернее производство с учетом сброса счетчика
+                -- Вычисляем вечернее производство (NULL для неактуальных станков)
                 CASE
+                    WHEN st.start_quantity IS NULL THEN NULL  -- Неактуальные станки
                     WHEN COALESCE(sr.evening_end_quantity, sr.morning_end_quantity, st.start_quantity, 0) < COALESCE(sr.morning_end_quantity, st.start_quantity, 0)
                     THEN COALESCE(sr.evening_end_quantity, sr.morning_end_quantity, st.start_quantity, 0) -- Если счетчик сброшен, производство = конечное значение
                     ELSE COALESCE(sr.evening_end_quantity, sr.morning_end_quantity, st.start_quantity, 0) - COALESCE(sr.morning_end_quantity, st.start_quantity, 0)
@@ -2849,12 +2892,20 @@ async def get_daily_production_report(
                 e.full_name as machinist_name
             FROM machines m
             LEFT JOIN setup_jobs sj ON m.id = sj.machine_id 
-                AND sj.status = 'started'
-                AND sj.end_time IS NULL
+                AND (
+                    -- ПРИОРИТЕТ 1: Активные наладки
+                    (sj.status = 'started' AND sj.end_time IS NULL)
+                    OR
+                    -- ПРИОРИТЕТ 2: Наладки, завершенные в отчетный день
+                    (sj.status = 'completed' AND DATE(sj.end_time AT TIME ZONE 'Asia/Jerusalem') = :target_date)
+                )
             LEFT JOIN parts p ON sj.part_id = p.id
             LEFT JOIN employees e ON sj.employee_id = e.id
             WHERE m.is_active = true
-            ORDER BY m.id, sj.created_at DESC
+            -- Сортируем так, чтобы активные наладки были приоритетнее завершенных
+            ORDER BY m.id, 
+                CASE WHEN sj.status = 'started' THEN 1 ELSE 2 END,
+                sj.created_at DESC
         )
         
         SELECT 
@@ -2866,10 +2917,19 @@ async def get_daily_production_report(
             COALESCE(sr.machine_name, st.machine_name) as machine_name,
             COALESCE(ls.part_code, '--') as part_code,
             
-            -- Исходные показания для отображения
-            COALESCE(st.start_quantity, 0) as start_quantity,
-            COALESCE(sr.morning_end_quantity, st.start_quantity, 0) as morning_end_quantity,
-            COALESCE(sr.evening_end_quantity, sr.morning_end_quantity, st.start_quantity, 0) as evening_end_quantity,
+            -- Исходные показания для отображения (NULL для неактуальных станков)
+            st.start_quantity,
+            CASE 
+                WHEN sr.morning_end_quantity IS NOT NULL THEN sr.morning_end_quantity
+                WHEN st.start_quantity IS NOT NULL THEN st.start_quantity
+                ELSE NULL
+            END as morning_end_quantity,
+            CASE 
+                WHEN sr.evening_end_quantity IS NOT NULL THEN sr.evening_end_quantity
+                WHEN sr.morning_end_quantity IS NOT NULL THEN sr.morning_end_quantity
+                WHEN st.start_quantity IS NOT NULL THEN st.start_quantity
+                ELSE NULL
+            END as evening_end_quantity,
             
             COALESCE(ls.cycle_time, 0) as cycle_time_seconds,
             
