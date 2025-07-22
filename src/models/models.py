@@ -1,6 +1,6 @@
 from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Enum, Boolean, Float, Text, BigInteger, CheckConstraint, Index
 from sqlalchemy.orm import relationship
-from datetime import datetime
+from datetime import datetime, timezone
 from .setup import SetupStatus
 from ..database import Base
 from sqlalchemy.sql import func
@@ -11,7 +11,7 @@ class MachineDB(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(255))
     type = Column(String(50))
-    created_at = Column(DateTime, default=datetime.now)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     is_active = Column(Boolean, default=True)
     
     # Добавляем связь с карточками
@@ -26,7 +26,7 @@ class EmployeeDB(Base):
     username = Column(String(255))
     role_id = Column(Integer)
     factory_number = Column(String(50), nullable=True, unique=True)  # Заводской номер оператора
-    created_at = Column(DateTime, default=datetime.now)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     added_by = Column(Integer)
     is_active = Column(Boolean, default=True)
 
@@ -36,7 +36,7 @@ class PartDB(Base):
     id = Column(Integer, primary_key=True, index=True)
     drawing_number = Column(String(255), unique=True, index=True)
     material = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.now)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     # is_active = Column(Boolean, default=True)
 
 class LotDB(Base):
@@ -45,7 +45,7 @@ class LotDB(Base):
     id = Column(Integer, primary_key=True, index=True)
     lot_number = Column(String(255))
     part_id = Column(Integer, ForeignKey("parts.id"))
-    created_at = Column(DateTime, default=datetime.now)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     # is_active = Column(Boolean, default=True)
 
     # Новые поля, добавленные ранее:
@@ -69,7 +69,7 @@ class SetupDB(Base):
     machine_id = Column(Integer, ForeignKey("machines.id"))
     start_time = Column(DateTime)
     end_time = Column(DateTime)
-    created_at = Column(DateTime, default=datetime.now)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     planned_quantity = Column(Integer)
     status = Column(String(50))
     cycle_time = Column(Integer)
@@ -105,7 +105,7 @@ class BatchDB(Base):
     warehouse_employee_id = Column(Integer, ForeignKey("employees.id"), nullable=True)
     qc_inspector_id = Column(Integer, ForeignKey("employees.id"), nullable=True)
 
-    batch_time = Column(DateTime, default=datetime.now)
+    batch_time = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     warehouse_received_at = Column(DateTime, nullable=True)
     qa_date = Column(DateTime, nullable=True)
     
@@ -116,8 +116,8 @@ class BatchDB(Base):
     discrepancy_percentage = Column(Float, nullable=True) 
     admin_acknowledged_discrepancy = Column(Boolean, default=False, nullable=False)
 
-    created_at = Column(DateTime, default=datetime.now)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     # Связи
     lot = relationship("LotDB", back_populates="batches")
@@ -140,7 +140,7 @@ class ReadingDB(Base):
     machine_id = Column(Integer, ForeignKey("machines.id"))
     reading = Column(Integer)
     setup_job_id = Column(Integer, ForeignKey("setup_jobs.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.now)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 class CardDB(Base):
     """Модель для пластиковых карточек операторов"""
@@ -150,7 +150,7 @@ class CardDB(Base):
     machine_id = Column(BigInteger, ForeignKey('machines.id'), primary_key=True)  # составной ключ
     status = Column(String(20), nullable=False, default='free')  # free, in_use, lost
     batch_id = Column(BigInteger, ForeignKey('batches.id'), nullable=True)
-    last_event = Column(DateTime, nullable=False, default=func.now())
+    last_event = Column(DateTime, nullable=False, default=func.now())  # Оставляем PostgreSQL функцию для CardDB
     
     # Отношения
     machine = relationship("MachineDB", back_populates="cards")
