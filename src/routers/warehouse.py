@@ -12,6 +12,22 @@ from typing import List, Optional
 from pydantic import BaseModel
 from src.models.models import BatchDB, PartDB, LotDB, SetupDB, MachineDB # Импортируем модели SQLAlchemy
 import datetime
+from zoneinfo import ZoneInfo
+
+# Константа для израильского часового пояса
+ISRAEL_TZ = ZoneInfo("Asia/Jerusalem")
+
+def convert_to_israel_timezone(dt: Optional[datetime.datetime]) -> Optional[datetime.datetime]:
+    """Конвертирует datetime в израильский часовой пояс"""
+    if dt is None:
+        return None
+    
+    # Если время уже имеет timezone info, конвертируем в израильский
+    if dt.tzinfo is not None:
+        return dt.astimezone(ISRAEL_TZ)
+    
+    # Если время без timezone info, предполагаем что это UTC и конвертируем
+    return dt.replace(tzinfo=ZoneInfo("UTC")).astimezone(ISRAEL_TZ)
 
 router = APIRouter(
     prefix="/warehouse",
@@ -136,9 +152,9 @@ def get_accepted_batches(
             'recounted_quantity': batch.recounted_quantity,
             'current_quantity': batch.current_quantity,
             'current_location': batch.current_location,
-            'created_at': batch.created_at,
-            'batch_time': batch.batch_time,
-            'warehouse_received_at': batch.warehouse_received_at,
+            'created_at': convert_to_israel_timezone(batch.created_at),
+            'batch_time': convert_to_israel_timezone(batch.batch_time),
+            'warehouse_received_at': convert_to_israel_timezone(batch.warehouse_received_at),
             'lot': batch.lot,
             'machine_name': batch.setup_job.machine.name if batch.setup_job and batch.setup_job.machine else None
         }
@@ -184,9 +200,9 @@ def update_batch_quantity(batch_id: int, payload: UpdateQuantityPayload, db: Ses
             'recounted_quantity': batch.recounted_quantity,
             'current_quantity': batch.current_quantity,
             'current_location': batch.current_location,
-            'created_at': batch.created_at,
-            'batch_time': batch.batch_time,
-            'warehouse_received_at': batch.warehouse_received_at,
+            'created_at': convert_to_israel_timezone(batch.created_at),
+            'batch_time': convert_to_israel_timezone(batch.batch_time),
+            'warehouse_received_at': convert_to_israel_timezone(batch.warehouse_received_at),
             'lot': batch.lot,
             'machine_name': batch.setup_job.machine.name if batch.setup_job and batch.setup_job.machine else None
         }
