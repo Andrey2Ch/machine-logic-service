@@ -1221,16 +1221,18 @@ async def accept_batch_on_warehouse(batch_id: int, payload: AcceptWarehousePaylo
     """Принять батч на склад: обновить кол-во и статус."""
     try:
         # Получаем батч и связанные сущности одним запросом для эффективности
-        batch_data = db.query(BatchDB, LotDB, PartDB)\
+        batch_data = db.query(BatchDB, LotDB, PartDB, MachineDB)\
             .join(LotDB, BatchDB.lot_id == LotDB.id)\
             .join(PartDB, LotDB.part_id == PartDB.id)\
+            .join(SetupDB, BatchDB.setup_job_id == SetupDB.id)\
+            .join(MachineDB, SetupDB.machine_id == MachineDB.id)\
             .filter(BatchDB.id == batch_id)\
             .first()
 
         if not batch_data:
-            raise HTTPException(status_code=404, detail="Batch not found or related Lot/Part missing")
+            raise HTTPException(status_code=404, detail="Batch not found or related Lot/Part/Machine missing")
         
-        batch, lot, part = batch_data
+        batch, lot, part, machine = batch_data
 
         if batch.current_location not in ['production', 'sorting']:
             raise HTTPException(status_code=400, detail=f"Batch is not in an acceptable state for warehouse acceptance (current: {batch.current_location}). Expected 'production' or 'sorting'.")
@@ -1281,6 +1283,7 @@ async def accept_batch_on_warehouse(batch_id: int, payload: AcceptWarehousePaylo
                         "batch_id": batch.id,
                         "drawing_number": part.drawing_number if part else 'N/A',
                         "lot_number": lot.lot_number if lot else 'N/A',
+                        "machine_name": machine.name if machine else 'N/A',
                         "operator_name": original_operator.full_name if original_operator else 'Неизвестный оператор',
                         "warehouse_employee_name": warehouse_employee.full_name,
                         "original_qty": operator_reported_qty,
@@ -2748,8 +2751,12 @@ async def get_daily_production_report(
                  AND EXTRACT(HOUR FROM mr.created_at AT TIME ZONE 'Asia/Jerusalem') <= 5)
             )
             AND mr.setup_job_id IS NOT NULL
-            AND sj.status = 'started'
-            AND sj.end_time IS NULL
+            -- ИСПРАВЛЕНО: включаем и активные наладки, и завершенные в этот день
+            AND (
+                (sj.status = 'started' AND sj.end_time IS NULL) 
+                OR 
+                (sj.status = 'completed' AND DATE(sj.end_time AT TIME ZONE 'Asia/Jerusalem') = :target_date)
+            )
             AND e.is_active = true
             AND m.is_active = true
         ),
@@ -2759,15 +2766,18 @@ async def get_daily_production_report(
                 m.id as machine_id,
                 m.name as machine_name,
                 COALESCE(
-                    (SELECT mr.reading 
+                    -- ИСПРАВЛЕНО: правильная логика часовых поясов
+                    -- Берем последнее показание до 6:00 отчетного дня по местному времени
+                    (SELECT mr.reading
                      FROM machine_readings mr 
-                     JOIN setup_jobs sj ON mr.setup_job_id = sj.id
-                     WHERE sj.machine_id = m.id 
-                       AND sj.status = 'started'
-                       AND sj.end_time IS NULL
-                       AND mr.created_at <= (:target_date + INTERVAL '6 hours')::timestamp AT TIME ZONE 'Asia/Jerusalem'
+                     WHERE mr.machine_id = m.id 
+                       -- ПРАВИЛЬНОЕ ИСПРАВЛЕНИЕ: сравниваем времена в местном часовом поясе
+                       -- а не конвертируем в UTC, где логика нарушается
+                       AND (mr.created_at AT TIME ZONE 'Asia/Jerusalem')::time < '06:00:00'::time
+                       AND DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') = :target_date
                      ORDER BY mr.created_at DESC 
-                     LIMIT 1), 0
+                     LIMIT 1
+                    ), 0
                 ) as start_quantity
             FROM machines m
             WHERE m.is_active = true

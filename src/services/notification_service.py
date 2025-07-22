@@ -131,6 +131,7 @@ async def send_batch_discrepancy_alert(db: Session, discrepancy_details: dict):
                 "batch_id": int,
                 "drawing_number": str,
                 "lot_number": str,
+                "machine_name": str,       // Станок
                 "operator_name": str,      // Оператор производства
                 "warehouse_employee_name": str, // Кладовщик
                 "original_qty": int,
@@ -147,6 +148,7 @@ async def send_batch_discrepancy_alert(db: Session, discrepancy_details: dict):
             f"<b>Батч ID:</b> {discrepancy_details.get('batch_id', 'N/A')}\n"
             f"<b>Чертёж:</b> {discrepancy_details.get('drawing_number', 'N/A')}\n"
             f"<b>Партия:</b> {discrepancy_details.get('lot_number', 'N/A')}\n"
+            f"<b>Станок:</b> {discrepancy_details.get('machine_name', 'N/A')}\n"
             f"------------------------------------\n"
             f"<b>Оператор производства:</b> {discrepancy_details.get('operator_name', 'N/A')}\n"
             f"<b>Кол-во от оператора:</b> {discrepancy_details.get('original_qty', 'N/A')}\n"
