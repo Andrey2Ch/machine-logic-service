@@ -2761,8 +2761,8 @@ async def get_daily_production_report(
                 OR
                 -- Наладки, которые были активны в отчетный день, но завершились позже
                 (sj.status = 'completed' 
-                 AND sj.start_time <= :target_date::date + INTERVAL '1 day'
-                 AND sj.end_time >= :target_date::date)
+                 AND sj.start_time <= DATE(:target_date) + INTERVAL '1 day'
+                 AND sj.end_time >= DATE(:target_date))
             )
             AND e.is_active = true
             AND m.is_active = true
@@ -2814,8 +2814,8 @@ async def get_daily_production_report(
                             SELECT 1 FROM setup_jobs sj 
                             WHERE sj.machine_id = m.id 
                             AND sj.status = 'completed'
-                            AND sj.start_time <= :target_date::date + INTERVAL '1 day'
-                            AND sj.end_time >= :target_date::date
+                            AND sj.start_time <= DATE(:target_date) + INTERVAL '1 day'
+                            AND sj.end_time >= DATE(:target_date)
                         )
                     ) THEN 
                         COALESCE(
@@ -2917,8 +2917,8 @@ async def get_daily_production_report(
                     OR
                     -- ПРИОРИТЕТ 3: Наладки, которые были активны в отчетный день
                     (sj.status = 'completed' 
-                     AND sj.start_time <= :target_date::date + INTERVAL '1 day'
-                     AND sj.end_time >= :target_date::date)
+                     AND sj.start_time <= DATE(:target_date) + INTERVAL '1 day'
+                     AND sj.end_time >= DATE(:target_date))
                 )
             LEFT JOIN parts p ON sj.part_id = p.id
             LEFT JOIN employees e ON sj.employee_id = e.id
