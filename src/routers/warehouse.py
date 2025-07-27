@@ -87,6 +87,7 @@ def get_accepted_batches(
     per_page: int = Query(50, ge=1, le=500, description="Количество элементов на странице"),
     date_from: Optional[datetime.date] = Query(None, description="Дата начала фильтрации (YYYY-MM-DD)"),
     date_to: Optional[datetime.date] = Query(None, description="Дата окончания фильтрации (YYYY-MM-DD)"),
+    search: Optional[str] = Query(None, description="Поиск по номеру лота или чертежу"),
     db: Session = Depends(get_db_session)
 ):
     """
@@ -129,6 +130,16 @@ def get_accepted_batches(
             or_(
                 and_(BatchDB.warehouse_received_at.isnot(None), BatchDB.warehouse_received_at <= date_to_datetime),
                 and_(BatchDB.warehouse_received_at.is_(None), BatchDB.created_at <= date_to_datetime)
+            )
+        )
+    
+    # Применяем фильтр поиска по номеру лота или чертежу
+    if search:
+        search_filter = f"%{search.lower()}%"
+        query = query.filter(
+            or_(
+                LotDB.lot_number.ilike(search_filter),
+                PartDB.drawing_number.ilike(search_filter)
             )
         )
     

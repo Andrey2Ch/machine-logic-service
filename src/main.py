@@ -2751,13 +2751,15 @@ async def get_daily_production_report(
                  AND EXTRACT(HOUR FROM mr.created_at AT TIME ZONE 'Asia/Jerusalem') <= 5)
             )
             AND mr.setup_job_id IS NOT NULL
-            -- ИСПРАВЛЕНО: включаем наладки активные в отчетный день
+            -- ИСПРАВЛЕНО: включаем наладки активные в отчетный день (независимо от даты завершения)
             AND (
+                -- Активные наладки
                 (sj.status = 'started' AND sj.end_time IS NULL) 
                 OR 
+                -- Наладки, завершенные в отчетный день
                 (sj.status = 'completed' AND DATE(sj.end_time AT TIME ZONE 'Asia/Jerusalem') = :target_date)
                 OR
-                -- Наладки активные в отчетный день, но завершенные позже
+                -- Наладки, которые были активны в отчетный день, но завершились позже
                 (sj.status = 'completed' 
                  AND sj.start_time <= (:target_date::date + INTERVAL '1 day')::timestamp AT TIME ZONE 'Asia/Jerusalem'
                  AND sj.end_time >= :target_date::date::timestamp AT TIME ZONE 'Asia/Jerusalem')
@@ -2807,7 +2809,7 @@ async def get_daily_production_report(
                             AND DATE(sj.end_time AT TIME ZONE 'Asia/Jerusalem') = :target_date
                         )
                         OR
-                        -- Станки с наладками активными в отчетный день
+                        -- Станки с наладками, которые были активны в отчетный день
                         EXISTS (
                             SELECT 1 FROM setup_jobs sj 
                             WHERE sj.machine_id = m.id 
@@ -2913,7 +2915,7 @@ async def get_daily_production_report(
                     -- ПРИОРИТЕТ 2: Наладки, завершенные в отчетный день
                     (sj.status = 'completed' AND DATE(sj.end_time AT TIME ZONE 'Asia/Jerusalem') = :target_date)
                     OR
-                    -- ПРИОРИТЕТ 3: Наладки активные в отчетный день
+                    -- ПРИОРИТЕТ 3: Наладки, которые были активны в отчетный день
                     (sj.status = 'completed' 
                      AND sj.start_time <= (:target_date::date + INTERVAL '1 day')::timestamp AT TIME ZONE 'Asia/Jerusalem'
                      AND sj.end_time >= :target_date::date::timestamp AT TIME ZONE 'Asia/Jerusalem')
