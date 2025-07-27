@@ -2751,11 +2751,18 @@ async def get_daily_production_report(
                  AND EXTRACT(HOUR FROM mr.created_at AT TIME ZONE 'Asia/Jerusalem') <= 5)
             )
             AND mr.setup_job_id IS NOT NULL
-            -- ИСПРАВЛЕНО: включаем и активные наладки, и завершенные в этот день
+            -- ИСПРАВЛЕНО: включаем наладки активные в отчетный день (независимо от даты завершения)
             AND (
+                -- Активные наладки
                 (sj.status = 'started' AND sj.end_time IS NULL) 
                 OR 
+                -- Наладки, завершенные в отчетный день
                 (sj.status = 'completed' AND DATE(sj.end_time AT TIME ZONE 'Asia/Jerusalem') = :target_date)
+                OR
+                -- Наладки, которые были активны в отчетный день, но завершились позже
+                (sj.status = 'completed' 
+                 AND sj.start_time <= (:target_date::date + INTERVAL '1 day')::timestamp AT TIME ZONE 'Asia/Jerusalem'
+                 AND sj.end_time >= :target_date::date::timestamp AT TIME ZONE 'Asia/Jerusalem')
             )
             AND e.is_active = true
             AND m.is_active = true
@@ -2800,6 +2807,15 @@ async def get_daily_production_report(
                             WHERE sj.machine_id = m.id 
                             AND sj.status = 'completed'
                             AND DATE(sj.end_time AT TIME ZONE 'Asia/Jerusalem') = :target_date
+                        )
+                        OR
+                        -- Станки с наладками, которые были активны в отчетный день
+                        EXISTS (
+                            SELECT 1 FROM setup_jobs sj 
+                            WHERE sj.machine_id = m.id 
+                            AND sj.status = 'completed'
+                            AND sj.start_time <= (:target_date::date + INTERVAL '1 day')::timestamp AT TIME ZONE 'Asia/Jerusalem'
+                            AND sj.end_time >= :target_date::date::timestamp AT TIME ZONE 'Asia/Jerusalem'
                         )
                     ) THEN 
                         COALESCE(
@@ -2898,6 +2914,11 @@ async def get_daily_production_report(
                     OR
                     -- ПРИОРИТЕТ 2: Наладки, завершенные в отчетный день
                     (sj.status = 'completed' AND DATE(sj.end_time AT TIME ZONE 'Asia/Jerusalem') = :target_date)
+                    OR
+                    -- ПРИОРИТЕТ 3: Наладки, которые были активны в отчетный день
+                    (sj.status = 'completed' 
+                     AND sj.start_time <= (:target_date::date + INTERVAL '1 day')::timestamp AT TIME ZONE 'Asia/Jerusalem'
+                     AND sj.end_time >= :target_date::date::timestamp AT TIME ZONE 'Asia/Jerusalem')
                 )
             LEFT JOIN parts p ON sj.part_id = p.id
             LEFT JOIN employees e ON sj.employee_id = e.id
