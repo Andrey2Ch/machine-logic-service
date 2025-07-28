@@ -439,6 +439,41 @@ async def get_machine_readings(machine_id: int, db: Session = Depends(get_db_ses
         ]
     }
 
+@app.get("/machines/{machine_id}/latest-batch")
+async def get_latest_batch_id(machine_id: int, db: Session = Depends(get_db_session)):
+    """
+    Получить ID последнего созданного batch для станка
+    """
+    try:
+        # Ищем последний batch для станка через setup_jobs
+        latest_batch = db.execute(
+            text("""
+                SELECT b.id, b.current_quantity, b.batch_time
+                FROM batches b
+                JOIN setup_jobs sj ON b.setup_job_id = sj.id
+                WHERE sj.machine_id = :machine_id
+                AND b.current_location = 'production'
+                ORDER BY b.batch_time DESC
+                LIMIT 1
+            """),
+            {"machine_id": machine_id}
+        ).fetchone()
+        
+        if not latest_batch:
+            raise HTTPException(status_code=404, detail="Batch не найден для этого станка")
+        
+        return {
+            "batch_id": latest_batch.id,
+            "current_quantity": latest_batch.current_quantity,
+            "batch_time": latest_batch.batch_time.isoformat() if latest_batch.batch_time else None
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching latest batch for machine {machine_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error while fetching latest batch")
+
 class SetupInput(BaseModel):
     machine_id: int
     operator_id: int

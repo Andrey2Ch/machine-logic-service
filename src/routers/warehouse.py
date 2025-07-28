@@ -13,9 +13,14 @@ from pydantic import BaseModel
 from src.models.models import BatchDB, PartDB, LotDB, SetupDB, MachineDB # Импортируем модели SQLAlchemy
 import datetime
 from zoneinfo import ZoneInfo
+from datetime import timezone, timedelta
 
-# Константа для израильского часового пояса
-ISRAEL_TZ = ZoneInfo("Asia/Jerusalem")
+# Константа для израильского часового пояса (с fallback для Windows)
+try:
+    ISRAEL_TZ = ZoneInfo("Asia/Jerusalem")
+except Exception:
+    # Fallback для Windows: UTC+3 (приблизительно Israel Standard Time)
+    ISRAEL_TZ = timezone(timedelta(hours=3))
 
 def convert_to_israel_timezone(dt: Optional[datetime.datetime]) -> Optional[datetime.datetime]:
     """Конвертирует datetime в израильский часовой пояс"""
