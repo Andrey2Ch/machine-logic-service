@@ -2293,6 +2293,119 @@ async def get_free_cards(
         logger.error(f"Error fetching free cards for machine {machine_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error while fetching free cards")
 
+@app.get("/cards/used", tags=["Cards"])
+async def get_used_cards(machine_id: int, db: Session = Depends(get_db_session)):
+    """Получить список используемых карточек для станка"""
+    try:
+        cards = db.execute(
+            text("""
+                SELECT c.card_number 
+                FROM cards c
+                JOIN batches b ON c.batch_id = b.id
+                WHERE c.machine_id = :machine_id 
+                AND c.status = 'in_use'
+                AND b.current_location IN ('production', 'sorting')
+                ORDER BY c.card_number
+            """), 
+            {"machine_id": machine_id}
+        ).fetchall()
+        
+        return {"cards": [card.card_number for card in cards]}
+    except Exception as e:
+        logger.error(f"Error fetching used cards for machine {machine_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error while fetching used cards")
+
+@app.get("/cards/suggestions", tags=["Cards"])
+async def get_card_suggestions(
+    machine_id: int, 
+    limit: int = Query(4, ge=1, le=8, description="Количество предлагаемых карточек (по умолчанию 4)"),
+    db: Session = Depends(get_db_session)
+):
+    """
+    🎯 УМНЫЙ АЛГОРИТМ ВЫБОРА КАРТОЧЕК
+    Реализует логику из TG бота:
+    1. Получает free/used карточки
+    2. Применяет алгоритм "следующие после максимальной"
+    3. Возвращает предлагаемые карточки для выбора
+    """
+    try:
+        # Получаем свободные карточки
+        free_cards_result = db.execute(
+            text("""
+                SELECT c.card_number 
+                FROM cards c
+                LEFT JOIN batches b ON c.batch_id = b.id
+                WHERE c.machine_id = :machine_id
+                AND (
+                    c.status = 'free' 
+                    OR (
+                        c.status = 'in_use' 
+                        AND (
+                            b.id IS NULL 
+                            OR b.current_location NOT IN ('production', 'sorting')
+                        )
+                    )
+                )
+                ORDER BY c.card_number
+            """),
+            {"machine_id": machine_id}
+        ).fetchall()
+        
+        # Получаем используемые карточки
+        used_cards_result = db.execute(
+            text("""
+                SELECT c.card_number 
+                FROM cards c
+                JOIN batches b ON c.batch_id = b.id
+                WHERE c.machine_id = :machine_id 
+                AND c.status = 'in_use'
+                AND b.current_location IN ('production', 'sorting')
+                ORDER BY c.card_number
+            """), 
+            {"machine_id": machine_id}
+        ).fetchall()
+        
+        free_cards = [card.card_number for card in free_cards_result]
+        used_cards = [card.card_number for card in used_cards_result]
+        
+        # 🎯 АЛГОРИТМ ВЫБОРА ИЗ TG БОТА:
+        sorted_free_cards = sorted(free_cards)
+        
+        if used_cards:
+            # Находим максимальную используемую карточку
+            max_used_card = max(used_cards)
+            
+            # Ищем следующие свободные карточки после максимальной
+            next_cards = [card for card in sorted_free_cards if card > max_used_card]
+            
+            if next_cards:
+                # Есть карточки после максимальной - начинаем с них
+                cards_to_show = next_cards[:limit]
+            else:
+                # Нет карточек после максимальной - начинаем сначала (по кругу)
+                cards_to_show = sorted_free_cards[:limit]
+        else:
+            # Нет используемых карточек - начинаем с первых свободных
+            cards_to_show = sorted_free_cards[:limit]
+        
+        # Если свободных карточек меньше лимита, показываем все что есть
+        if len(cards_to_show) < limit and len(sorted_free_cards) < limit:
+            cards_to_show = sorted_free_cards
+        
+        return {
+            "cards": cards_to_show,
+            "total_free": len(free_cards),
+            "total_used": len(used_cards),
+            "algorithm_info": {
+                "max_used_card": max(used_cards) if used_cards else None,
+                "cycled_to_start": bool(used_cards and not any(card > max(used_cards) for card in sorted_free_cards))
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting card suggestions for machine {machine_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error while getting card suggestions")
+
 @app.patch("/cards/{card_number}/use", tags=["Cards"])
 async def use_card(card_number: int, data: CardUseRequest, db: Session = Depends(get_db_session)):
     """Занять карточку (ОДИН КЛИК) - optimistic locking"""
