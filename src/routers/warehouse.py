@@ -15,12 +15,18 @@ import datetime
 from zoneinfo import ZoneInfo
 from datetime import timezone, timedelta
 
-# Константа для израильского часового пояса (с fallback для Windows)
+# Константы для часовых поясов (с fallback для Windows)
 try:
     ISRAEL_TZ = ZoneInfo("Asia/Jerusalem")
 except Exception:
     # Fallback для Windows: UTC+3 (приблизительно Israel Standard Time)
     ISRAEL_TZ = timezone(timedelta(hours=3))
+
+try:
+    UTC_TZ = ZoneInfo("UTC")
+except Exception:
+    # Fallback для Windows: UTC+0
+    UTC_TZ = timezone.utc
 
 def convert_to_israel_timezone(dt: Optional[datetime.datetime]) -> Optional[datetime.datetime]:
     """Конвертирует datetime в израильский часовой пояс"""
@@ -32,7 +38,7 @@ def convert_to_israel_timezone(dt: Optional[datetime.datetime]) -> Optional[date
         return dt.astimezone(ISRAEL_TZ)
     
     # Если время без timezone info, предполагаем что это UTC и конвертируем
-    return dt.replace(tzinfo=ZoneInfo("UTC")).astimezone(ISRAEL_TZ)
+    return dt.replace(tzinfo=UTC_TZ).astimezone(ISRAEL_TZ)
 
 router = APIRouter(
     prefix="/warehouse",
