@@ -23,6 +23,7 @@ class LotInfoItem(BaseModel):
     machinist_name: Optional[str] = None
     planned_quantity: Optional[int] = None
     machine_name: Optional[str] = None
+    status: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -108,7 +109,8 @@ async def get_lots_pending_qc(
                     planned_quantity=planned_quantity,
                     machine_name=machine_name,
                     machinist_name=machinist_name,
-                    inspector_name=inspector_name
+                    inspector_name=inspector_name,
+                    status=lot.status
                 )
             )
 
