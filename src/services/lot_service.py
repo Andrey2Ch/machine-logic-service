@@ -21,6 +21,25 @@ def get_active_lot_ids(db: Session, for_qc: bool = False) -> List[int]:
     """
     logger.info(f"Запрос активных лотов. Режим для ОТК: {for_qc}")
 
+    # Если for_qc=False (пользователь хочет видеть завершенные), возвращаем все лоты кроме отмененных
+    if not for_qc:
+        query_str = """
+            SELECT id
+            FROM lots
+            WHERE status != 'cancelled'
+        """
+        query = text(query_str)
+        
+        try:
+            result = db.execute(query).fetchall()
+            lot_ids = [row[0] for row in result]
+            logger.info(f"Найдено {len(lot_ids)} лотов (включая завершенные). IDs: {lot_ids}")
+            return lot_ids
+        except Exception as e:
+            logger.error(f"Ошибка при получении лотов: {e}", exc_info=True)
+            return []
+
+    # Для for_qc=True (строгая фильтрация для ОТК)
     # Базовые условия для активности:
     # 1. Лот не должен быть отменен (completed лоты теперь могут показываться)
     base_lot_filter = "status != 'cancelled'"
@@ -32,11 +51,7 @@ def get_active_lot_ids(db: Session, for_qc: bool = False) -> List[int]:
 
     # 3. У лота есть партии, которые не в архиве
     # Для ОТК (for_qc=True) мы строже: ищем партии, которые не в финальных состояниях проверки.
-    # Для Склада (for_qc=False) мы мягче: ищем любые партии, которые просто не заархивированы.
-    if for_qc:
-        active_batches_condition = "current_location NOT IN ('good', 'defect', 'rework_repair', 'archived')"
-    else:
-        active_batches_condition = "current_location != 'archived'"
+    active_batches_condition = "current_location NOT IN ('good', 'defect', 'rework_repair', 'archived')"
     
     active_batches_subquery = f"""
         SELECT DISTINCT lot_id FROM batches WHERE {active_batches_condition}
