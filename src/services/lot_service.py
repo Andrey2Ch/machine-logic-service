@@ -22,8 +22,8 @@ def get_active_lot_ids(db: Session, for_qc: bool = False) -> List[int]:
     logger.info(f"Запрос активных лотов. Режим для ОТК: {for_qc}")
 
     # Базовые условия для активности:
-    # 1. Лот не должен быть в финальном статусе
-    base_lot_filter = "status NOT IN ('completed', 'cancelled')"
+    # 1. Лот не должен быть отменен (completed лоты теперь могут показываться)
+    base_lot_filter = "status != 'cancelled'"
 
     # 2. У лота есть активные наладки
     active_setups_subquery = """
