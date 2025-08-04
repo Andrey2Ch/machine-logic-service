@@ -6,7 +6,6 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text, desc
 
 from src.database import get_db_session
-from src.services.lot_service import get_active_lot_ids
 from src.models.models import LotDB, PartDB, SetupDB, EmployeeDB, MachineDB
 from pydantic import BaseModel
 from src.services.telegram_client import send_telegram_message
@@ -49,15 +48,7 @@ async def get_lots_pending_qc(
     if current_user_qa_id is not None:
         logger.info(f"Применяется фильтрация по QA ID: {current_user_qa_id}")
     try:
-        # 1. Получаем ID активных лотов с помощью сервисной функции
-        # Для ОТК всегда используем строгую проверку (for_qc=True)
-        active_lot_ids = get_active_lot_ids(db, for_qc=hide_completed)
-
-        if not active_lot_ids:
-            logger.info("Активных лотов для ОТК не найдено.")
-            return []
-
-        # 2. Основной запрос для получения деталей по найденным лотам
+        # Основной запрос для получения лотов для ОТК
         # Создаем алиасы для разных ролей сотрудников
         machinist_alias = db.query(EmployeeDB).subquery().alias('machinist')
         inspector_alias = db.query(EmployeeDB).subquery().alias('inspector')
@@ -75,7 +66,7 @@ async def get_lots_pending_qc(
          .outerjoin(MachineDB, SetupDB.machine_id == MachineDB.id)\
          .outerjoin(machinist_alias, SetupDB.employee_id == machinist_alias.c.id)\
          .outerjoin(inspector_alias, SetupDB.qa_id == inspector_alias.c.id)\
-         .filter(LotDB.id.in_(active_lot_ids))\
+         .filter(LotDB.status.notin_(['new', 'cancelled']))\
          .order_by(desc(LotDB.created_at))
 
         # Применяем фильтр по дате, если он есть
@@ -115,6 +106,14 @@ async def get_lots_pending_qc(
             )
 
         logger.info(f"Сформировано {len(response_items)} элементов для ответа /qc/lots-pending.")
+        
+        # Логируем статусы для отладки
+        status_counts = {}
+        for item in response_items:
+            status = item.status or 'null'
+            status_counts[status] = status_counts.get(status, 0) + 1
+        logger.info(f"Статистика статусов: {status_counts}")
+        
         return response_items
 
     except Exception as e:
