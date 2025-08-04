@@ -25,11 +25,11 @@ def get_active_lot_ids(db: Session, for_qc: bool = False) -> List[int]:
             WHERE status != 'cancelled'
         """
     else:
-        # Если for_qc=True (скрыть завершенные), исключаем completed лоты
+        # Если for_qc=True, показываем все лоты кроме новых и отмененных
         query_str = """
             SELECT id
             FROM lots
-            WHERE status NOT IN ('cancelled', 'completed')
+            WHERE status NOT IN ('cancelled', 'new')
         """
 
     query = text(query_str)

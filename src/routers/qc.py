@@ -92,9 +92,9 @@ async def get_lots_pending_qc(
 
         # TODO: Добавить фильтрацию по current_user_qa_id, если потребуется
 
-        # Фильтрация по QA ID если параметр передан
-        if current_user_qa_id is not None:
-            query = query.filter(SetupDB.qa_id == current_user_qa_id)
+        # Фильтрация по QA ID убрана - теперь фильтрация происходит на фронтенде
+        # if current_user_qa_id is not None:
+        #     query = query.filter(SetupDB.qa_id == current_user_qa_id)
 
         results = query.all()
         

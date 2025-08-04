@@ -840,6 +840,66 @@ async def sync_lot_status_to_telegram_bot(lot_id: int, status: str):
     except Exception as e:
         logger.error(f"Error syncing lot status to Telegram bot DB: {e}")
 
+
+async def check_lot_auto_completion(lot_id: int, db: Session):
+    """
+    Проверяет, можно ли автоматически закрыть лот (перевести в статус 'closed').
+    Условия:
+    1. Лот в статусе 'post_production'
+    2. Все батчи лота находятся в финальных статусах QC (good, defect)
+    """
+    try:
+        # Получаем информацию о лоте
+        lot = db.query(LotDB).filter(LotDB.id == lot_id).first()
+        if not lot:
+            logger.warning(f"Lot {lot_id} not found for auto-completion check")
+            return
+        
+        logger.info(f"Checking auto-completion for lot {lot_id} (current status: {lot.status})")
+        
+        # Проверяем только если лот в статусе 'post_production'
+        if lot.status != 'post_production':
+            logger.info(f"Lot {lot_id} is not in 'post_production' status, skipping auto-completion check")
+            return
+        
+        # Получаем все батчи лота
+        batches = db.query(BatchDB).filter(BatchDB.lot_id == lot_id).all()
+        if not batches:
+            logger.info(f"No batches found for lot {lot_id}, skipping auto-completion check")
+            return
+        
+        logger.info(f"Found {len(batches)} batches for lot {lot_id}")
+        
+        # Проверяем, что все батчи находятся в финальных статусах QC
+        # (good, defect, archived - финальные статусы, rework_repair - промежуточный)
+        final_qc_locations = ['good', 'defect', 'archived']
+        non_final_batches = [batch for batch in batches if batch.current_location not in final_qc_locations]
+        
+        if non_final_batches:
+            logger.info(f"Lot {lot_id} has {len(non_final_batches)} batches not in final QC status: {[b.current_location for b in non_final_batches]}")
+            return
+        
+        # Все батчи в финальных статусах - можно закрывать лот
+        logger.info(f"All batches for lot {lot_id} are in final QC status. Auto-closing lot.")
+        
+        # Закрываем лот
+        lot.status = 'closed'
+        db.commit()
+        
+        # Синхронизируем с Telegram-ботом
+        try:
+            logger.info(f"Attempting to sync lot {lot_id} status to Telegram bot")
+            await sync_lot_status_to_telegram_bot(lot_id, 'closed')
+            logger.info(f"Successfully synced lot {lot_id} status to Telegram bot")
+        except Exception as sync_error:
+            logger.error(f"Failed to sync lot auto-completion to Telegram bot: {sync_error}")
+            # Не прерываем выполнение, если синхронизация не удалась
+        
+        logger.info(f"Successfully auto-closed lot {lot_id}")
+        
+    except Exception as e:
+        logger.error(f"Error checking lot auto-completion for lot {lot_id}: {e}", exc_info=True)
+
 @app.post("/setups/{setup_id}/complete")
 async def complete_setup(setup_id: int, db: Session = Depends(get_db_session)):
     """
@@ -1076,6 +1136,16 @@ async def inspect_batch(batch_id: int, payload: InspectBatchPayload, db: Session
 
         db.commit()
 
+        # Проверяем автоматическое закрытие лота после создания финальных батчей
+        # (только для good и defect, rework_repair - промежуточный статус)
+        try:
+            logger.info(f"Calling check_lot_auto_completion for lot {batch.lot_id} after batch inspection")
+            await check_lot_auto_completion(batch.lot_id, db)
+            logger.info(f"Successfully completed check_lot_auto_completion for lot {batch.lot_id}")
+        except Exception as auto_completion_error:
+            logger.error(f"Error during auto-completion check for lot {batch.lot_id}: {auto_completion_error}")
+            # Не прерываем выполнение, если проверка авто-закрытия не удалась
+
         return {
             'success': True,
             'created_batch_ids': [b.id for b in created_batches]
@@ -1120,7 +1190,7 @@ async def move_batch(
         logger.info(f"Moving batch {batch.id} from {batch.current_location} to {target_location}")
 
         # Проверяем, перемещается ли батч в финальное состояние QC
-        final_qc_locations = ['good', 'defect', 'rework_repair']
+        final_qc_locations = ['good', 'defect']
         if target_location in final_qc_locations:
             # Если батч перемещается в финальное состояние, должен быть указан inspector_id
             if payload.inspector_id:
@@ -1150,6 +1220,14 @@ async def move_batch(
 
         db.commit()
         db.refresh(batch)
+
+        # Проверяем автоматическое закрытие лота, если батч перемещен в финальный статус QC
+        if target_location in ['good', 'defect', 'archived']:
+            try:
+                await check_lot_auto_completion(batch.lot_id, db)
+            except Exception as auto_completion_error:
+                logger.error(f"Error during auto-completion check for lot {batch.lot_id}: {auto_completion_error}")
+                # Не прерываем выполнение, если проверка авто-закрытия не удалась
 
         # Получаем связанные данные для ответа BatchViewItem
         lot = db.query(LotDB).filter(LotDB.id == batch.lot_id).first()
@@ -1392,7 +1470,7 @@ class LotStatus(str, Enum):
     NEW = "new"                    # Новый лот от Order Manager
     IN_PRODUCTION = "in_production"  # Лот в производстве (после начала наладки)
     POST_PRODUCTION = "post_production"  # Лот после производства (все наладки завершены)
-    COMPLETED = "completed"        # Завершенный лот
+    CLOSED = "closed"              # Закрытый лот (все батчи проверены и распределены)
     CANCELLED = "cancelled"        # Отмененный лот
     ACTIVE = "active"             # Устаревший статус (для совместимости)
 
@@ -1749,7 +1827,7 @@ async def update_lot_initial_quantity(
 @app.patch("/lots/{lot_id}/close", response_model=LotResponse, tags=["Lots"])
 async def close_lot(lot_id: int, db: Session = Depends(get_db_session)):
     """
-    Закрыть лот (перевести в статус 'completed').
+    Закрыть лот (перевести в статус 'closed').
     Доступно только для лотов в статусе 'post_production'.
     """
     try:
@@ -1766,7 +1844,7 @@ async def close_lot(lot_id: int, db: Session = Depends(get_db_session)):
             )
         
         # Обновляем статус лота
-        lot.status = 'completed'
+        lot.status = 'closed'
         db.commit()
         db.refresh(lot)
         
@@ -1774,7 +1852,7 @@ async def close_lot(lot_id: int, db: Session = Depends(get_db_session)):
         
         # Синхронизируем с Telegram-ботом
         try:
-            await sync_lot_status_to_telegram_bot(lot_id, 'completed')
+            await sync_lot_status_to_telegram_bot(lot_id, 'closed')
         except Exception as sync_error:
             logger.error(f"Failed to sync lot closure to Telegram bot: {sync_error}")
             # Не прерываем выполнение, если синхронизация не удалась
