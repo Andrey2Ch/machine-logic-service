@@ -150,6 +150,49 @@ async def root():
         "available_statuses": [status.value for status in SetupStatus]
     }
 
+# === NEW: Update program cycle time by drawing_number ===
+class ProgramCycleUpdate(BaseModel):
+    drawing_number: str
+    cycle_time_seconds: Optional[int] = None
+    cycle_time_minutes: Optional[float] = None
+
+@app.post("/programs/cycle-time", tags=["Parts"], summary="Update cycle time for active setups by drawing_number")
+async def update_program_cycle_time(payload: ProgramCycleUpdate, db: Session = Depends(get_db_session)):
+    try:
+        if not payload.drawing_number:
+            raise HTTPException(status_code=400, detail="drawing_number is required")
+
+        # Resolve seconds from either seconds or minutes
+        sec: Optional[int] = None
+        if payload.cycle_time_seconds is not None and payload.cycle_time_seconds > 0:
+            sec = int(payload.cycle_time_seconds)
+        elif payload.cycle_time_minutes is not None and payload.cycle_time_minutes > 0:
+            sec = int(round(payload.cycle_time_minutes * 60))
+        else:
+            raise HTTPException(status_code=400, detail="Provide cycle_time_seconds > 0 or cycle_time_minutes > 0")
+
+        # Find part by drawing_number
+        part = db.query(PartDB).filter(PartDB.drawing_number == payload.drawing_number).first()
+        if not part:
+            raise HTTPException(status_code=404, detail=f"Part with drawing_number '{payload.drawing_number}' not found")
+
+        # Update active setups for this part (those without end_time)
+        q = db.query(SetupDB).filter(SetupDB.part_id == part.id, SetupDB.end_time.is_(None))
+        updated = 0
+        for s in q.all():
+            s.cycle_time = sec
+            updated += 1
+
+        db.commit()
+        logger.info(f"Updated cycle_time for drawing {payload.drawing_number} to {sec}s across {updated} active setups")
+        return {"success": True, "updated": updated, "cycle_time_seconds": sec}
+    except HTTPException as http_e:
+        raise http_e
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error updating program cycle time: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error while updating program cycle time")
+
 @app.get("/setup/{machine_id}/status")
 async def get_setup_status(machine_id: int, db: Session = Depends(get_db_session)):
     """
