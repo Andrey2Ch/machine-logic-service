@@ -1662,16 +1662,31 @@ async def get_lots(
     Сортировка по убыванию ID лота (новые сверху).
     """
     query = db.query(LotDB).options(selectinload(LotDB.part))
-    
-    # Поиск по номеру лота
-    if search:
+
+    # Комбинированный поиск: если переданы оба параметра, используем OR
+    if search and part_search:
+        from sqlalchemy import or_  # локальный импорт для минимального изменения верхних импортов
         search_term = f"%{search.lower()}%"
-        query = query.filter(func.lower(LotDB.lot_number).like(search_term))
-    
-    # Поиск по номеру детали
-    if part_search:
         part_search_term = f"%{part_search.lower()}%"
-        query = query.join(LotDB.part).filter(func.lower(PartDB.drawing_number).like(part_search_term))
+        query = (
+            query
+            .outerjoin(LotDB.part)
+            .filter(
+                or_(
+                    func.lower(LotDB.lot_number).like(search_term),
+                    func.lower(PartDB.drawing_number).like(part_search_term)
+                )
+            )
+        )
+    else:
+        # Поиск по номеру лота
+        if search:
+            search_term = f"%{search.lower()}%"
+            query = query.filter(func.lower(LotDB.lot_number).like(search_term))
+        # Поиск по номеру детали
+        if part_search:
+            part_search_term = f"%{part_search.lower()}%"
+            query = query.join(LotDB.part).filter(func.lower(PartDB.drawing_number).like(part_search_term))
     
     # Фильтрация по статусам
     if status_filter:
