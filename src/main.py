@@ -16,6 +16,7 @@ from .routers import qc as qc_router
 from .routers import admin as admin_router
 from .routers import analytics as analytics_router
 from .routers import warehouse as warehouse_router
+from .routers import events as events_router
 from src.models.setup import SetupStatus, BatchLabelInfo
 from src.models.reports import LotSummaryReport, ProductionPerformanceReport, QualityReport
 from typing import Optional, Dict, List, Union
@@ -3558,6 +3559,7 @@ async def reset_cards_for_machine(payload: ResetCardsPayload, db: Session = Depe
         raise HTTPException(status_code=500, detail=f"Внутренняя ошибка сервера при сбросе карточек для станка {machine_name}")
 
 # Подключение роутеров
+app.include_router(events_router.router)
 app.include_router(lots_router.router)
 app.include_router(qc_router.router)
 app.include_router(admin_router.router)
