@@ -5,6 +5,17 @@ from .setup import SetupStatus
 from ..database import Base
 from sqlalchemy.sql import func
 
+class AreaDB(Base):
+    __tablename__ = "areas"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(255), unique=True, nullable=False)
+    code = Column(String(255), nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    machines = relationship("MachineDB", back_populates="area")
+
 class MachineDB(Base):
     __tablename__ = "machines"
 
@@ -13,9 +24,15 @@ class MachineDB(Base):
     type = Column(String(50))
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     is_active = Column(Boolean, default=True)
+    location_id = Column(Integer, ForeignKey("areas.id"), nullable=False)
+    serial_number = Column(String(255), nullable=True)
+    notes = Column(Text, nullable=True)
+    display_order = Column(Integer, nullable=True)
     
     # Добавляем связь с карточками
     cards = relationship("CardDB", back_populates="machine")
+    # Связь с area
+    area = relationship("AreaDB", back_populates="machines")
 
 class EmployeeDB(Base):
     __tablename__ = "employees"

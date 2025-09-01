@@ -17,6 +17,7 @@ from .routers import admin as admin_router
 from .routers import analytics as analytics_router
 from .routers import warehouse as warehouse_router
 from .routers import events as events_router
+from .routers import catalog as catalog_router
 from src.models.setup import SetupStatus, BatchLabelInfo
 from src.models.reports import LotSummaryReport, ProductionPerformanceReport, QualityReport
 from typing import Optional, Dict, List, Union
@@ -3565,3 +3566,4 @@ app.include_router(qc_router.router)
 app.include_router(admin_router.router)
 app.include_router(analytics_router.router)
 app.include_router(warehouse_router.router)
+app.include_router(catalog_router.router)
