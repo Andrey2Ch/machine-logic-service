@@ -1380,17 +1380,17 @@ async def get_warehouse_pending_batches(db: Session = Depends(get_db_session)):
 async def accept_batch_on_warehouse(batch_id: int, payload: AcceptWarehousePayload, db: Session = Depends(get_db_session)):
     """Принять батч на склад: обновить кол-во и статус."""
     try:
-        # Получаем батч и связанные сущности одним запросом для эффективности
+        # Получаем батч и связанные сущности одним запросом (OUTER JOIN'ы, чтобы не падать на отсутствующих связях)
         batch_data = db.query(BatchDB, LotDB, PartDB, MachineDB)\
-            .join(LotDB, BatchDB.lot_id == LotDB.id)\
-            .join(PartDB, LotDB.part_id == PartDB.id)\
-            .join(SetupDB, BatchDB.setup_job_id == SetupDB.id)\
-            .join(MachineDB, SetupDB.machine_id == MachineDB.id)\
+            .outerjoin(LotDB, BatchDB.lot_id == LotDB.id)\
+            .outerjoin(PartDB, LotDB.part_id == PartDB.id)\
+            .outerjoin(SetupDB, BatchDB.setup_job_id == SetupDB.id)\
+            .outerjoin(MachineDB, SetupDB.machine_id == MachineDB.id)\
             .filter(BatchDB.id == batch_id)\
             .first()
 
         if not batch_data:
-            raise HTTPException(status_code=404, detail="Batch not found or related Lot/Part/Machine missing")
+            raise HTTPException(status_code=404, detail="Batch not found")
         
         batch, lot, part, machine = batch_data
 
