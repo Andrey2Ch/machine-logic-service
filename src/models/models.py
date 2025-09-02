@@ -46,6 +46,22 @@ class EmployeeDB(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     added_by = Column(Integer)
     is_active = Column(Boolean, default=True)
+    # Default area for UI filtering
+    default_area_id = Column(Integer, ForeignKey("areas.id"), nullable=True)
+
+
+class EmployeeAreaRoleDB(Base):
+    __tablename__ = "employee_area_roles"
+
+    id = Column(Integer, primary_key=True, index=True)
+    employee_id = Column(Integer, ForeignKey("employees.id"), nullable=False)
+    area_id = Column(Integer, ForeignKey("areas.id"), nullable=False)
+    role = Column(String(50), nullable=False)  # e.g., 'operator', 'machinist', 'qa'
+
+    __table_args__ = (
+        # Unique per (employee, area, role)
+        CheckConstraint("length(role) > 0", name="check_employee_area_role_nonempty"),
+    )
 
 class PartDB(Base):
     __tablename__ = "parts"

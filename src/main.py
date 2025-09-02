@@ -18,6 +18,8 @@ from .routers import analytics as analytics_router
 from .routers import warehouse as warehouse_router
 from .routers import events as events_router
 from .routers import catalog as catalog_router
+from .routers import employees as employees_router
+from .routers import cards as cards_router
 from src.models.setup import SetupStatus, BatchLabelInfo
 from src.models.reports import LotSummaryReport, ProductionPerformanceReport, QualityReport
 from typing import Optional, Dict, List, Union
@@ -2467,26 +2469,22 @@ async def get_free_cards(
         raise HTTPException(status_code=500, detail="Internal server error while fetching free cards")
 
 @app.get("/cards/used", tags=["Cards"])
-async def get_used_cards(machine_id: int, db: Session = Depends(get_db_session)):
-    """Получить список используемых карточек для станка"""
+async def get_cards_state(machine_id: int, db: Session = Depends(get_db_session)):
+    """Возвращает полное состояние карточек (card_number, status, batch_id) для одного запроса фронту/боту."""
     try:
-        cards = db.execute(
+        rows = db.execute(
             text("""
-                SELECT c.card_number 
+                SELECT c.card_number, c.status, c.batch_id
                 FROM cards c
-                JOIN batches b ON c.batch_id = b.id
                 WHERE c.machine_id = :machine_id 
-                AND c.status = 'in_use'
-                AND b.current_location IN ('production', 'sorting')
                 ORDER BY c.card_number
             """), 
             {"machine_id": machine_id}
         ).fetchall()
-        
-        return {"cards": [card.card_number for card in cards]}
+        return {"cards": [{"card_number": r.card_number, "status": r.status, "batch_id": r.batch_id} for r in rows]}
     except Exception as e:
-        logger.error(f"Error fetching used cards for machine {machine_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error while fetching used cards")
+        logger.error(f"Error fetching cards state for machine {machine_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error while fetching cards state")
 
 @app.get("/cards/suggestions", tags=["Cards"])
 async def get_card_suggestions(
@@ -3567,3 +3565,5 @@ app.include_router(admin_router.router)
 app.include_router(analytics_router.router)
 app.include_router(warehouse_router.router)
 app.include_router(catalog_router.router)
+app.include_router(employees_router.router)
+app.include_router(cards_router.router)
