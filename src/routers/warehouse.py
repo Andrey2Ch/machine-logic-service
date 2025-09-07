@@ -68,10 +68,10 @@ class MachineOut(BaseModel):
 
 class BatchOut(BaseModel):
     id: int
-    initial_quantity: int
+    initial_quantity: Optional[int] = None
     operator_reported_quantity: Optional[int] = None
     recounted_quantity: Optional[int] = None
-    current_quantity: int
+    current_quantity: Optional[int] = None
     current_location: str
     created_at: Optional[datetime.datetime] = None
     batch_time: Optional[datetime.datetime] = None # Время производства батча
