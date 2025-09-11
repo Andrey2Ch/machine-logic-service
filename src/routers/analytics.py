@@ -164,13 +164,15 @@ async def lots_overview(
     try:
         q = db.query(LotDB).join(PartDB, PartDB.id == LotDB.part_id)
 
-        # Server-side status filter (overrides active_only)
+        # Exclude 'new' lots. If status_filter provided, ignore any 'new' passed in.
         if status_filter:
-            statuses = [s.strip() for s in status_filter.split(',') if s.strip()]
+            statuses = [s.strip() for s in status_filter.split(',') if s.strip() and s.strip() != 'new']
             if statuses:
                 q = q.filter(LotDB.status.in_(statuses))
-        elif active_only:
-            q = q.filter(LotDB.status.in_(['new', 'in_production', 'post_production']))
+            else:
+                q = q.filter(LotDB.status != 'new')
+        else:
+            q = q.filter(LotDB.status != 'new')
 
         # OM-like OR search across lot_number OR drawing_number
         if search and search.strip():
@@ -178,10 +180,16 @@ async def lots_overview(
             q = q.filter(or_(LotDB.lot_number.ilike(like), PartDB.drawing_number.ilike(like)))
         elif part_search and part_search.strip():
             q = q.filter(PartDB.drawing_number.ilike(f"%{part_search}%"))
+        # Date filtering by production start (first setup.start_time for the lot)
+        prod_start_sq = db.query(
+            SetupDB.lot_id.label('lot_id'),
+            func.min(SetupDB.start_time).label('prod_start')
+        ).group_by(SetupDB.lot_id).subquery()
+        q = q.outerjoin(prod_start_sq, prod_start_sq.c.lot_id == LotDB.id)
         if date_from:
-            q = q.filter(LotDB.created_at >= date_from)
+            q = q.filter(prod_start_sq.c.prod_start != None).filter(prod_start_sq.c.prod_start >= date_from)
         if date_to:
-            q = q.filter(LotDB.created_at <= date_to)
+            q = q.filter(prod_start_sq.c.prod_start != None).filter(prod_start_sq.c.prod_start <= date_to)
 
         total = q.count()
         offset = (page - 1) * per_page
