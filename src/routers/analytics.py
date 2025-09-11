@@ -7,12 +7,12 @@
 import logging
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, selectinload
-from sqlalchemy import text, func, bindparam
+from sqlalchemy import text, func, bindparam, or_
 from typing import List, Optional
 from datetime import datetime, timezone
 
 from ..database import get_db_session
-from ..models.models import LotDB, PartDB, SetupDB, BatchDB, EmployeeDB, MachineDB
+from ..models.models import LotDB, PartDB, SetupDB, BatchDB, EmployeeDB, MachineDB, AreaDB
 from ..models.reports import LotDetailReport
 from ..services.metrics import aggregates_for_lots, planned_resolved
 
@@ -152,6 +152,7 @@ async def lots_overview(
     active_only: bool = Query(True),
     search: Optional[str] = Query(None),
     part_search: Optional[str] = Query(None),
+    status_filter: Optional[str] = Query(None),
     date_from: Optional[datetime] = Query(None),
     date_to: Optional[datetime] = Query(None),
     db: Session = Depends(get_db_session),
@@ -162,11 +163,20 @@ async def lots_overview(
     """
     try:
         q = db.query(LotDB).join(PartDB, PartDB.id == LotDB.part_id)
-        if active_only:
+
+        # Server-side status filter (overrides active_only)
+        if status_filter:
+            statuses = [s.strip() for s in status_filter.split(',') if s.strip()]
+            if statuses:
+                q = q.filter(LotDB.status.in_(statuses))
+        elif active_only:
             q = q.filter(LotDB.status.in_(['new', 'in_production', 'post_production']))
-        if search:
-            q = q.filter(LotDB.lot_number.ilike(f"%{search}%"))
-        if part_search:
+
+        # OM-like OR search across lot_number OR drawing_number
+        if search and search.strip():
+            like = f"%{search}%"
+            q = q.filter(or_(LotDB.lot_number.ilike(like), PartDB.drawing_number.ilike(like)))
+        elif part_search and part_search.strip():
             q = q.filter(PartDB.drawing_number.ilike(f"%{part_search}%"))
         if date_from:
             q = q.filter(LotDB.created_at >= date_from)
@@ -211,6 +221,27 @@ async def lots_overview(
             ).fetchall()
             produced_map = { int(row.lot_id): int(row.reading or 0) for row in produced_rows }
 
+        # Machine/Area by latest setup per lot
+        machine_area_map = {}
+        if lot_ids:
+            latest_setup_sq = db.query(
+                SetupDB.lot_id.label('lot_id'),
+                func.max(SetupDB.id).label('setup_id')
+            ).filter(SetupDB.lot_id.in_(lot_ids)).group_by(SetupDB.lot_id).subquery()
+
+            ma_rows = db.query(
+                latest_setup_sq.c.lot_id,
+                MachineDB.name.label('machine_name'),
+                AreaDB.name.label('area_name')
+            ).join(SetupDB, SetupDB.id == latest_setup_sq.c.setup_id)
+            ma_rows = ma_rows.join(MachineDB, MachineDB.id == SetupDB.machine_id)
+            ma_rows = ma_rows.join(AreaDB, AreaDB.id == MachineDB.location_id)
+            for r in ma_rows.all():
+                machine_area_map[int(r.lot_id)] = {
+                    'machine_name': r.machine_name,
+                    'area_name': r.area_name,
+                }
+
         rows = []
         for l in lots:
             agg = aggs.get(l.id, {})
@@ -219,6 +250,9 @@ async def lots_overview(
                 'lot_number': l.lot_number,
                 'drawing_number': l.part.drawing_number if l.part else None,
                 'planned_total': planned_resolved(l.initial_planned_quantity, setup_totals.get(l.id)),
+                'status': l.status,
+                'machine_name': machine_area_map.get(l.id, {}).get('machine_name') if machine_area_map else None,
+                'area_name': machine_area_map.get(l.id, {}).get('area_name') if machine_area_map else None,
                 # Используем точное значение "Произведено" (последнее показание счётчика)
                 'operators_reported': produced_map.get(l.id, agg.get('operators_reported', 0)),
                 'warehouse_received': agg.get('warehouse_received', 0),
