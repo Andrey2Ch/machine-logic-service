@@ -5,15 +5,16 @@
 @created: 2024-07-31
 """
 import logging
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, selectinload
-from sqlalchemy import text
-from typing import List
+from sqlalchemy import text, func
+from typing import List, Optional
 from datetime import datetime, timezone
 
 from ..database import get_db_session
 from ..models.models import LotDB, PartDB, SetupDB, BatchDB, EmployeeDB, MachineDB
 from ..models.reports import LotDetailReport
+from ..services.metrics import aggregates_for_lots, planned_resolved
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Analytics"])
@@ -142,3 +143,73 @@ async def get_lot_analytics(lot_id: int, db: Session = Depends(get_db_session)):
     except Exception as e:
         logger.error(f"Ошибка при генерации детального отчета по лоту {lot_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Ошибка при генерации отчета: {str(e)}") 
+
+
+@router.get("/lots-overview")
+async def lots_overview(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1, le=500),
+    active_only: bool = Query(True),
+    search: Optional[str] = Query(None),
+    part_search: Optional[str] = Query(None),
+    date_from: Optional[datetime] = Query(None),
+    date_to: Optional[datetime] = Query(None),
+    db: Session = Depends(get_db_session),
+):
+    """
+    Агрегированный список лотов с метриками (ускоряет фронтенд).
+    Возвращает: rows, total, page, per_page, total_pages
+    """
+    try:
+        q = db.query(LotDB).join(PartDB, PartDB.id == LotDB.part_id)
+        if active_only:
+            q = q.filter(LotDB.status.in_(['new', 'in_production', 'post_production']))
+        if search:
+            q = q.filter(LotDB.lot_number.ilike(f"%{search}%"))
+        if part_search:
+            q = q.filter(PartDB.drawing_number.ilike(f"%{part_search}%"))
+        if date_from:
+            q = q.filter(LotDB.created_at >= date_from)
+        if date_to:
+            q = q.filter(LotDB.created_at <= date_to)
+
+        total = q.count()
+        offset = (page - 1) * per_page
+        lots = q.order_by(LotDB.created_at.desc()).offset(offset).limit(per_page).all()
+        lot_ids = [l.id for l in lots]
+
+        # planned: вычислить через setups
+        setup_totals = dict(
+            db.query(SetupDB.lot_id, func.max(SetupDB.planned_quantity + func.coalesce(SetupDB.additional_quantity, 0)))
+              .filter(SetupDB.lot_id.in_(lot_ids))
+              .group_by(SetupDB.lot_id)
+              .all()
+        ) if lot_ids else {}
+
+        aggs = aggregates_for_lots(db, lot_ids)
+
+        rows = []
+        for l in lots:
+            agg = aggs.get(l.id, {})
+            rows.append({
+                'id': l.id,
+                'lot_number': l.lot_number,
+                'drawing_number': l.part.drawing_number if l.part else None,
+                'planned_total': planned_resolved(l.initial_planned_quantity, setup_totals.get(l.id)),
+                'operators_reported': agg.get('operators_reported', 0),
+                'warehouse_received': agg.get('warehouse_received', 0),
+                'good_qty': agg.get('good_qty', 0),
+                'defect_qty': agg.get('defect_qty', 0),
+                'qa_inspector': agg.get('qa_inspector_name'),
+            })
+
+        return {
+            'rows': rows,
+            'total': total,
+            'page': page,
+            'per_page': per_page,
+            'total_pages': (total + per_page - 1) // per_page,
+        }
+    except Exception as e:
+        logger.error(f"lots_overview error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="lots_overview error")

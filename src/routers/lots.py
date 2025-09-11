@@ -7,7 +7,7 @@
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, selectinload
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, or_, func
 from typing import List, Optional
 from datetime import datetime
 import logging
@@ -270,3 +270,82 @@ async def update_lot_quantity(
         db.rollback()
         logger.error(f"Ошибка при обновлении количества лота {lot_id}: {e}")
         raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера") 
+
+@router.post("/backfill-total-planned", summary="Backfill lots.total_planned_quantity from setups")
+async def backfill_total_planned(db: Session = Depends(get_db_session)):
+    """
+    One-off helper: total_planned_quantity = COALESCE(MAX(setup.planned + additional), initial_planned_quantity)
+    Safe to run multiple times.
+    """
+    try:
+        subq = (
+            db.query(
+                SetupDB.lot_id.label("lot_id"),
+                func.max((SetupDB.planned_quantity + func.coalesce(SetupDB.additional_quantity, 0))).label("setup_total")
+            )
+            .group_by(SetupDB.lot_id)
+            .subquery()
+        )
+
+        BATCH_SIZE = 500
+        offset = 0
+        updated = 0
+        while True:
+            rows = (
+                db.query(LotDB, subq.c.setup_total)
+                .outerjoin(subq, LotDB.id == subq.c.lot_id)
+                .order_by(LotDB.id)
+                .offset(offset)
+                .limit(BATCH_SIZE)
+                .all()
+            )
+            if not rows:
+                break
+            for lot, setup_total in rows:
+                initial = lot.initial_planned_quantity or 0
+                resolved = setup_total if setup_total is not None else initial
+                if lot.total_planned_quantity != resolved:
+                    lot.total_planned_quantity = resolved
+                    updated += 1
+            db.commit()
+            offset += BATCH_SIZE
+
+        return {"updated": updated}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Backfill total_planned_quantity error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Backfill error")
+
+
+@router.post("/{lot_id:int}/sync-total-planned", summary="Sync lot.total_planned_quantity from its setups")
+async def sync_lot_total_planned(lot_id: int, db: Session = Depends(get_db_session)):
+    """
+    Пересчитывает total_planned_quantity лота на основе его сетапов:
+    total_planned_quantity = COALESCE(MAX(planned_quantity + COALESCE(additional_quantity,0)), initial_planned_quantity)
+    """
+    try:
+        lot = db.query(LotDB).filter(LotDB.id == lot_id).first()
+        if not lot:
+            raise HTTPException(status_code=404, detail="Лот не найден")
+
+        setup_total = (
+            db.query(func.max(SetupDB.planned_quantity + func.coalesce(SetupDB.additional_quantity, 0)))
+              .filter(SetupDB.lot_id == lot_id)
+              .scalar()
+        )
+        initial = lot.initial_planned_quantity or 0
+        resolved = setup_total if setup_total is not None else initial
+        lot.total_planned_quantity = resolved
+        db.commit()
+        return {
+            "lot_id": lot_id,
+            "initial_planned_quantity": initial,
+            "setup_total": setup_total,
+            "total_planned_quantity": lot.total_planned_quantity
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Sync total_planned_quantity error for lot {lot_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Sync error")
