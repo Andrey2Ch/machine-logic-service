@@ -7,7 +7,7 @@
 import logging
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, selectinload
-from sqlalchemy import text, func
+from sqlalchemy import text, func, bindparam
 from typing import List, Optional
 from datetime import datetime, timezone
 
@@ -188,6 +188,29 @@ async def lots_overview(
 
         aggs = aggregates_for_lots(db, lot_ids)
 
+        # 🧮 Быстрый расчёт "Произведено" (как в BatchDetails):
+        # берём последнее показание счётчика по каждому лоту одним запросом
+        produced_map = {}
+        if lot_ids:
+            produced_rows = db.execute(
+                text(
+                    """
+                    SELECT sj.lot_id AS lot_id, mr.reading AS reading
+                    FROM machine_readings mr
+                    JOIN setup_jobs sj ON mr.setup_job_id = sj.id
+                    WHERE sj.lot_id IN :lot_ids
+                      AND mr.created_at = (
+                        SELECT max(mr2.created_at)
+                        FROM machine_readings mr2
+                        JOIN setup_jobs sj2 ON mr2.setup_job_id = sj2.id
+                        WHERE sj2.lot_id = sj.lot_id
+                      )
+                    """
+                ).bindparams(bindparam('lot_ids', expanding=True)),
+                { 'lot_ids': lot_ids }
+            ).fetchall()
+            produced_map = { int(row.lot_id): int(row.reading or 0) for row in produced_rows }
+
         rows = []
         for l in lots:
             agg = aggs.get(l.id, {})
@@ -196,7 +219,8 @@ async def lots_overview(
                 'lot_number': l.lot_number,
                 'drawing_number': l.part.drawing_number if l.part else None,
                 'planned_total': planned_resolved(l.initial_planned_quantity, setup_totals.get(l.id)),
-                'operators_reported': agg.get('operators_reported', 0),
+                # Используем точное значение "Произведено" (последнее показание счётчика)
+                'operators_reported': produced_map.get(l.id, agg.get('operators_reported', 0)),
                 'warehouse_received': agg.get('warehouse_received', 0),
                 'good_qty': agg.get('good_qty', 0),
                 'defect_qty': agg.get('defect_qty', 0),
