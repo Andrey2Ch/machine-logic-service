@@ -97,14 +97,20 @@ async def create_setup(payload: CreateSetupPayload, db: Session = Depends(get_db
             employee_id=payload.employee_id,
             machine_id=payload.machine_id,
             lot_id=lot.id,
+            part_id=lot.part_id,
             planned_quantity=payload.planned_quantity,
             status='created'
         )
         db.add(setup)
 
-        # Перевод лота в производство
+        # Перевод лота в производство + фиксация момента создания наладки
         if lot.status == 'new':
             lot.status = 'in_production'
+        # Устанавливаем start_time для статуса 'created' как момент регистрации наладки
+        # (это нужно, чтобы витрина и бот видели чертеж сразу после регистрации)
+        if setup.status == 'created' and getattr(setup, 'start_time', None) is None:
+            from datetime import datetime
+            setup.start_time = datetime.utcnow()
 
         db.commit()
         db.refresh(setup)
