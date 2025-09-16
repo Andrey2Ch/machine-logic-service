@@ -10,7 +10,7 @@ from sqlalchemy import func
 
 # Относительные импорты для доступа к моделям и сессии БД
 from ..database import get_db_session
-from ..models.models import MachineDB, CardDB
+from ..models.models import MachineDB, CardDB, SetupDB, LotDB, PartDB
 
 # Настройка логгера
 logger = logging.getLogger(__name__)
@@ -65,3 +65,71 @@ async def reset_cards_for_machine(payload: ResetCardsPayload, db: Session = Depe
         db.rollback()
         logger.error(f"Error during emergency reset for machine {machine_name}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Внутренняя ошибка сервера при сбросе карточек для станка {machine_name}") 
+
+
+class CreateSetupPayload(BaseModel):
+    employee_id: int
+    machine_id: int
+    drawing_number: str
+    lot_number: str
+    planned_quantity: float
+
+
+@router.post("/setup/create", summary="Создать наладку по предсозданному лоту")
+async def create_setup(payload: CreateSetupPayload, db: Session = Depends(get_db_session)):
+    """
+    Создание наладки по предсозданному лоту (status='new').
+    Используется дашбордом (аналог save_setup_job в боте для варианта с предсозданным лотом).
+    """
+    try:
+        lot = (
+            db.query(LotDB)
+              .join(PartDB, PartDB.id == LotDB.part_id)
+              .filter(LotDB.lot_number == payload.lot_number)
+              .filter(PartDB.drawing_number == payload.drawing_number)
+              .filter(LotDB.status == 'new')
+              .first()
+        )
+        if not lot:
+            raise HTTPException(status_code=404, detail="Лот не найден или не 'new'")
+
+        setup = SetupDB(
+            employee_id=payload.employee_id,
+            machine_id=payload.machine_id,
+            lot_id=lot.id,
+            planned_quantity=payload.planned_quantity,
+            status='created'
+        )
+        db.add(setup)
+
+        # Перевод лота в производство
+        if lot.status == 'new':
+            lot.status = 'in_production'
+
+        db.commit()
+        db.refresh(setup)
+        return {"setup_id": setup.id, "status": setup.status}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Ошибка создания наладки: {e}")
+
+
+@router.post("/setup/{setup_id}/send-to-qc", summary="Отправить наладку в ОТК (pending_qc)")
+async def send_setup_to_qc(setup_id: int, db: Session = Depends(get_db_session)):
+    try:
+        setup = db.query(SetupDB).filter(SetupDB.id == setup_id).first()
+        if not setup:
+            raise HTTPException(status_code=404, detail="Наладка не найдена")
+        if setup.status != 'created':
+            raise HTTPException(status_code=400, detail=f"Ожидался статус 'created', текущий: '{setup.status}'")
+
+        setup.status = 'pending_qc'
+        db.commit()
+        return {"success": True, "status": setup.status}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Ошибка при отправке в ОТК: {e}")

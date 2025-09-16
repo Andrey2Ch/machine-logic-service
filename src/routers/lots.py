@@ -126,6 +126,48 @@ async def update_lot(
         logger.error(f"Ошибка при обновлении лота {lot_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Внутренняя ошибка сервера: {str(e)}")
 
+@router.get("/search-new")
+async def search_new_lots(
+    drawing_number: str = Query(..., description="Номер чертежа"),
+    limit: int = Query(5, ge=1, le=20, description="Максимум лотов в ответе"),
+    db: Session = Depends(get_db_session)
+):
+    """
+    Поиск предсозданных лотов для чертежа (status='new'), по аналогии с логикой бота.
+    Возвращает: id, lot_number, initial_planned_quantity, due_date, order_manager_name
+    """
+    try:
+        from ..models.models import PartDB, EmployeeDB
+        rows = (
+            db.query(
+                LotDB.id,
+                LotDB.lot_number,
+                LotDB.initial_planned_quantity,
+                LotDB.due_date,
+                EmployeeDB.full_name.label("order_manager_name")
+            )
+            .join(PartDB, PartDB.id == LotDB.part_id)
+            .outerjoin(EmployeeDB, EmployeeDB.id == LotDB.order_manager_id)
+            .filter(PartDB.drawing_number == drawing_number)
+            .filter(LotDB.status == 'new')
+            .order_by(LotDB.created_at.desc())
+            .limit(limit)
+            .all()
+        )
+        return [
+            {
+                "id": r.id,
+                "lot_number": r.lot_number,
+                "initial_planned_quantity": r.initial_planned_quantity,
+                "due_date": r.due_date.isoformat() if r.due_date else None,
+                "order_manager_name": r.order_manager_name,
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        logger.error(f"Ошибка поиска лотов для {drawing_number}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Ошибка поиска лотов")
+
 @router.delete("/{lot_id:int}", response_model=LotDeleteResponse)
 async def delete_lot(
     lot_id: int,
