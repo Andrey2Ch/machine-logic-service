@@ -3010,12 +3010,12 @@ async def get_daily_production_report(
                 m.name as machine_name,
                 
                 CASE 
-                    WHEN (DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') = :target_date 
-                          AND EXTRACT(HOUR FROM mr.created_at AT TIME ZONE 'Asia/Jerusalem') BETWEEN 6 AND 17) THEN 'morning'
-                    WHEN (DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') = :target_date 
-                          AND EXTRACT(HOUR FROM mr.created_at AT TIME ZONE 'Asia/Jerusalem') >= 18) 
-                         OR (DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') = :target_date + INTERVAL '1 day' 
-                             AND EXTRACT(HOUR FROM mr.created_at AT TIME ZONE 'Asia/Jerusalem') < 6) THEN 'evening'
+                    WHEN (DATE(mr.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem') = :target_date 
+                          AND EXTRACT(HOUR FROM (mr.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem')) BETWEEN 6 AND 17) THEN 'morning'
+                    WHEN (DATE(mr.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem') = :target_date 
+                          AND EXTRACT(HOUR FROM (mr.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem')) >= 18) 
+                         OR (DATE(mr.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem') = :target_date + INTERVAL '1 day' 
+                             AND EXTRACT(HOUR FROM (mr.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem')) < 6) THEN 'evening'
                     ELSE NULL
                 END as shift_type
                 
@@ -3025,15 +3025,15 @@ async def get_daily_production_report(
             JOIN setup_jobs sj ON mr.setup_job_id = sj.id
             WHERE (
                 -- Утренняя смена: 6:00-17:59 указанного дня (локальное время)
-                (DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') = :target_date 
-                 AND EXTRACT(HOUR FROM mr.created_at AT TIME ZONE 'Asia/Jerusalem') BETWEEN 6 AND 17)
+                (DATE(mr.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem') = :target_date 
+                 AND EXTRACT(HOUR FROM (mr.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem')) BETWEEN 6 AND 17)
                 OR
                 -- Вечерняя смена: 18:00-23:59 указанного дня и 0:00-5:59 следующего дня (локальное время)
-                (DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') = :target_date 
-                 AND EXTRACT(HOUR FROM mr.created_at AT TIME ZONE 'Asia/Jerusalem') >= 18)
+                (DATE(mr.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem') = :target_date 
+                 AND EXTRACT(HOUR FROM (mr.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem')) >= 18)
                 OR
-                (DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') = :target_date + INTERVAL '1 day' 
-                 AND EXTRACT(HOUR FROM mr.created_at AT TIME ZONE 'Asia/Jerusalem') <= 5)
+                (DATE(mr.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem') = :target_date + INTERVAL '1 day' 
+                 AND EXTRACT(HOUR FROM (mr.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem')) <= 5)
             )
             AND mr.setup_job_id IS NOT NULL
             -- ИСПРАВЛЕНО: включаем наладки активные в отчетный день (независимо от даты завершения)
@@ -3042,7 +3042,7 @@ async def get_daily_production_report(
                 (sj.status = 'started' AND sj.end_time IS NULL) 
                 OR 
                 -- Наладки, завершенные в отчетный день
-                (sj.status = 'completed' AND DATE(sj.end_time AT TIME ZONE 'Asia/Jerusalem') = :target_date)
+                (sj.status = 'completed' AND DATE(sj.end_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem') = :target_date)
                 OR
                 -- Наладки, которые были активны в отчетный день, но завершились позже
                 (sj.status = 'completed' 
@@ -3066,15 +3066,15 @@ async def get_daily_production_report(
                             WHERE mr.machine_id = m.id 
                             AND (
                                 -- Утренняя смена: 6:00-17:59 отчетного дня
-                                (DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') = :target_date 
-                                 AND EXTRACT(HOUR FROM mr.created_at AT TIME ZONE 'Asia/Jerusalem') BETWEEN 6 AND 17)
+                                (DATE(mr.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem') = :target_date 
+                                 AND EXTRACT(HOUR FROM (mr.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem')) BETWEEN 6 AND 17)
                                 OR
                                 -- Вечерняя смена: 18:00+ отчетного дня или до 5:59 следующего дня
-                                (DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') = :target_date 
-                                 AND EXTRACT(HOUR FROM mr.created_at AT TIME ZONE 'Asia/Jerusalem') >= 18)
+                                (DATE(mr.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem') = :target_date 
+                                 AND EXTRACT(HOUR FROM (mr.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem')) >= 18)
                                 OR
-                                (DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') = :target_date + INTERVAL '1 day' 
-                                 AND EXTRACT(HOUR FROM mr.created_at AT TIME ZONE 'Asia/Jerusalem') <= 5)
+                                (DATE(mr.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem') = :target_date + INTERVAL '1 day' 
+                                 AND EXTRACT(HOUR FROM (mr.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem')) <= 5)
                             )
                         )
                         OR
@@ -3091,7 +3091,7 @@ async def get_daily_production_report(
                             SELECT 1 FROM setup_jobs sj 
                             WHERE sj.machine_id = m.id 
                             AND sj.status = 'completed'
-                            AND DATE(sj.end_time AT TIME ZONE 'Asia/Jerusalem') = :target_date
+                            AND DATE(sj.end_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem') = :target_date
                         )
                         OR
                         -- Станки с наладками, которые были активны в отчетный день
@@ -3108,8 +3108,8 @@ async def get_daily_production_report(
                             (SELECT mr.reading
                              FROM machine_readings mr 
                              WHERE mr.machine_id = m.id 
-                               AND (mr.created_at AT TIME ZONE 'Asia/Jerusalem')::time < '06:00:00'::time
-                               AND DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') = :target_date
+                               AND (mr.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem')::time < '06:00:00'::time
+                               AND DATE(mr.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem') = :target_date
                              ORDER BY mr.created_at DESC 
                              LIMIT 1
                             ),
@@ -3117,7 +3117,7 @@ async def get_daily_production_report(
                             (SELECT mr.reading
                              FROM machine_readings mr 
                              WHERE mr.machine_id = m.id 
-                               AND DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') = :target_date - INTERVAL '1 day'
+                               AND DATE(mr.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem') = :target_date - INTERVAL '1 day'
                              ORDER BY mr.created_at DESC 
                              LIMIT 1
                             ),
@@ -3125,7 +3125,7 @@ async def get_daily_production_report(
                             (SELECT mr.reading
                              FROM machine_readings mr 
                              WHERE mr.machine_id = m.id 
-                               AND DATE(mr.created_at AT TIME ZONE 'Asia/Jerusalem') < :target_date
+                               AND DATE(mr.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem') < :target_date
                              ORDER BY mr.created_at DESC 
                              LIMIT 1
                             ),
@@ -3198,7 +3198,7 @@ async def get_daily_production_report(
                     (sj.status = 'started' AND sj.end_time IS NULL)
                     OR
                     -- ПРИОРИТЕТ 2: Наладки, завершенные в отчетный день
-                    (sj.status = 'completed' AND DATE(sj.end_time AT TIME ZONE 'Asia/Jerusalem') = :target_date)
+                    (sj.status = 'completed' AND DATE(sj.end_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem') = :target_date)
                     OR
                     -- ПРИОРИТЕТ 3: Наладки, которые были активны в отчетный день
                     (sj.status = 'completed' 
@@ -3355,9 +3355,9 @@ async def get_available_dates(
             SELECT 
                 -- если время < 06:00 локальное, относим к предыдущему дню (вечерняя смена)
                 CASE 
-                    WHEN EXTRACT(HOUR FROM mr.created_at AT TIME ZONE 'Asia/Jerusalem') < 6
-                         THEN (mr.created_at AT TIME ZONE 'Asia/Jerusalem' - INTERVAL '6 hour')::date
-                    ELSE (mr.created_at AT TIME ZONE 'Asia/Jerusalem')::date
+                    WHEN EXTRACT(HOUR FROM (mr.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem')) < 6
+                         THEN ((mr.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem') - INTERVAL '6 hour')::date
+                    ELSE (mr.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem')::date
                 END AS report_date
             FROM machine_readings mr
             JOIN employees e ON e.id = mr.employee_id
@@ -3413,7 +3413,7 @@ async def get_daily_completed_setups(
             FROM setup_jobs sj
             LEFT JOIN machine_readings mr ON sj.id = mr.setup_job_id
             WHERE sj.status = 'completed'
-                AND DATE(sj.end_time AT TIME ZONE 'Asia/Jerusalem') = :target_date
+                AND DATE(sj.end_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem') = :target_date
                 AND mr.setup_job_id IS NOT NULL
             ORDER BY sj.id, mr.created_at DESC
         ),
@@ -3438,7 +3438,7 @@ async def get_daily_completed_setups(
             LEFT JOIN employees e ON sj.employee_id = e.id
             LEFT JOIN last_readings lr ON sj.id = lr.setup_job_id
             WHERE sj.status = 'completed'
-                AND DATE(sj.end_time AT TIME ZONE 'Asia/Jerusalem') = :target_date
+                AND DATE(sj.end_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem') = :target_date
                 AND m.is_active = true
         )
         SELECT 
