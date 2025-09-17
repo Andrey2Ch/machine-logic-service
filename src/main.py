@@ -3504,6 +3504,94 @@ async def get_daily_completed_setups(
         raise HTTPException(status_code=500, detail=f"Ошибка при получении завершенных сетапов: {str(e)}")
 
 # ===================================================================
+# Allowed setups (QC approved) for a given date
+# ===================================================================
+
+@app.get("/daily-allowed-setups", tags=["Daily Reports"])
+async def get_daily_allowed_setups(
+    target_date: date = Query(default_factory=date.today, description="Дата для получения разрешенных (allowed) сетапов"),
+    db: Session = Depends(get_db_session)
+):
+    """
+    Получить сетапы, получившие разрешение ОТК (allowed) в выбранную дату (по IL времени).
+    Возвращает сокращенный набор полей, согласованный с UI.
+    """
+    try:
+        sql_query = text("""
+        WITH allowed_setups AS (
+            SELECT 
+                sj.id                      AS setup_job_id,
+                m.name                     AS machine_name,
+                p.drawing_number           AS part_code,
+                l.lot_number               AS lot_number,
+                sj.planned_quantity        AS planned_quantity,
+                sj.created_at              AS setup_created_at,
+                sj.qa_date                 AS setup_allowed_at,
+                em.full_name               AS machinist_name,
+                eq.full_name               AS qa_employee_name,
+                EXTRACT(EPOCH FROM (sj.qa_date - sj.created_at)) / 3600.0 AS duration_created_to_allowed_hours,
+                CASE 
+                  WHEN sj.pending_qc_date IS NOT NULL THEN EXTRACT(EPOCH FROM (sj.pending_qc_date - sj.created_at)) / 3600.0 
+                  ELSE NULL 
+                END AS duration_setup_hours,
+                CASE 
+                  WHEN sj.pending_qc_date IS NOT NULL THEN EXTRACT(EPOCH FROM (sj.qa_date - sj.pending_qc_date)) / 3600.0 
+                  ELSE NULL 
+                END AS duration_qc_hours
+            FROM setup_jobs sj
+            JOIN machines m ON m.id = sj.machine_id
+            LEFT JOIN parts p ON p.id = sj.part_id
+            LEFT JOIN lots l ON l.id = sj.lot_id
+            LEFT JOIN employees em ON em.id = sj.employee_id
+            LEFT JOIN employees eq ON eq.id = sj.qa_id
+            WHERE sj.status = 'allowed'
+              AND sj.qa_date IS NOT NULL
+              AND DATE(sj.qa_date AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem') = :target_date
+        )
+        SELECT 
+            setup_job_id,
+            machine_name,
+            COALESCE(part_code, '-') AS part_code,
+            COALESCE(lot_number, '-') AS lot_number,
+            planned_quantity,
+            setup_created_at,
+            setup_allowed_at,
+            COALESCE(machinist_name, '-') AS machinist_name,
+            COALESCE(qa_employee_name, '-') AS qa_employee_name,
+            duration_created_to_allowed_hours,
+            duration_setup_hours,
+            duration_qc_hours
+        FROM allowed_setups
+        ORDER BY setup_allowed_at DESC
+        """)
+
+        rows = db.execute(sql_query, {"target_date": target_date}).fetchall()
+        result = []
+        for r in rows:
+            result.append({
+                "setup_job_id": r.setup_job_id,
+                "machine_name": r.machine_name,
+                "part_code": r.part_code,
+                "lot_number": r.lot_number,
+                "planned_quantity": int(r.planned_quantity) if r.planned_quantity is not None else 0,
+                "setup_created_at": r.setup_created_at,
+                "setup_allowed_at": r.setup_allowed_at,
+                "machinist_name": r.machinist_name,
+                "qa_employee_name": r.qa_employee_name,
+                "duration_created_to_allowed_hours": float(r.duration_created_to_allowed_hours) if r.duration_created_to_allowed_hours is not None else None,
+                "duration_setup_hours": float(r.duration_setup_hours) if r.duration_setup_hours is not None else None,
+                "duration_qc_hours": float(r.duration_qc_hours) if r.duration_qc_hours is not None else None,
+            })
+
+        return {
+            "date": str(target_date),
+            "total_allowed_setups": len(result),
+            "allowed_setups": result
+        }
+    except Exception as e:
+        logger.error(f"Ошибка при получении allowed сетапов: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ошибка при получении allowed сетапов: {str(e)}")
+# ===================================================================
 
 # ===================================================================
 # ВНИМАНИЕ! Файл main.py перегружен. НЕ ДОБАВЛЯЙТЕ сюда новый код.

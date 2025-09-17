@@ -132,6 +132,8 @@ async def send_setup_to_qc(setup_id: int, db: Session = Depends(get_db_session))
             raise HTTPException(status_code=400, detail=f"Ожидался статус 'created', текущий: '{setup.status}'")
 
         setup.status = 'pending_qc'
+        # фиксируем момент передачи в ОТК
+        setup.pending_qc_date = datetime.now()
         db.commit()
         return {"success": True, "status": setup.status}
     except HTTPException:
