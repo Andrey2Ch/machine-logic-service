@@ -16,6 +16,7 @@ from .routers import qc as qc_router
 from .routers import admin as admin_router
 from .routers import analytics as analytics_router
 from .routers import warehouse as warehouse_router
+from .routers.warehouse import convert_to_israel_timezone
 from .routers import events as events_router
 from .routers import catalog as catalog_router
 from .routers import employees as employees_router
@@ -463,7 +464,7 @@ async def get_machine_readings(machine_id: int, db: Session = Depends(get_db_ses
     """
     # ИСПРАВЛЕНО: Берем показания только для активной наладки
     readings = db.execute(text("""
-        SELECT mr.id, mr.employee_id, mr.reading, mr.created_at
+        SELECT mr.id, mr.employee_id, mr.reading, mr.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem' as created_at
         FROM machine_readings mr
         JOIN setup_jobs sj ON mr.setup_job_id = sj.id
         WHERE sj.machine_id = :machine_id
@@ -759,7 +760,7 @@ async def get_operator_machines_view(db: Session = Depends(get_db_session)):
                 mr.setup_job_id,
                 mr.machine_id,
                 mr.reading, 
-                mr.created_at,
+                mr.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem' as created_at,
                 ROW_NUMBER() OVER (PARTITION BY mr.setup_job_id ORDER BY mr.created_at DESC) as rn
             FROM machine_readings mr
             WHERE mr.setup_job_id IS NOT NULL
@@ -1364,7 +1365,7 @@ async def get_warehouse_pending_batches(db: Session = Depends(get_db_session)):
                 'drawing_number': drawing_number,
                 'lot_number': lot_number,
                 'current_quantity': batch_obj.current_quantity,
-                'batch_time': batch_obj.batch_time,
+                'batch_time': convert_to_israel_timezone(batch_obj.batch_time),
                 'operator_name': operator_name,
                 'machine_name': machine_name,
                 'card_number': card_number,
