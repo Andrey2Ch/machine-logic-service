@@ -3544,8 +3544,19 @@ async def get_daily_allowed_setups(
             LEFT JOIN lots l ON l.id = sj.lot_id
             LEFT JOIN employees em ON em.id = sj.employee_id
             LEFT JOIN employees eq ON eq.id = sj.qa_id
-            WHERE sj.qa_date IS NOT NULL
-              AND DATE(sj.qa_date AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem') = :target_date
+            WHERE (
+                -- Классический случай: есть qa_date в выбранный день (IL)
+                (sj.qa_date IS NOT NULL
+                 AND DATE(sj.qa_date AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem') = :target_date)
+                OR
+                -- Расширенный случай: qa_date ещё нет, но QA уже указан и сетап создан/запущен в выбранный день (IL)
+                (sj.qa_date IS NULL
+                 AND sj.qa_id IS NOT NULL
+                 AND (
+                      DATE(sj.created_at  AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem') = :target_date
+                   OR DATE(sj.start_time  AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem') = :target_date
+                 ))
+            )
         )
         SELECT 
             setup_job_id,
