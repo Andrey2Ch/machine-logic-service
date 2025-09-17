@@ -464,7 +464,7 @@ async def get_machine_readings(machine_id: int, db: Session = Depends(get_db_ses
     """
     # ИСПРАВЛЕНО: Берем показания только для активной наладки
     readings = db.execute(text("""
-        SELECT mr.id, mr.employee_id, mr.reading, mr.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem' as created_at
+        SELECT mr.id, mr.employee_id, mr.reading, mr.created_at AT TIME ZONE 'Asia/Jerusalem' as created_at
         FROM machine_readings mr
         JOIN setup_jobs sj ON mr.setup_job_id = sj.id
         WHERE sj.machine_id = :machine_id
@@ -760,7 +760,7 @@ async def get_operator_machines_view(db: Session = Depends(get_db_session)):
                 mr.setup_job_id,
                 mr.machine_id,
                 mr.reading, 
-                mr.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem' as created_at,
+                mr.created_at AT TIME ZONE 'Asia/Jerusalem' as created_at,
                 ROW_NUMBER() OVER (PARTITION BY mr.setup_job_id ORDER BY mr.created_at DESC) as rn
             FROM machine_readings mr
             WHERE mr.setup_job_id IS NOT NULL
