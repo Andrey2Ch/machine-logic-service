@@ -3544,8 +3544,7 @@ async def get_daily_allowed_setups(
             LEFT JOIN lots l ON l.id = sj.lot_id
             LEFT JOIN employees em ON em.id = sj.employee_id
             LEFT JOIN employees eq ON eq.id = sj.qa_id
-            WHERE sj.status = 'allowed'
-              AND sj.qa_date IS NOT NULL
+            WHERE sj.qa_date IS NOT NULL
               AND DATE(sj.qa_date AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem') = :target_date
         )
         SELECT 
