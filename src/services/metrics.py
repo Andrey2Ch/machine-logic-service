@@ -5,19 +5,25 @@ from ..models.models import BatchDB, SetupDB, EmployeeDB
 
 # --- Runtime SQL capture (TEXT2SQL) ---
 import os
+import logging
 import socket
 from sqlalchemy import event, text as sa_text
 from src.database import engine
 
 _capture_installed = False
+_log = logging.getLogger("text2sql.capture")
 
 def install_sql_capture(route_getter=None, user_getter=None, role_getter=None):
     global _capture_installed
     if _capture_installed:
+        _log.info("capture: already installed")
         return
     if engine is None:
+        _log.warning("capture: engine is None, skip")
         return
-    if os.getenv('TEXT2SQL_CAPTURE', '0').lower() not in {'1', 'true', 'yes'}:
+    env_flag = os.getenv('TEXT2SQL_CAPTURE', '0').lower()
+    if env_flag not in {'1', 'true', 'yes'}:
+        _log.info(f"capture: disabled by env TEXT2SQL_CAPTURE={env_flag}")
         return
 
     host = socket.gethostname()
@@ -76,7 +82,11 @@ def install_sql_capture(route_getter=None, user_getter=None, role_getter=None):
                 'host': host,
             })
         except Exception:
+            _log.exception("capture: failed to insert record")
             pass
+
+    _capture_installed = True
+    _log.info("capture: installed (TEXT2SQL_CAPTURE=1)")
 
 
 def aggregates_for_lots(db: Session, lot_ids: list[int]):
