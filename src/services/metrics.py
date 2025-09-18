@@ -79,8 +79,6 @@ def install_sql_capture(route_getter=None, user_getter=None, role_getter=None):
 
             if len(stmt) > 4000:
                 stmt = stmt[:4000]
-            if params_json and len(params_json) > 2000:
-                params_json = params_json[:2000]
 
             # Пишем через отдельное соединение/транзакцию, чтобы не портить основную
             try:
