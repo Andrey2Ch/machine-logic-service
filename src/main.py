@@ -39,6 +39,7 @@ from src.services.notification_service import send_setup_approval_notifications,
 from sqlalchemy import func, desc, case, text, or_, and_
 from sqlalchemy.exc import IntegrityError
 from src.services.metrics import install_sql_capture
+from sqlalchemy import text as sa_text
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +200,73 @@ async def update_program_cycle_time(payload: ProgramCycleUpdate, db: Session = D
         db.rollback()
         logger.error(f"Error updating program cycle time: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error while updating program cycle time")
+
+# --- Captured SQL (Text2SQL runtime capture) ---
+class CapturedFilter(BaseModel):
+    q: Optional[str] = None
+    kind: Optional[str] = Field(None, description="select|dml|all")
+    route: Optional[str] = None
+    role: Optional[str] = None
+    min_ms: Optional[int] = None
+    since_hours: Optional[int] = Field(None, description="lookback window in hours")
+
+@app.get("/api/text2sql/captured", tags=["Text2SQL"], summary="List captured SQL with filters")
+async def list_captured(
+    q: Optional[str] = Query(None),
+    kind: Optional[str] = Query("all"),
+    route: Optional[str] = Query(None),
+    role: Optional[str] = Query(None),
+    min_ms: Optional[int] = Query(None, ge=0),
+    since_hours: Optional[int] = Query(24, ge=0, le=24*90),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+    db: Session = Depends(get_db_session)
+):
+    try:
+        where = ["1=1"]
+        params: dict[str, object] = {}
+        if since_hours is not None and since_hours > 0:
+            where.append("captured_at >= now() - (:since_hours || ' hours')::interval")
+            params["since_hours"] = since_hours
+        if q:
+            where.append("lower(sql) like :q")
+            params["q"] = f"%{q.lower()}%"
+        if route:
+            where.append("route = :route")
+            params["route"] = route
+        if role:
+            where.append("role = :role")
+            params["role"] = role
+        if min_ms is not None:
+            where.append("coalesce(duration_ms,0) >= :min_ms")
+            params["min_ms"] = min_ms
+        if kind and kind.lower() == "select":
+            where.append("lower(sql) like 'select %'")
+        elif kind and kind.lower() == "dml":
+            where.append("(lower(sql) like 'insert %' or lower(sql) like 'update %' or lower(sql) like 'delete %')")
+        # убрать самозаписи
+        where.append("lower(sql) not like 'insert into text2sql_captured%'")
+
+        where_sql = " and ".join(where)
+        base = f"""
+            select id, captured_at, duration_ms, rows_affected, route, user_id, role, sql
+            from text2sql_captured
+            where {where_sql}
+            order by captured_at desc
+            offset :skip limit :limit
+        """
+        params.update({"skip": skip, "limit": limit})
+
+        rows = db.execute(sa_text(base), params).mappings().all()
+
+        # total count (approx)
+        cnt_sql = f"select count(*) as c from text2sql_captured where {where_sql}"
+        total = db.execute(sa_text(cnt_sql), {k: v for k, v in params.items() if k not in {"skip", "limit"}}).scalar() or 0
+
+        return {"items": [dict(r) for r in rows], "total": int(total)}
+    except Exception as e:
+        logger.error(f"Error listing captured SQL: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal error while listing captured SQL")
 
 @app.get("/setup/{machine_id}/status")
 async def get_setup_status(machine_id: int, db: Session = Depends(get_db_session)):
