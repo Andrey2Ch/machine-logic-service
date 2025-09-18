@@ -80,25 +80,32 @@ def install_sql_capture(route_getter=None, user_getter=None, role_getter=None):
             if len(stmt) > 4000:
                 stmt = stmt[:4000]
 
-            # Пишем через отдельное соединение/транзакцию, чтобы не портить основную
+            # Пишем в рамках текущего соединения через SAVEPOINT (без нового коннекта)
+            payload = {
+                'sql': stmt,
+                'params_json': PgJson(params_obj) if (PgJson and params_obj is not None) else None,
+                'duration_ms': duration_ms,
+                'rows': cursor.rowcount if hasattr(cursor, 'rowcount') else None,
+                'route': route,
+                'user_id': user_id,
+                'role': role,
+                'host': host,
+            }
+            nested = None
             try:
-                with db.engine.begin() as c2:  # type: ignore
-                    payload = {
-                        'sql': stmt,
-                        'params_json': PgJson(params_obj) if (PgJson and params_obj is not None) else None,
-                        'duration_ms': duration_ms,
-                        'rows': cursor.rowcount if hasattr(cursor, 'rowcount') else None,
-                        'route': route,
-                        'user_id': user_id,
-                        'role': role,
-                        'host': host,
-                    }
-                    c2.execute(sa_text(
-                        "insert into text2sql_captured(sql, params_json, duration_ms, rows_affected, route, user_id, role, source_host) "
-                        "values (:sql, :params_json, :duration_ms, :rows, :route, :user_id, :role, :host)"
-                    ), payload)
+                nested = conn.begin_nested()
+                conn.execute(sa_text(
+                    "insert into text2sql_captured(sql, params_json, duration_ms, rows_affected, route, user_id, role, source_host) "
+                    "values (:sql, :params_json, :duration_ms, :rows, :route, :user_id, :role, :host)"
+                ), payload)
+                nested.commit()
             except Exception:
-                _log.exception("capture: failed to insert record (isolated)")
+                if nested is not None:
+                    try:
+                        nested.rollback()
+                    except Exception:
+                        pass
+                _log.exception("capture: failed to insert record (savepoint)")
                 # не пробрасываем
         except Exception:
             _log.exception("capture: failed to insert record")
