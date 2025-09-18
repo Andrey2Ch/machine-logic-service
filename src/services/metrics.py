@@ -8,7 +8,7 @@ import os
 import logging
 import socket
 from sqlalchemy import event, text as sa_text
-from src.database import engine
+import src.database as db  # важно: брать engine динамически из модуля
 
 _capture_installed = False
 _log = logging.getLogger("text2sql.capture")
@@ -18,7 +18,7 @@ def install_sql_capture(route_getter=None, user_getter=None, role_getter=None):
     if _capture_installed:
         _log.info("capture: already installed")
         return
-    if engine is None:
+    if db.engine is None:
         _log.warning("capture: engine is None, skip")
         return
     env_flag = os.getenv('TEXT2SQL_CAPTURE', '0').lower()
@@ -28,14 +28,14 @@ def install_sql_capture(route_getter=None, user_getter=None, role_getter=None):
 
     host = socket.gethostname()
 
-    @event.listens_for(engine, "before_cursor_execute")
+    @event.listens_for(db.engine, "before_cursor_execute")
     def before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
         try:
             context._t2s_start = os.times()[4]
         except Exception:
             context._t2s_start = None
 
-    @event.listens_for(engine, "after_cursor_execute")
+    @event.listens_for(db.engine, "after_cursor_execute")
     def after_cursor_execute(conn, cursor, statement, parameters, context, executemany):
         try:
             stmt = (statement or '').strip()
