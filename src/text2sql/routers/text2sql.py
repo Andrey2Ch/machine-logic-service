@@ -130,6 +130,117 @@ def get_security_info():
     }
 
 
+class SuggestQuestionRequest(BaseModel):
+    sql: str
+    language: str | None = "ru"  # 'ru' | 'en' | 'he'
+    includeEnHe: bool | None = True
+    style: str | None = "business"  # 'business' | 'casual' | 'technical'
+    maxLen: int | None = 200
+    timezone: str | None = "Asia/Jerusalem"
+    dateFormat: str | None = None
+    redactLiterals: bool | None = True
+    stripSecrets: bool | None = True
+    domain: str | None = None
+    glossary: list[str] | None = None
+
+
+def _sanitize_sql_literals(sql: str) -> str:
+    # Грубое скрытие литералов: числа и строки → плейсхолдеры
+    s = re.sub(r"'(?:''|[^'])*'", "'<значение>'", sql)
+    s = re.sub(r"\b\d+\b", "<N>", s)
+    return s
+
+
+def _detect_kind(sql: str) -> str:
+    s = sql.strip().lower()
+    if s.startswith("insert") or s.startswith("update") or s.startswith("delete") or s.startswith("merge"):
+        return "dml"
+    return "select"
+
+
+def _ru_from_sql(sql: str) -> tuple[str, list[str]]:
+    """Очень простой эвристический генератор вопроса на русском из SQL."""
+    hints: list[str] = []
+    s = re.sub(r"\s+", " ", sql.strip(), flags=re.MULTILINE)
+    low = s.lower()
+
+    if _detect_kind(low) != "select":
+        return ("Что делает этот DML-запрос? (выполняет изменение данных)", ["DML: не формируем точный вопрос"]) 
+
+    # SELECT list
+    m_select = re.search(r"select (.+?) from ", low)
+    select_expr = (m_select.group(1).strip() if m_select else "*")
+    if "count(" in select_expr:
+        base_q = "Сколько записей ...?"
+    elif "sum(" in select_expr:
+        base_q = "Какова суммарная величина ...?"
+    elif "avg(" in select_expr:
+        base_q = "Каково среднее значение ...?"
+    else:
+        base_q = "Какие данные ...?"
+
+    # FROM target(s)
+    m_from = re.search(r" from (.+?)( where | group by | order by | limit |$)", low)
+    from_expr = (m_from.group(1).strip() if m_from else "таблиц")
+    from_expr = re.sub(r"\s+join\s+", ", ", from_expr)
+    hints.append(f"FROM: {from_expr}")
+
+    # WHERE filters
+    m_where = re.search(r" where (.+?)( group by | order by | limit |$)", low)
+    filters = m_where.group(1).strip() if m_where else ""
+    if filters:
+        # Упростим
+        filt = re.sub(r"\s+and\s+", "; ", filters)
+        filt = re.sub(r"\s+or\s+", "; ", filt)
+        hints.append(f"Фильтр: {filt}")
+
+    # GROUP BY
+    if re.search(r" group by ", low):
+        base_q = base_q.replace("...", "... по группам (group by)")
+        hints.append("Группировка: есть GROUP BY")
+
+    # ORDER/LIMIT → ТОП-N
+    m_limit = re.search(r" limit\s+(\d+)", low)
+    if m_limit:
+        n = m_limit.group(1)
+        hints.append(f"LIMIT: {n}")
+        if re.search(r" order by ", low):
+            base_q = f"Топ-{n}: {base_q[0].lower() + base_q[1:]}"
+
+    # Итоговая формулировка
+    question = f"{base_q} (из {from_expr})"
+    question = re.sub(r"\s+", " ", question).strip()
+    return (question, hints)
+
+
+@router.post("/suggest_question")
+def suggest_question(payload: SuggestQuestionRequest):
+    try:
+        sql = payload.sql or ""
+        if payload.stripSecrets:
+            sql = re.sub(r"--.*$", "", sql, flags=re.MULTILINE)
+            sql = re.sub(r"/\*.*?\*/", "", sql, flags=re.DOTALL)
+        if payload.redactLiterals:
+            sql = _sanitize_sql_literals(sql)
+
+        q_ru, hints = _ru_from_sql(sql)
+        # Ограничение длины
+        max_len = payload.maxLen or 200
+        if len(q_ru) > max_len:
+            q_ru = q_ru[: max_len - 1] + "…"
+
+        result = { "question_ru": q_ru, "hints": hints }
+
+        if payload.includeEnHe:
+            # Простые заглушки; можно позже заменить на LLM‑перевод
+            result["question_en"] = "Auto-suggested question (EN) for provided SQL"
+            result["question_he"] = "שאלה מוצעת אוטומטית (HE) עבור ה-SQL"
+
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"suggest_question failed: {e}")
+
+
 # --- RAG-lite загрузка контекста ---
 def _read_file_utf8(path: str) -> str:
     try:
