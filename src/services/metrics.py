@@ -9,6 +9,11 @@ import logging
 import socket
 from sqlalchemy import event, text as sa_text
 import src.database as db  # важно: брать engine динамически из модуля
+from typing import Any
+try:
+    from psycopg2.extras import Json as PgJson  # адаптация JSON для psycopg2
+except Exception:  # на всякий
+    PgJson = None  # type: ignore
 
 _capture_installed = False
 _log = logging.getLogger("text2sql.capture")
@@ -53,11 +58,20 @@ def install_sql_capture(route_getter=None, user_getter=None, role_getter=None):
                 pass
 
             import json
-            params_json = None
+            params_obj: Any = None
             try:
-                params_json = json.dumps(parameters, ensure_ascii=False) if parameters else None
+                # оставим исходный объект параметров, если сериализуемо
+                if parameters:
+                    # попытка привести к dict/list
+                    if isinstance(parameters, (dict, list, tuple)):
+                        json.dumps(parameters)  # проверка сериализации
+                        params_obj = parameters
+                    else:
+                        params_obj = None
+                else:
+                    params_obj = None
             except Exception:
-                params_json = None
+                params_obj = None
 
             route = route_getter() if route_getter else None
             user_id = user_getter() if user_getter else None
@@ -68,19 +82,26 @@ def install_sql_capture(route_getter=None, user_getter=None, role_getter=None):
             if params_json and len(params_json) > 2000:
                 params_json = params_json[:2000]
 
-            conn.execute(sa_text(
-                "insert into text2sql_captured(sql, params_json, duration_ms, rows_affected, route, user_id, role, source_host) "
-                "values (:sql, :params_json::jsonb, :duration_ms, :rows, :route, :user_id, :role, :host)"
-            ), {
-                'sql': stmt,
-                'params_json': params_json,
-                'duration_ms': duration_ms,
-                'rows': cursor.rowcount if hasattr(cursor, 'rowcount') else None,
-                'route': route,
-                'user_id': user_id,
-                'role': role,
-                'host': host,
-            })
+            # Пишем через отдельное соединение/транзакцию, чтобы не портить основную
+            try:
+                with db.engine.begin() as c2:  # type: ignore
+                    payload = {
+                        'sql': stmt,
+                        'params_json': PgJson(params_obj) if (PgJson and params_obj is not None) else None,
+                        'duration_ms': duration_ms,
+                        'rows': cursor.rowcount if hasattr(cursor, 'rowcount') else None,
+                        'route': route,
+                        'user_id': user_id,
+                        'role': role,
+                        'host': host,
+                    }
+                    c2.execute(sa_text(
+                        "insert into text2sql_captured(sql, params_json, duration_ms, rows_affected, route, user_id, role, source_host) "
+                        "values (:sql, :params_json, :duration_ms, :rows, :route, :user_id, :role, :host)"
+                    ), payload)
+            except Exception:
+                _log.exception("capture: failed to insert record (isolated)")
+                # не пробрасываем
         except Exception:
             _log.exception("capture: failed to insert record")
             pass
