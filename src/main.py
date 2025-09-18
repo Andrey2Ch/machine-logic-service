@@ -38,6 +38,7 @@ import aiohttp
 from src.services.notification_service import send_setup_approval_notifications, send_batch_discrepancy_alert
 from sqlalchemy import func, desc, case, text, or_, and_
 from sqlalchemy.exc import IntegrityError
+from src.services.metrics import install_sql_capture
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,7 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup_event():
     initialize_database()
+    install_sql_capture()  # включит runtime-capture при TEXT2SQL_CAPTURE=1
     # Здесь можно добавить другие действия при старте, если нужно
 
 # Pydantic модели для Деталей (Parts)
@@ -3666,3 +3668,5 @@ app.include_router(warehouse_router.router)
 app.include_router(catalog_router.router)
 app.include_router(employees_router.router)
 app.include_router(cards_router.router)
+from .text2sql.routers import router as text2sql_router
+app.include_router(text2sql_router)

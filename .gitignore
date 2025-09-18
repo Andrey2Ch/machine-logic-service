@@ -37,3 +37,9 @@ out/
 # Cache
 .cache/
 .npm/
+
+# Text2SQL harvested data (do not commit large corpora)
+src/text2sql/knowledge/harvest/
+src/text2sql/knowledge/harvest/**
+src/text2sql/knowledge/**/pairs/**/examples-*.jsonl
+src/text2sql/knowledge/**/pairs/**/examples-with-questions-*.jsonl

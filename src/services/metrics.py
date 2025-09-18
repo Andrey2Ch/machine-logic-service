@@ -3,6 +3,82 @@ from sqlalchemy import func
 from ..models.models import BatchDB, SetupDB, EmployeeDB
 
 
+# --- Runtime SQL capture (TEXT2SQL) ---
+import os
+import socket
+from sqlalchemy import event, text as sa_text
+from src.database import engine
+
+_capture_installed = False
+
+def install_sql_capture(route_getter=None, user_getter=None, role_getter=None):
+    global _capture_installed
+    if _capture_installed:
+        return
+    if engine is None:
+        return
+    if os.getenv('TEXT2SQL_CAPTURE', '0').lower() not in {'1', 'true', 'yes'}:
+        return
+
+    host = socket.gethostname()
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+        try:
+            context._t2s_start = os.times()[4]
+        except Exception:
+            context._t2s_start = None
+
+    @event.listens_for(engine, "after_cursor_execute")
+    def after_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+        try:
+            stmt = (statement or '').strip()
+            head = stmt.split(None, 1)[0].lower() if stmt else ''
+            if head not in {'select','insert','update','delete','create','alter','drop','truncate','grant','revoke'}:
+                return
+            if head in {'set','commit','begin'}:
+                return
+
+            duration_ms = None
+            try:
+                if getattr(context, '_t2s_start', None) is not None:
+                    duration_ms = int((os.times()[4] - context._t2s_start) * 1000)
+            except Exception:
+                pass
+
+            import json
+            params_json = None
+            try:
+                params_json = json.dumps(parameters, ensure_ascii=False) if parameters else None
+            except Exception:
+                params_json = None
+
+            route = route_getter() if route_getter else None
+            user_id = user_getter() if user_getter else None
+            role = role_getter() if role_getter else None
+
+            if len(stmt) > 4000:
+                stmt = stmt[:4000]
+            if params_json and len(params_json) > 2000:
+                params_json = params_json[:2000]
+
+            conn.execute(sa_text(
+                "insert into text2sql_captured(sql, params_json, duration_ms, rows_affected, route, user_id, role, source_host) "
+                "values (:sql, :params_json::jsonb, :duration_ms, :rows, :route, :user_id, :role, :host)"
+            ), {
+                'sql': stmt,
+                'params_json': params_json,
+                'duration_ms': duration_ms,
+                'rows': cursor.rowcount if hasattr(cursor, 'rowcount') else None,
+                'route': route,
+                'user_id': user_id,
+                'role': role,
+                'host': host,
+            })
+        except Exception:
+            pass
+
+
 def aggregates_for_lots(db: Session, lot_ids: list[int]):
     """
     Возвращает агрегаты для лотов по батчам и показателям операторов/склада:
