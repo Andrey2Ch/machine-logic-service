@@ -43,11 +43,24 @@ def install_sql_capture(route_getter=None, user_getter=None, role_getter=None):
     @event.listens_for(db.engine, "after_cursor_execute")
     def after_cursor_execute(conn, cursor, statement, parameters, context, executemany):
         try:
+            # защитимся от рекурсии: если это наша внутренняя вставка/сейвпоинт — выходим
+            try:
+                if getattr(conn, 'info', None) and conn.info.get('t2s_skip'):
+                    return
+            except Exception:
+                pass
+
             stmt = (statement or '').strip()
             head = stmt.split(None, 1)[0].lower() if stmt else ''
             if head not in {'select','insert','update','delete','create','alter','drop','truncate','grant','revoke'}:
                 return
             if head in {'set','commit','begin'}:
+                return
+            # пропускаем собственные операции и системные savepoint/rollback/release
+            lstmt = stmt.lower()
+            if 'text2sql_captured' in lstmt:
+                return
+            if lstmt.startswith('savepoint') or lstmt.startswith('release savepoint') or lstmt.startswith('rollback to savepoint'):
                 return
 
             duration_ms = None
@@ -93,6 +106,9 @@ def install_sql_capture(route_getter=None, user_getter=None, role_getter=None):
             }
             nested = None
             try:
+                # выставляем флаг, чтобы listener пропустил наши внутренние SQL
+                if getattr(conn, 'info', None) is not None:
+                    conn.info['t2s_skip'] = True
                 nested = conn.begin_nested()
                 conn.execute(sa_text(
                     "insert into text2sql_captured(sql, params_json, duration_ms, rows_affected, route, user_id, role, source_host) "
@@ -105,11 +121,18 @@ def install_sql_capture(route_getter=None, user_getter=None, role_getter=None):
                         nested.rollback()
                     except Exception:
                         pass
-                _log.exception("capture: failed to insert record (savepoint)")
-                # не пробрасываем
+                # не пробрасываем и не логируем stack (во избежание рекурсии)
+                _log.warning("capture: insert skipped due to error")
+            finally:
+                try:
+                    if getattr(conn, 'info', None) is not None and 't2s_skip' in conn.info:
+                        conn.info.pop('t2s_skip', None)
+                except Exception:
+                    pass
         except Exception:
-            _log.exception("capture: failed to insert record")
-            pass
+            # минимальное логирование без exc_info, чтобы избежать рекурсивной печати
+            _log.warning("capture: outer failure while processing statement")
+            return
 
     _capture_installed = True
     _log.info("capture: installed (TEXT2SQL_CAPTURE=1)")
