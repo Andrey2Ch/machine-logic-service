@@ -170,14 +170,30 @@ def _ru_from_sql(sql: str) -> tuple[str, list[str]]:
     # SELECT list
     m_select = re.search(r"select (.+?) from ", low)
     select_expr = (m_select.group(1).strip() if m_select else "*")
-    if "count(" in select_expr:
-        base_q = "Сколько записей ...?"
-    elif "sum(" in select_expr:
-        base_q = "Какова суммарная величина ...?"
-    elif "avg(" in select_expr:
-        base_q = "Каково среднее значение ...?"
+    agg = None
+    if re.search(r"\bcount\s*\(", select_expr):
+        agg = "count"
+    elif re.search(r"\bsum\s*\(", select_expr):
+        agg = "sum"
+    elif re.search(r"\bavg\s*\(", select_expr):
+        agg = "avg"
+    elif re.search(r"\bmin\s*\(", select_expr):
+        agg = "min"
+    elif re.search(r"\bmax\s*\(", select_expr):
+        agg = "max"
+
+    if agg == "count":
+        base_q = "Сколько записей?"
+    elif agg == "sum":
+        base_q = "Какова сумма?"
+    elif agg == "avg":
+        base_q = "Каково среднее значение?"
+    elif agg == "min":
+        base_q = "Каково минимальное значение?"
+    elif agg == "max":
+        base_q = "Каково максимальное значение?"
     else:
-        base_q = "Какие данные ...?"
+        base_q = "Покажи"
 
     # FROM target(s)
     m_from = re.search(r" from (.+?)( where | group by | order by | limit |$)", low)
@@ -188,15 +204,29 @@ def _ru_from_sql(sql: str) -> tuple[str, list[str]]:
     # WHERE filters
     m_where = re.search(r" where (.+?)( group by | order by | limit |$)", low)
     filters = m_where.group(1).strip() if m_where else ""
+    filt_pretty = ""
     if filters:
-        # Упростим
-        filt = re.sub(r"\s+and\s+", "; ", filters)
-        filt = re.sub(r"\s+or\s+", "; ", filt)
-        hints.append(f"Фильтр: {filt}")
+        conds: list[str] = []
+        # a = %(param)s
+        for col, _param in re.findall(r"(\b[a-z_][a-z0-9_]*\b)\s*=\s*%\([^)]+\)s", filters):
+            conds.append(f"{col} = <значение>")
+        # IS (NOT) NULL
+        for col, not_kw in re.findall(r"(\b[a-z_][a-z0-9_]*\b)\s+is\s+(not\s+)?null", filters):
+            conds.append(f"{col} {'не ' if not_kw else ''}пусто")
+        # IN (...)
+        for col in re.findall(r"(\b[a-z_][a-z0-9_]*\b)\s+in\s*\(", filters):
+            conds.append(f"{col} в списке")
+        if not conds:
+            # fallback упрощение
+            filt_pretty = re.sub(r"\s+and\s+", "; ", filters)
+            filt_pretty = re.sub(r"\s+or\s+", "; ", filt_pretty)
+        else:
+            filt_pretty = "; ".join(conds)
+        if filt_pretty:
+            hints.append(f"Фильтр: {filt_pretty}")
 
     # GROUP BY
     if re.search(r" group by ", low):
-        base_q = base_q.replace("...", "... по группам (group by)")
         hints.append("Группировка: есть GROUP BY")
 
     # ORDER/LIMIT → ТОП-N
@@ -207,8 +237,28 @@ def _ru_from_sql(sql: str) -> tuple[str, list[str]]:
         if re.search(r" order by ", low):
             base_q = f"Топ-{n}: {base_q[0].lower() + base_q[1:]}"
 
+    # Колонки для вывода
+    cols_text = "все поля"
+    if select_expr != "*":
+        raw_cols = [c.strip() for c in select_expr.split(',')]
+        cols = []
+        for c in raw_cols[:6]:
+            m_as = re.search(r"\bas\s+([a-z_][a-z0-9_]*)", c)
+            if m_as:
+                cols.append(m_as.group(1))
+            else:
+                cols.append(c.split('.')[-1])
+        if cols:
+            cols_text = ", ".join(cols[:4]) + (" и др." if len(cols) > 4 else "")
+
     # Итоговая формулировка
-    question = f"{base_q} (из {from_expr})"
+    from_short = from_expr.split(',')[0].strip()
+    where_part = f" (где {filt_pretty})" if filt_pretty else ""
+    lim_part = f" (топ-{m_limit.group(1)})" if m_limit else ""
+    if agg:
+        question = f"{base_q} из {from_short}{where_part}{lim_part}"
+    else:
+        question = f"{base_q} из {from_short} поля {cols_text}{where_part}{lim_part}"
     question = re.sub(r"\s+", " ", question).strip()
     return (question, hints)
 
