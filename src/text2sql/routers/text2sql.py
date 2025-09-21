@@ -423,10 +423,34 @@ async def llm_query(payload: LLMQuery,
             print(f"DEBUG: SQL: {sql}")
             break
 
+    # Исправляем кодировку вопроса
+    question = payload.question
+    print(f"DEBUG: Original question: {repr(question)}")
+    
+    # Пытаемся исправить кодировку кракозябр
+    if '?' in question and len(question.split()) == 4:
+        try:
+            # Если это кракозябры, пытаемся разные варианты исправления
+            if '?' in question and '?' in question:
+                # Пытаемся декодировать как cp1251 и перекодировать в utf-8
+                question_bytes = question.encode('cp1251')
+                question = question_bytes.decode('utf-8')
+                print(f"DEBUG: Исправлена кодировка (cp1251->utf8): {question}")
+        except:
+            try:
+                # Пытаемся декодировать как latin-1 и перекодировать в utf-8
+                question_bytes = question.encode('latin-1')
+                question = question_bytes.decode('utf-8')
+                print(f"DEBUG: Исправлена кодировка (latin1->utf8): {question}")
+            except:
+                print(f"DEBUG: Не удалось исправить кодировку")
+    
+    print(f"DEBUG: Final question: {question}")
+
     # Генерация SQL через Claude
     llm = ClaudeText2SQL()
     try:
-        raw_sql = await llm.generate_sql(payload.question, schema_docs, examples)
+        raw_sql = await llm.generate_sql(question, schema_docs, examples)
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:

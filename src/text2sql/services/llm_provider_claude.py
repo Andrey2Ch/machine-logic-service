@@ -54,6 +54,11 @@ class ClaudeText2SQL:
             f"\nUser question (any language): {question}\n"
             "Return ONLY the SQL in a fenced code block."
         )
+        
+        # Debug: print full context
+        print(f"DEBUG: Full context length: {len(context)}")
+        print(f"DEBUG: Context preview: {context[:500]}...")
+        print(f"DEBUG: User prompt: {user[:500]}...")
 
         headers = {
             "x-api-key": self.api_key,
