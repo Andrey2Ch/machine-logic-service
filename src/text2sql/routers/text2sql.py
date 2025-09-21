@@ -1,11 +1,13 @@
 ﻿from fastapi import APIRouter, Depends, HTTPException, Header
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 from src.database import get_db_session
 from src.text2sql.services.text2sql_service import Text2SQLService
 from src.text2sql.services.text2sql_metrics import Text2SQLMetrics
 from src.text2sql.services.sql_validator import SQLValidator, ValidationLevel
 from src.text2sql.services.llm_provider_claude import ClaudeText2SQL
+import psycopg2.extras
 import os
 import re
 
@@ -22,6 +24,7 @@ class LLMQuery(BaseModel):
     question: str
     validation_level: str | None = None  # strict, moderate, permissive (если не задано, выберем по роли)
     return_sql_only: bool = False
+    session_id: str | None = None
 
 class FeedbackItem(BaseModel):
     question: str
@@ -400,7 +403,8 @@ def _parse_few_shot_examples(md_text: str):
 @router.post("/llm_query")
 async def llm_query(payload: LLMQuery,
                     db: Session = Depends(get_db_session),
-                    x_user_role: str | None = Header(default=None)):
+                    x_user_role: str | None = Header(default=None),
+                    x_session_id: str | None = Header(default=None)):
     """LLM‑режим: мульти-языковые вопросы → SQL (Claude), валидация и опциональное выполнение."""
     # Подготовка контекста
     base_dir = os.path.dirname(os.path.dirname(__file__))  # src/text2sql
@@ -422,6 +426,48 @@ async def llm_query(payload: LLMQuery,
             print(f"DEBUG: НАЙДЕН ПРАВИЛЬНЫЙ ПРИМЕР #{i+1}: {q}")
             print(f"DEBUG: SQL: {sql}")
             break
+
+    # Сессионный контекст
+    def _ensure_history_table() -> None:
+        db.execute(text("""
+            CREATE TABLE IF NOT EXISTS text2sql_history (
+              id BIGSERIAL PRIMARY KEY,
+              session_id TEXT NOT NULL,
+              question TEXT NOT NULL,
+              sql TEXT NOT NULL,
+              validated_sql TEXT,
+              rows_preview JSONB,
+              created_at TIMESTAMP DEFAULT NOW()
+            )
+        """))
+        db.commit()
+
+    def _load_session_examples(sid: str, limit: int = 5):
+        try:
+            rows = db.execute(text("""
+                SELECT question, COALESCE(validated_sql, sql) AS sql
+                FROM text2sql_history
+                WHERE session_id = :sid
+                ORDER BY created_at DESC
+                LIMIT :lim
+            """), {"sid": sid, "lim": limit}).fetchall()
+            return [(r.question, r.sql) for r in rows]
+        except Exception:
+            return []
+
+    # Определяем session_id
+    session_id = (payload.session_id or x_session_id or "anon").strip() or "anon"
+
+    # Обогащаем примеры историей
+    try:
+        _ensure_history_table()
+        hist_examples = _load_session_examples(session_id, limit=5)
+        if hist_examples:
+            # Помещаем в начало, чтобы повысить шанс отбора
+            examples = hist_examples + examples
+            print(f"DEBUG: Added {len(hist_examples)} session examples for sid={session_id}")
+    except Exception as e:
+        print(f"DEBUG: history session examples failed: {e}")
 
     # Исправляем кодировку вопроса
     question = payload.question
@@ -472,6 +518,15 @@ async def llm_query(payload: LLMQuery,
     validator = SQLValidator(chosen_level)
     result = validator.validate(raw_sql)
     if not result["valid"]:
+        # Пишем историю даже при невалидном SQL
+        try:
+            db.execute(text("""
+                INSERT INTO text2sql_history(session_id, question, sql, validated_sql, rows_preview)
+                VALUES (:sid, :q, :raw, NULL, NULL)
+            """), {"sid": session_id, "q": question, "raw": raw_sql})
+            db.commit()
+        except Exception:
+            db.rollback()
         return {
             "sql": raw_sql,
             "validation": result,
@@ -489,6 +544,30 @@ async def llm_query(payload: LLMQuery,
     try:
         svc = Text2SQLService(db)
         cols, rows = svc.execute(result["sanitized_sql"]) 
+
+        # Сохраняем историю (превью первых строк)
+        try:
+            preview_rows = []
+            for r in rows[:3]:
+                if isinstance(r, dict):
+                    preview_rows.append(r)
+                else:
+                    # если возвращается список/кортеж, спроецируем в словарь по колонкам
+                    preview_rows.append({cols[i]: r[i] for i in range(min(len(cols), len(r)))})
+            db.execute(text("""
+                INSERT INTO text2sql_history(session_id, question, sql, validated_sql, rows_preview)
+                VALUES (:sid, :q, :raw, :val, :rows)
+            """), {
+                "sid": session_id,
+                "q": question,
+                "raw": raw_sql,
+                "val": result["sanitized_sql"],
+                "rows": psycopg2.extras.Json(preview_rows) if 'psycopg2' in globals() else None
+            })
+            db.commit()
+        except Exception:
+            db.rollback()
+
         return {
             "sql": raw_sql,
             "validated_sql": result["sanitized_sql"],
