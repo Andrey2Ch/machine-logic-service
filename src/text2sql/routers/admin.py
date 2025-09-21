@@ -134,3 +134,143 @@ async def get_captured_stats(db: Session = Depends(get_db_session)):
     except Exception as e:
         logger.error(f"Ошибка получения статистики: {e}")
         raise HTTPException(status_code=500, detail=f"Ошибка статистики: {str(e)}")
+
+
+@router.post("/analyze_and_deduplicate")
+async def analyze_and_deduplicate(
+    db: Session = Depends(get_db_session)
+):
+    """Анализ и дедупликация captured SQL запросов с созданием качественных примеров"""
+    try:
+        from src.text2sql.utils.sql_normalizer import (
+            normalize_sql, 
+            extract_table_names, 
+            get_operation_type,
+            is_good_question,
+            calculate_quality_score,
+            suggest_business_question
+        )
+        from collections import defaultdict
+        
+        logger.info("🔍 Начинаем анализ captured SQL запросов...")
+        
+        # 1. Создаем таблицу examples если не существует
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS text2sql_examples (
+                id SERIAL PRIMARY KEY,
+                normalized_sql TEXT NOT NULL,
+                business_question_ru TEXT NOT NULL,
+                business_question_en TEXT,
+                table_names TEXT[],
+                operation_type VARCHAR(10),
+                quality_score INTEGER DEFAULT 0,
+                source_captured_id INTEGER,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        
+        # 2. Анализируем captured запросы
+        stats = db.execute("""
+            SELECT 
+                COUNT(*) as total,
+                COUNT(question_ru) as with_questions,
+                COUNT(*) - COUNT(question_ru) as without_questions
+            FROM text2sql_captured
+        """).fetchone()
+        
+        logger.info(f"📊 Всего запросов: {stats.total}, с вопросами: {stats.with_questions}")
+        
+        # 3. Получаем уникальные пары SQL-вопрос
+        unique_pairs = {}
+        captured_queries = db.execute("""
+            SELECT DISTINCT sql, question_ru, id
+            FROM text2sql_captured 
+            WHERE question_ru IS NOT NULL
+        """).fetchall()
+        
+        for sql, question, captured_id in captured_queries:
+            normalized = normalize_sql(sql)
+            if normalized not in unique_pairs:
+                unique_pairs[normalized] = (sql, question, captured_id)
+        
+        logger.info(f"🔄 Уникальных SQL паттернов: {len(unique_pairs)}")
+        
+        # 4. Очищаем старые примеры
+        db.execute("DELETE FROM text2sql_examples")
+        
+        # 5. Создаем качественные примеры
+        examples_added = 0
+        operation_stats = defaultdict(int)
+        
+        for normalized_sql, (original_sql, question, captured_id) in unique_pairs.items():
+            # Проверяем качество вопроса
+            if not is_good_question(question):
+                # Предлагаем улучшенный вопрос
+                table_names = extract_table_names(original_sql)
+                operation_type = get_operation_type(original_sql)
+                suggested_question = suggest_business_question(original_sql, table_names, operation_type)
+                
+                if not is_good_question(suggested_question):
+                    continue  # пропускаем если и предложенный плохой
+                
+                question = suggested_question
+            
+            # Рассчитываем качество
+            quality_score = calculate_quality_score(question, original_sql)
+            
+            if quality_score >= 5:  # только качественные примеры
+                table_names = extract_table_names(original_sql)
+                operation_type = get_operation_type(original_sql)
+                
+                db.execute("""
+                    INSERT INTO text2sql_examples 
+                    (normalized_sql, business_question_ru, table_names, operation_type, quality_score, source_captured_id)
+                    VALUES (:normalized_sql, :question, :table_names, :operation_type, :quality_score, :captured_id)
+                """, {
+                    "normalized_sql": normalized_sql,
+                    "question": question,
+                    "table_names": table_names,
+                    "operation_type": operation_type,
+                    "quality_score": quality_score,
+                    "captured_id": captured_id
+                })
+                
+                examples_added += 1
+                operation_stats[operation_type] += 1
+        
+        db.commit()
+        
+        # 6. Финальная статистика
+        final_stats = db.execute("""
+            SELECT 
+                COUNT(*) as total,
+                AVG(quality_score) as avg_quality,
+                COUNT(CASE WHEN quality_score >= 8 THEN 1 END) as excellent,
+                COUNT(CASE WHEN quality_score >= 6 THEN 1 END) as good
+            FROM text2sql_examples
+        """).fetchone()
+        
+        logger.info(f"✅ Анализ завершен! Добавлено примеров: {examples_added}")
+        
+        return {
+            "success": True,
+            "message": "Анализ и дедупликация завершены",
+            "captured_stats": {
+                "total_queries": stats.total,
+                "with_questions": stats.with_questions,
+                "unique_patterns": len(unique_pairs)
+            },
+            "examples_stats": {
+                "total": examples_added,
+                "avg_quality": round(final_stats.avg_quality, 1) if final_stats.avg_quality else 0,
+                "excellent": final_stats.excellent,
+                "good": final_stats.good,
+                "by_operation": dict(operation_stats)
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Ошибка анализа: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Ошибка анализа: {str(e)}")
