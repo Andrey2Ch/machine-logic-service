@@ -208,10 +208,13 @@ def _ru_from_sql(sql: str) -> tuple[str, list[str]]:
     if filters:
         conds: list[str] = []
         # a = %(param)s
-        for col, _param in re.findall(r"(\b[a-z_][a-z0-9_]*\b)\s*=\s*%\([^)]+\)s", filters):
+        for match in re.finditer(r"(\b[a-z_][a-z0-9_]*\b)\s*=\s*%\([^)]+\)s", filters):
+            col = match.group(1)
             conds.append(f"{col} = <значение>")
         # IS (NOT) NULL
-        for col, not_kw in re.findall(r"(\b[a-z_][a-z0-9_]*\b)\s+is\s+(not\s+)?null", filters):
+        for match in re.finditer(r"(\b[a-z_][a-z0-9_]*\b)\s+is\s+(not\s+)?null", filters):
+            col = match.group(1)
+            not_kw = match.group(2)
             conds.append(f"{col} {'не ' if not_kw else ''}пусто")
         # IN (...)
         for col in re.findall(r"(\b[a-z_][a-z0-9_]*\b)\s+in\s*\(", filters):
