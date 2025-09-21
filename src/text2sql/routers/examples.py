@@ -3,6 +3,7 @@ API для управления качественными примерами Te
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 from typing import List, Optional
 from pydantic import BaseModel
 from src.database import get_db_session
@@ -59,14 +60,14 @@ async def get_examples(
     
     where_sql = " AND ".join(where_conditions)
     
-    result = db.execute(f"""
+    result = db.execute(text(f"""
         SELECT id, normalized_sql, business_question_ru, business_question_en,
                table_names, operation_type, quality_score, created_at
         FROM text2sql_examples
         WHERE {where_sql}
         ORDER BY quality_score DESC, created_at DESC
         LIMIT :limit
-    """, params)
+    """), params)
     
     examples = []
     for row in result:
@@ -107,10 +108,10 @@ async def create_example(
     quality_score = calculate_quality_score(request.question_ru, request.sql)
     
     # Проверяем на дубликаты
-    existing = db.execute("""
+    existing = db.execute(text("""
         SELECT id FROM text2sql_examples 
         WHERE normalized_sql = :normalized_sql
-    """, {"normalized_sql": normalized_sql}).fetchone()
+    """), {"normalized_sql": normalized_sql}).fetchone()
     
     if existing:
         raise HTTPException(
@@ -119,14 +120,14 @@ async def create_example(
         )
     
     # Создаем пример
-    result = db.execute("""
+    result = db.execute(text("""
         INSERT INTO text2sql_examples 
         (normalized_sql, business_question_ru, business_question_en, 
          table_names, operation_type, quality_score)
         VALUES (:normalized_sql, :question_ru, :question_en, 
                 :table_names, :operation_type, :quality_score)
         RETURNING id, created_at
-    """, {
+    """), {
         "normalized_sql": normalized_sql,
         "question_ru": request.question_ru,
         "question_en": request.question_en,
@@ -159,9 +160,9 @@ async def update_example(
     """Обновить пример"""
     
     # Получаем текущий пример
-    current = db.execute("""
+    current = db.execute(text("""
         SELECT * FROM text2sql_examples WHERE id = :id
-    """, {"id": example_id}).fetchone()
+    """), {"id": example_id}).fetchone()
     
     if not current:
         raise HTTPException(status_code=404, detail="Пример не найден")
@@ -194,18 +195,18 @@ async def update_example(
     set_clause = ", ".join([f"{k} = :{k}" for k in update_fields.keys()])
     update_fields["id"] = example_id
     
-    db.execute(f"""
+    db.execute(text(f"""
         UPDATE text2sql_examples 
         SET {set_clause}, updated_at = NOW()
         WHERE id = :id
-    """, update_fields)
+    """), update_fields)
     
     db.commit()
     
     # Возвращаем обновленный пример
-    updated = db.execute("""
+    updated = db.execute(text("""
         SELECT * FROM text2sql_examples WHERE id = :id
-    """, {"id": example_id}).fetchone()
+    """), {"id": example_id}).fetchone()
     
     return ExampleResponse(
         id=updated.id,
@@ -226,9 +227,9 @@ async def delete_example(
 ):
     """Удалить пример"""
     
-    result = db.execute("""
+    result = db.execute(text("""
         DELETE FROM text2sql_examples WHERE id = :id
-    """, {"id": example_id})
+    """), {"id": example_id})
     
     if result.rowcount == 0:
         raise HTTPException(status_code=404, detail="Пример не найден")
@@ -241,7 +242,7 @@ async def delete_example(
 async def get_examples_stats(db: Session = Depends(get_db_session)):
     """Получить статистику по примерам"""
     
-    stats = db.execute("""
+    stats = db.execute(text("""
         SELECT 
             COUNT(*) as total,
             AVG(quality_score) as avg_quality,
@@ -252,7 +253,7 @@ async def get_examples_stats(db: Session = Depends(get_db_session)):
             COUNT(CASE WHEN operation_type = 'INSERT' THEN 1 END) as inserts,
             COUNT(CASE WHEN operation_type = 'DELETE' THEN 1 END) as deletes
         FROM text2sql_examples
-    """).fetchone()
+    """)).fetchone()
     
     return {
         "total": stats.total,
