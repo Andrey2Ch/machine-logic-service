@@ -155,7 +155,7 @@ async def analyze_and_deduplicate(
         logger.info("🔍 Начинаем анализ captured SQL запросов...")
         
         # 1. Создаем таблицу examples если не существует
-        db.execute("""
+        db.execute(text("""
             CREATE TABLE IF NOT EXISTS text2sql_examples (
                 id SERIAL PRIMARY KEY,
                 normalized_sql TEXT NOT NULL,
@@ -167,26 +167,26 @@ async def analyze_and_deduplicate(
                 source_captured_id INTEGER,
                 created_at TIMESTAMP DEFAULT NOW()
             )
-        """)
+        """))
         
         # 2. Анализируем captured запросы
-        stats = db.execute("""
+        stats = db.execute(text("""
             SELECT 
                 COUNT(*) as total,
                 COUNT(question_ru) as with_questions,
                 COUNT(*) - COUNT(question_ru) as without_questions
             FROM text2sql_captured
-        """).fetchone()
+        """)).fetchone()
         
         logger.info(f"📊 Всего запросов: {stats.total}, с вопросами: {stats.with_questions}")
         
         # 3. Получаем уникальные пары SQL-вопрос
         unique_pairs = {}
-        captured_queries = db.execute("""
+        captured_queries = db.execute(text("""
             SELECT DISTINCT sql, question_ru, id
             FROM text2sql_captured 
             WHERE question_ru IS NOT NULL
-        """).fetchall()
+        """)).fetchall()
         
         for sql, question, captured_id in captured_queries:
             normalized = normalize_sql(sql)
@@ -196,7 +196,7 @@ async def analyze_and_deduplicate(
         logger.info(f"🔄 Уникальных SQL паттернов: {len(unique_pairs)}")
         
         # 4. Очищаем старые примеры
-        db.execute("DELETE FROM text2sql_examples")
+        db.execute(text("DELETE FROM text2sql_examples"))
         
         # 5. Создаем качественные примеры
         examples_added = 0
@@ -222,11 +222,11 @@ async def analyze_and_deduplicate(
                 table_names = extract_table_names(original_sql)
                 operation_type = get_operation_type(original_sql)
                 
-                db.execute("""
+                db.execute(text("""
                     INSERT INTO text2sql_examples 
                     (normalized_sql, business_question_ru, table_names, operation_type, quality_score, source_captured_id)
                     VALUES (:normalized_sql, :question, :table_names, :operation_type, :quality_score, :captured_id)
-                """, {
+                """), {
                     "normalized_sql": normalized_sql,
                     "question": question,
                     "table_names": table_names,
@@ -241,14 +241,14 @@ async def analyze_and_deduplicate(
         db.commit()
         
         # 6. Финальная статистика
-        final_stats = db.execute("""
+        final_stats = db.execute(text("""
             SELECT 
                 COUNT(*) as total,
                 AVG(quality_score) as avg_quality,
                 COUNT(CASE WHEN quality_score >= 8 THEN 1 END) as excellent,
                 COUNT(CASE WHEN quality_score >= 6 THEN 1 END) as good
             FROM text2sql_examples
-        """).fetchone()
+        """)).fetchone()
         
         logger.info(f"✅ Анализ завершен! Добавлено примеров: {examples_added}")
         
