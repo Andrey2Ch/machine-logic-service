@@ -41,6 +41,7 @@ class SQLValidator:
         # Whitelist - разрешенные операции (для STRICT режима)
         self.whitelist_patterns = [
             r'^\s*select\b',
+            r'^\s*with\b',
             r'\bfrom\b',
             r'\bwhere\b',
             r'\bgroup\s+by\b',
@@ -107,10 +108,10 @@ class SQLValidator:
                       for pattern in self.whitelist_patterns):
                 errors.append("Query does not match whitelist patterns")
         
-        # Проверка на SELECT (только для STRICT/MODERATE)
+        # Проверка на SELECT/WITH CTE (только для STRICT/MODERATE)
         if self.validation_level in {ValidationLevel.STRICT, ValidationLevel.MODERATE}:
-            if not re.match(r'^\s*select\b', sanitized_sql, re.IGNORECASE):
-                errors.append("Query must start with SELECT")
+            if not re.match(r'^\s*(select|with)\b', sanitized_sql, re.IGNORECASE):
+                errors.append("Query must start with SELECT or WITH")
         
         # Проверка таблиц (если указаны)
         table_matches = re.findall(r'\bfrom\s+(\w+)', sanitized_sql, re.IGNORECASE)
