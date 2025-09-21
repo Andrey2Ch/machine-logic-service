@@ -22,6 +22,16 @@
 - **Завершенная настройка** = `status = 'completed'` или `end_time IS NOT NULL`
 - **Статусы**: `started` (активна), `completed` (завершена), `cancelled` (отменена), `created` (создана), `allowed` (разрешена)
 
+### Смены (shifts)
+- **Дневная смена**: с 06:00 до 18:00 того же дня
+- **Ночная смена**: с 18:00 до 06:00 следующего дня (с переходом суток)
+- Расчёт `shift_name` и `shift_start` для отметки времени `t`:
+  - `shift_name = 'day'`, если `06:00 ≤ t::time < 18:00`, иначе `'night'`
+  - `shift_start =`  
+    - `date_trunc('day', t) + interval '6 hour'`, если `06:00 ≤ t::time < 18:00`  
+    - `date_trunc('day', t) + interval '18 hour'`, если `t::time ≥ 18:00`  
+    - `date_trunc('day', t - interval '1 day') + interval '18 hour'`, если `t::time < 06:00`
+
 ## Таблицы
 
 ## access_attempts
@@ -258,14 +268,14 @@
 SELECT m.id, m.name, sj.status, sj.start_time
 FROM machines m
 JOIN setup_jobs sj ON m.id = sj.machine_id
-WHERE sj.status = 'active' AND sj.end_time IS NULL
+WHERE sj.status = 'started' AND sj.end_time IS NULL
 ```
 
 ### Свободные станки
 ```sql
 SELECT m.id, m.name
 FROM machines m
-LEFT JOIN setup_jobs sj ON m.id = sj.machine_id AND sj.status = 'active' AND sj.end_time IS NULL
+LEFT JOIN setup_jobs sj ON m.id = sj.machine_id AND sj.status = 'started' AND sj.end_time IS NULL
 WHERE sj.id IS NULL AND m.is_active = true
 ```
 
