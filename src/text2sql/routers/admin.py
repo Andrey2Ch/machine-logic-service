@@ -7,15 +7,19 @@ from sqlalchemy import text
 from src.database import get_db_session
 import logging
 import psycopg2.extras
+from pydantic import BaseModel
 from .text2sql import _ru_from_sql
 
 router = APIRouter(prefix="/api/text2sql/admin", tags=["Text2SQL Admin"])
 logger = logging.getLogger(__name__)
 
 
+class GenerateQuestionsRequest(BaseModel):
+    limit: int = 100
+
 @router.post("/generate_questions")
 async def generate_questions_for_captured(
-    limit: int = 100,
+    request: GenerateQuestionsRequest = GenerateQuestionsRequest(),
     db: Session = Depends(get_db_session)
 ):
     """
@@ -50,7 +54,7 @@ async def generate_questions_for_captured(
             WHERE question_ru IS NULL OR question_ru = ''
             ORDER BY captured_at DESC
             LIMIT :limit
-        """), {"limit": limit})
+        """), {"limit": request.limit})
         
         records = result.fetchall()
         
