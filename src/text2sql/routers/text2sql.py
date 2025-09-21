@@ -363,7 +363,7 @@ def _parse_few_shot_examples(md_text: str):
     lines = md_text.splitlines()
     i = 0
     while i < len(lines):
-        m_q = re.match(r"^\s*Q:\s*(.+)$", lines[i], re.IGNORECASE)
+        m_q = re.match(r"^\s*Q:\s*[\"']?(.+?)[\"']?\s*$", lines[i], re.IGNORECASE)
         if m_q:
             question = m_q.group(1).strip()
             j = i + 1
@@ -411,6 +411,17 @@ async def llm_query(payload: LLMQuery,
     schema_docs = _read_file_utf8(schema_path)
     few_shot_md = _read_file_utf8(examples_path)
     examples = _parse_few_shot_examples(few_shot_md)
+    print(f"DEBUG: Loaded {len(examples)} examples")
+    for i, (q, sql) in enumerate(examples[:3]):  # покажем первые 3
+        print(f"  {i+1}. Q: {q}")
+        print(f"     SQL: {sql[:100]}...")
+    
+    # Проверим, есть ли правильный пример
+    for i, (q, sql) in enumerate(examples):
+        if "сколько станков сейчас работает" in q.lower():
+            print(f"DEBUG: НАЙДЕН ПРАВИЛЬНЫЙ ПРИМЕР #{i+1}: {q}")
+            print(f"DEBUG: SQL: {sql}")
+            break
 
     # Генерация SQL через Claude
     llm = ClaudeText2SQL()

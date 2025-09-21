@@ -31,6 +31,12 @@ class ClaudeText2SQL:
         scored.sort(reverse=True)
         top = [pair for _, pair in scored[:6]]
 
+        # Debug: print selected examples
+        print(f"DEBUG: Question: {question}")
+        print(f"DEBUG: Selected examples:")
+        for i, (ex_q, ex_sql) in enumerate(top):
+            print(f"  {i+1}. Score: {scored[i][0]}, Q: {ex_q}")
+
         ctx_parts = ["# SCHEMA\n", schema_docs[: max_chars // 2], "\n\n# FEW-SHOT EXAMPLES\n"]
         for ex_q, ex_sql in top:
             ctx_parts.append(f"Q: {ex_q}\nSQL:\n{ex_sql}\n\n")

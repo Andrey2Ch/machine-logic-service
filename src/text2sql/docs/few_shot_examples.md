@@ -1,147 +1,161 @@
-# Few-Shot Examples для Text2SQL
+# Few-shot examples for Text2SQL
 
-## Базовые запросы
+## Примеры вопросов и SQL запросов
 
-### 1. Подсчет записей
-**Вопрос:** "сколько всего записей в таблице batches?"
-**SQL:** `SELECT COUNT(*) as total_batches FROM batches;`
-
-### 2. Подсчет по условию
-**Вопрос:** "сколько открытых батчей?"
-**SQL:** `SELECT COUNT(*) as open_batches FROM batches WHERE status = 'open';`
-
-### 3. Группировка по статусу
-**Вопрос:** "покажи количество батчей по статусам"
-**SQL:** `SELECT status, COUNT(*) as count FROM batches GROUP BY status;`
-
-### 4. Текущее время
-**Вопрос:** "какое сейчас время?"
-**SQL:** `SELECT NOW() as current_time;`
-
-### 5. Последние записи
-**Вопрос:** "покажи последние 10 батчей"
-**SQL:** `SELECT * FROM batches ORDER BY created_at DESC LIMIT 10;`
-
-## Аналитика по батчам
-
-### 6. Батчи за сегодня
-**Вопрос:** "сколько батчей создано сегодня?"
-**SQL:** `SELECT COUNT(*) as today_batches FROM batches WHERE DATE(created_at) = CURRENT_DATE;`
-
-### 7. Батчи по дням недели
-**Вопрос:** "покажи батчи по дням недели"
-**SQL:** `SELECT EXTRACT(DOW FROM created_at) as day_of_week, COUNT(*) as count FROM batches GROUP BY EXTRACT(DOW FROM created_at);`
-
-### 8. Среднее количество запланированных деталей
-**Вопрос:** "какое среднее количество запланированных деталей в батчах?"
-**SQL:** `SELECT AVG(qty_planned) as avg_planned FROM batches WHERE qty_planned IS NOT NULL;`
-
-### 9. Батчи с наибольшим количеством деталей
-**Вопрос:** "покажи топ-5 батчей по количеству запланированных деталей"
-**SQL:** `SELECT batch_id, part_name, qty_planned FROM batches ORDER BY qty_planned DESC LIMIT 5;`
-
-### 10. Статистика по статусам
-**Вопрос:** "покажи статистику по статусам батчей"
-**SQL:** `SELECT status, COUNT(*) as count, AVG(qty_planned) as avg_planned FROM batches GROUP BY status;`
-
-## Аналитика по операциям
-
-### 11. Операции по станкам
-**Вопрос:** "сколько операций на каждом станке?"
-**SQL:** `SELECT machine_id, COUNT(*) as operation_count FROM batch_operations GROUP BY machine_id;`
-
-### 12. Среднее время операций
-**Вопрос:** "какое среднее время выполнения операций?"
-**SQL:** `SELECT AVG(actual_time_sec) as avg_time FROM batch_operations WHERE actual_time_sec IS NOT NULL;`
-
-### 13. Операции по статусам
-**Вопрос:** "покажи операции по статусам"
-**SQL:** `SELECT status, COUNT(*) as count FROM batch_operations GROUP BY status;`
-
-### 14. Самые долгие операции
-**Вопрос:** "покажи топ-10 самых долгих операций"
-**SQL:** `SELECT batch_id, operation_no, machine_id, actual_time_sec FROM batch_operations WHERE actual_time_sec IS NOT NULL ORDER BY actual_time_sec DESC LIMIT 10;`
-
-### 15. Операции за последний час
-**Вопрос:** "сколько операций завершено за последний час?"
-**SQL:** `SELECT COUNT(*) as recent_operations FROM batch_operations WHERE updated_at > NOW() - INTERVAL '1 hour';`
-
-## Аналитика по станкам
-
-### 16. Все станки
-**Вопрос:** "покажи все станки"
-**SQL:** `SELECT machine_id, machine_name, area_name FROM machines;`
-
-### 17. Станки по зонам
-**Вопрос:** "сколько станков в каждой зоне?"
-**SQL:** `SELECT area_name, COUNT(*) as machine_count FROM machines GROUP BY area_name;`
-
-### 18. Последние показания станков
-**Вопрос:** "покажи последние показания всех станков"
-**SQL:** `SELECT machine_id, last_reading_at, last_status FROM machines WHERE last_reading_at IS NOT NULL ORDER BY last_reading_at DESC;`
-
-### 19. Станки без показаний
-**Вопрос:** "какие станки не передавали показания больше суток?"
-**SQL:** `SELECT machine_id, machine_name, last_reading_at FROM machines WHERE last_reading_at < NOW() - INTERVAL '1 day' OR last_reading_at IS NULL;`
-
-### 20. Станки по статусам
-**Вопрос:** "покажи станки по статусам"
-**SQL:** `SELECT last_status, COUNT(*) as count FROM machines WHERE last_status IS NOT NULL GROUP BY last_status;`
-
-## Аналитика по времени
-
-### 21. Батчи за последние 7 дней
-**Вопрос:** "сколько батчей создано за последние 7 дней?"
-**SQL:** `SELECT COUNT(*) as last_week_batches FROM batches WHERE created_at > NOW() - INTERVAL '7 days';`
-
-### 22. Операции по часам
-**Вопрос:** "покажи активность операций по часам"
-**SQL:** `SELECT EXTRACT(HOUR FROM created_at) as hour, COUNT(*) as count FROM batch_operations GROUP BY EXTRACT(HOUR FROM created_at) ORDER BY hour;`
-
-### 23. Батчи по месяцам
-**Вопрос:** "покажи количество батчей по месяцам"
-**SQL:** `SELECT EXTRACT(YEAR FROM created_at) as year, EXTRACT(MONTH FROM created_at) as month, COUNT(*) as count FROM batches GROUP BY EXTRACT(YEAR FROM created_at), EXTRACT(MONTH FROM created_at) ORDER BY year, month;`
-
-### 24. Время работы системы
-**Вопрос:** "сколько времени работает система?"
-**SQL:** `SELECT NOW() - MIN(created_at) as system_uptime FROM batches;`
-
-### 25. Последняя активность
-**Вопрос:** "когда была последняя активность в системе?"
-**SQL:** `SELECT MAX(GREATEST(created_at, updated_at)) as last_activity FROM batches;`
-
-## Сложные запросы
-
-### 26. Батчи с операциями
-**Вопрос:** "покажи батчи с количеством операций"
-**SQL:** `SELECT b.batch_id, b.part_name, COUNT(bo.operation_no) as operation_count FROM batches b LEFT JOIN batch_operations bo ON b.batch_id = bo.batch_id GROUP BY b.batch_id, b.part_name;`
-
-### 27. Станки с батчами
-**Вопрос:** "покажи станки с количеством батчей"
-**SQL:** `SELECT m.machine_id, m.machine_name, COUNT(DISTINCT bo.batch_id) as batch_count FROM machines m LEFT JOIN batch_operations bo ON m.machine_id = bo.machine_id GROUP BY m.machine_id, m.machine_name;`
-
-### 28. Среднее время по станкам
-**Вопрос:** "покажи среднее время операций по станкам"
-**SQL:** `SELECT machine_id, AVG(actual_time_sec) as avg_time FROM batch_operations WHERE actual_time_sec IS NOT NULL GROUP BY machine_id ORDER BY avg_time DESC;`
-
-### 29. Батчи с превышением времени
-**Вопрос:** "покажи батчи где фактическое время больше запланированного"
-**SQL:** `SELECT batch_id, operation_no, planned_time_sec, actual_time_sec FROM batch_operations WHERE actual_time_sec > planned_time_sec;`
-
-### 30. Общая статистика
-**Вопрос:** "покажи общую статистику системы"
-**SQL:** `SELECT 'batches' as table_name, COUNT(*) as count FROM batches UNION ALL SELECT 'operations', COUNT(*) FROM batch_operations UNION ALL SELECT 'machines', COUNT(*) FROM machines;`
-
-Q: ?????? ???????
+### Работающие станки
+Q: "Сколько станков сейчас работает?"
 SQL:
 ```sql
-SELECT 1 AS x
+SELECT COUNT(*) AS working_machines_count
+FROM machines m
+JOIN setup_jobs sj ON m.id = sj.machine_id
+WHERE sj.status = 'active' AND sj.end_time IS NULL
 ```
 
-Q: “Сколько открытых батчей?”
+Q: "Покажи все работающие станки"
+SQL:
+```sql
+SELECT m.id, m.name, sj.start_time
+FROM machines m
+JOIN setup_jobs sj ON m.id = sj.machine_id
+WHERE sj.status = 'active' AND sj.end_time IS NULL
+```
+
+### Свободные станки
+Q: "Сколько станков свободно?"
+SQL:
+```sql
+SELECT COUNT(*) AS free_machines_count
+FROM machines m
+LEFT JOIN setup_jobs sj ON m.id = sj.machine_id AND sj.status = 'active' AND sj.end_time IS NULL
+WHERE sj.id IS NULL AND m.is_active = true
+```
+
+Q: "Покажи все свободные станки"
+SQL:
+```sql
+SELECT m.id, m.name
+FROM machines m
+LEFT JOIN setup_jobs sj ON m.id = sj.machine_id AND sj.status = 'active' AND sj.end_time IS NULL
+WHERE sj.id IS NULL AND m.is_active = true
+```
+
+### Батчи
+Q: "Сколько открытых батчей?"
 SQL:
 ```sql
 SELECT COUNT(*) AS open_batches_count
 FROM batches
 WHERE current_quantity > 0
+```
+
+Q: "Покажи все открытые батчи"
+SQL:
+```sql
+SELECT id, current_quantity, created_at
+FROM batches
+WHERE current_quantity > 0
+```
+
+Q: "Сколько деталей в батче 123?"
+SQL:
+```sql
+SELECT current_quantity
+FROM batches
+WHERE id = 123
+```
+
+### Карточки
+Q: "Сколько свободных карточек?"
+SQL:
+```sql
+SELECT COUNT(*) AS free_cards_count
+FROM cards
+WHERE status = 'free'
+```
+
+Q: "Покажи все свободные карточки"
+SQL:
+```sql
+SELECT card_number, machine_id, last_event
+FROM cards
+WHERE status = 'free'
+```
+
+Q: "Какие карточки используются в батче 456?"
+SQL:
+```sql
+SELECT card_number, machine_id, status
+FROM cards
+WHERE batch_id = 456
+```
+
+### Настройки станков
+Q: "Сколько активных настроек?"
+SQL:
+```sql
+SELECT COUNT(*) AS active_setups_count
+FROM setup_jobs
+WHERE status = 'active' AND end_time IS NULL
+```
+
+Q: "Покажи все активные настройки"
+SQL:
+```sql
+SELECT sj.id, m.name, sj.start_time, sj.planned_quantity
+FROM setup_jobs sj
+JOIN machines m ON sj.machine_id = m.id
+WHERE sj.status = 'active' AND sj.end_time IS NULL
+```
+
+### Статистика по станкам
+Q: "Сколько всего станков?"
+SQL:
+```sql
+SELECT COUNT(*) AS total_machines_count
+FROM machines
+WHERE is_active = true
+```
+
+Q: "Покажи все станки"
+SQL:
+```sql
+SELECT id, name, type, is_active
+FROM machines
+WHERE is_active = true
+ORDER BY name
+```
+
+### Статистика по батчам
+Q: "Сколько всего батчей?"
+SQL:
+```sql
+SELECT COUNT(*) AS total_batches_count
+FROM batches
+```
+
+Q: "Покажи все батчи за сегодня"
+SQL:
+```sql
+SELECT id, current_quantity, created_at
+FROM batches
+WHERE DATE(created_at) = CURRENT_DATE
+ORDER BY created_at DESC
+```
+
+### Статистика по карточкам
+Q: "Сколько всего карточек?"
+SQL:
+```sql
+SELECT COUNT(*) AS total_cards_count
+FROM cards
+```
+
+Q: "Покажи карточки по станку 5"
+SQL:
+```sql
+SELECT card_number, status, batch_id, last_event
+FROM cards
+WHERE machine_id = 5
+ORDER BY card_number
 ```
