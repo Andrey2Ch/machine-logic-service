@@ -153,9 +153,63 @@ def _sanitize_sql_literals(sql: str) -> str:
 
 def _detect_kind(sql: str) -> str:
     s = sql.strip().lower()
-    if s.startswith("insert") or s.startswith("update") or s.startswith("delete") or s.startswith("merge"):
-        return "dml"
+    if s.startswith("insert"):
+        return "insert"
+    elif s.startswith("update"):
+        return "update"
+    elif s.startswith("delete"):
+        return "delete"
+    elif s.startswith("merge"):
+        return "merge"
     return "select"
+
+
+def _dml_question(sql: str, kind: str) -> tuple[str, list[str]]:
+    """Генерирует вопросы для DML-запросов."""
+    hints = [f"DML: {kind.upper()}"]
+    
+    if kind == "insert":
+        # INSERT INTO table (cols) VALUES ... или INSERT INTO table SELECT ...
+        m_table = re.search(r"insert\s+into\s+(\w+)", sql)
+        table = m_table.group(1) if m_table else "таблицу"
+        return (f"Добавить записи в {table}?", hints)
+    
+    elif kind == "update":
+        # UPDATE table SET col=val WHERE ...
+        m_table = re.search(r"update\s+(\w+)", sql)
+        table = m_table.group(1) if m_table else "таблицу"
+        
+        # SET поля
+        m_set = re.search(r"set\s+(.+?)(\s+where|$)", sql)
+        if m_set:
+            set_expr = m_set.group(1).strip()
+            # ищем поля: col = value
+            cols = re.findall(r"(\w+)\s*=", set_expr)
+            if cols:
+                cols_text = ", ".join(cols[:3]) + (" и др." if len(cols) > 3 else "")
+                hints.append(f"SET: {cols_text}")
+        
+        # WHERE условие
+        m_where = re.search(r"where\s+(.+)$", sql)
+        if m_where:
+            where_expr = m_where.group(1).strip()
+            # упрощённый парсинг
+            conds = []
+            for match in re.finditer(r"(\w+)\s*=\s*%\([^)]+\)s", where_expr):
+                conds.append(f"{match.group(1)} = <значение>")
+            if conds:
+                hints.append(f"WHERE: {'; '.join(conds[:2])}")
+        
+        return (f"Обновить {table}?", hints)
+    
+    elif kind == "delete":
+        # DELETE FROM table WHERE ...
+        m_table = re.search(r"delete\s+from\s+(\w+)", sql)
+        table = m_table.group(1) if m_table else "таблицы"
+        return (f"Удалить записи из {table}?", hints)
+    
+    else:  # merge, etc.
+        return ("Что делает этот DML-запрос?", hints)
 
 
 def _ru_from_sql(sql: str) -> tuple[str, list[str]]:
@@ -164,8 +218,9 @@ def _ru_from_sql(sql: str) -> tuple[str, list[str]]:
     s = re.sub(r"\s+", " ", sql.strip(), flags=re.MULTILINE)
     low = s.lower()
 
-    if _detect_kind(low) != "select":
-        return ("Что делает этот DML-запрос? (выполняет изменение данных)", ["DML: не формируем точный вопрос"]) 
+    kind = _detect_kind(low)
+    if kind != "select":
+        return _dml_question(low, kind) 
 
     # SELECT list
     m_select = re.search(r"select (.+?) from ", low)

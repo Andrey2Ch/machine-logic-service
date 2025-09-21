@@ -3737,4 +3737,6 @@ app.include_router(catalog_router.router)
 app.include_router(employees_router.router)
 app.include_router(cards_router.router)
 from .text2sql.routers import router as text2sql_router
+from .text2sql.routers.admin import router as text2sql_admin_router
 app.include_router(text2sql_router)
+app.include_router(text2sql_admin_router)
