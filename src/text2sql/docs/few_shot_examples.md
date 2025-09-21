@@ -40,6 +40,18 @@ LEFT JOIN setup_jobs sj ON m.id = sj.machine_id AND sj.status = 'active' AND sj.
 WHERE sj.id IS NULL AND m.is_active = true
 ```
 
+### Поиск по имени станка
+Q: "сколько деталей вчера сделал станок SR23?"
+SQL:
+```sql
+SELECT SUM(b.initial_quantity - b.current_quantity) AS total_parts_produced
+FROM batches b
+JOIN setup_jobs sj ON b.setup_job_id = sj.id
+JOIN machines m ON sj.machine_id = m.id
+WHERE m.name LIKE '%SR23%'
+  AND b.batch_time::date = CURRENT_DATE - INTERVAL '1 day'
+```
+
 ### Батчи
 Q: "Сколько открытых батчей?"
 SQL:
