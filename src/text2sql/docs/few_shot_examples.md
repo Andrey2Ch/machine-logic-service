@@ -9,7 +9,7 @@ SQL:
 SELECT COUNT(*) AS working_machines_count
 FROM machines m
 JOIN setup_jobs sj ON m.id = sj.machine_id
-WHERE sj.status = 'active' AND sj.end_time IS NULL
+WHERE sj.status = 'started' AND sj.end_time IS NULL
 ```
 
 Q: "Покажи все работающие станки"
@@ -18,7 +18,7 @@ SQL:
 SELECT m.id, m.name, sj.start_time
 FROM machines m
 JOIN setup_jobs sj ON m.id = sj.machine_id
-WHERE sj.status = 'active' AND sj.end_time IS NULL
+WHERE sj.status = 'started' AND sj.end_time IS NULL
 ```
 
 ### Свободные станки
@@ -27,7 +27,7 @@ SQL:
 ```sql
 SELECT COUNT(*) AS free_machines_count
 FROM machines m
-LEFT JOIN setup_jobs sj ON m.id = sj.machine_id AND sj.status = 'active' AND sj.end_time IS NULL
+LEFT JOIN setup_jobs sj ON m.id = sj.machine_id AND sj.status = 'started' AND sj.end_time IS NULL
 WHERE sj.id IS NULL AND m.is_active = true
 ```
 

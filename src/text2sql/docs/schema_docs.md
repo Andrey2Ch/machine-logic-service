@@ -3,7 +3,7 @@
 ## Бизнес-логика системы
 
 ### Станки (machines)
-- **Работающий станок** = станок с активной настройкой (setup_job) где `status = 'active'` и `end_time IS NULL`
+- **Работающий станок** = станок с активной настройкой (setup_job) где `status = 'started'` и `end_time IS NULL`
 - **Свободный станок** = станок без активной настройки
 - **Статусы станков**: `active` (работает), `idle` (простой), `maintenance` (техобслуживание)
 
@@ -18,9 +18,9 @@
 - **Статусы**: `free` (свободна), `in_use` (используется), `defective` (брак)
 
 ### Настройки (setup_jobs)
-- **Активная настройка** = `status = 'active'` и `end_time IS NULL`
-- **Завершенная настройка** = `end_time IS NOT NULL`
-- **Статусы**: `active` (активна), `completed` (завершена), `cancelled` (отменена)
+- **Активная настройка** = `status = 'started'` и `end_time IS NULL`
+- **Завершенная настройка** = `status = 'completed'` или `end_time IS NOT NULL`
+- **Статусы**: `started` (активна), `completed` (завершена), `cancelled` (отменена), `created` (создана), `allowed` (разрешена)
 
 ## Таблицы
 
