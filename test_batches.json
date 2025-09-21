@@ -1,1 +1,0 @@
-{"question": "SELECT COUNT(*) as total_batches, MIN(batch_time) as earliest, MAX(batch_time) as latest FROM batches"}

@@ -1,1 +1,0 @@
-{"question": "SELECT * FROM machines WHERE name LIKE '%SR23%' OR name LIKE '%SR-23%'"}

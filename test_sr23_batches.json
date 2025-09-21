@@ -1,1 +1,0 @@
-{"question": "SELECT COUNT(*) as batches_count FROM batches b JOIN setup_jobs sj ON b.setup_job_id = sj.id JOIN machines m ON sj.machine_id = m.id WHERE m.name LIKE '%SR23%'"}

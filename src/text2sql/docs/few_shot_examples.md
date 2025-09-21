@@ -52,6 +52,23 @@ WHERE m.name LIKE '%SR23%'
   AND b.batch_time::date = CURRENT_DATE - INTERVAL '1 day'
 ```
 
+Q: "сколько деталей сделал SR23 в свою последнюю рабочую смену?"
+SQL:
+```sql
+SELECT SUM(b.initial_quantity - b.current_quantity) AS total_parts_produced
+FROM batches b
+JOIN setup_jobs sj ON b.setup_job_id = sj.id
+JOIN machines m ON sj.machine_id = m.id
+WHERE m.name LIKE '%SR23%'
+  AND b.batch_time = (
+    SELECT MAX(b2.batch_time)
+    FROM batches b2
+    JOIN setup_jobs sj2 ON b2.setup_job_id = sj2.id
+    JOIN machines m2 ON sj2.machine_id = m2.id
+    WHERE m2.name LIKE '%SR23%'
+  )
+```
+
 ### Батчи
 Q: "Сколько открытых батчей?"
 SQL:
