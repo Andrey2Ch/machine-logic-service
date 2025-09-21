@@ -249,7 +249,8 @@ async def list_captured(
 
         where_sql = " and ".join(where)
         base = f"""
-            select id, captured_at, duration_ms, rows_affected, route, user_id, role, sql
+            select id, captured_at, duration_ms, rows_affected, route, user_id, role, sql,
+                   question_ru, question_hints, question_generated_at
             from text2sql_captured
             where {where_sql}
             order by captured_at desc
