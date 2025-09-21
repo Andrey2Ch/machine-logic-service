@@ -57,10 +57,12 @@ class SQLValidator:
             r'\bcase\s+when\b',
         ]
         
-        # Разрешенные таблицы (можно настроить)
+        # Разрешенные таблицы (можно настроить и сузить до вьюх семантического слоя)
         self.allowed_tables = {
-            'batches', 'batch_operations', 'machines', 
-            'employees', 'access_attempts', 'cards'
+            'batches', 'batch_operations', 'machines',
+            'employees', 'access_attempts', 'cards', 'setup_jobs',
+            # семантические вьюхи (если есть)
+            'batches_with_shifts'
         }
         
         # Разрешенные функции
@@ -68,6 +70,13 @@ class SQLValidator:
             'count', 'sum', 'avg', 'max', 'min', 'now', 'coalesce',
             'date_trunc', 'extract', 'to_char', 'to_date'
         }
+
+        # Кэш схемы: table -> set(columns)
+        self.table_columns: Dict[str, Set[str]] = {}
+
+    def set_table_columns(self, table_columns: Dict[str, Set[str]]) -> None:
+        """Задать кэш схемы (таблица -> множество колонок)."""
+        self.table_columns = {t.lower(): set(c.lower() for c in cols) for t, cols in table_columns.items()}
 
     def validate(self, sql: str) -> Dict[str, Any]:
         """
@@ -114,9 +123,15 @@ class SQLValidator:
                 errors.append("Query must start with SELECT or WITH")
         
         # Проверка таблиц (если указаны)
-        table_matches = re.findall(r'\bfrom\s+(\w+)', sanitized_sql, re.IGNORECASE)
-        for table in table_matches:
-            if table.lower() not in self.allowed_tables:
+        table_matches = re.findall(r'\bfrom\s+(\w+)|\bjoin\s+(\w+)', sanitized_sql, re.IGNORECASE)
+        used_tables: Set[str] = set()
+        for t1, t2 in table_matches:
+            table = (t1 or t2) or ''
+            t_low = table.lower()
+            if not t_low:
+                continue
+            used_tables.add(t_low)
+            if t_low not in self.allowed_tables and t_low not in self.table_columns:
                 warnings.append(f"Unknown table: {table}")
         
         # Проверка функций
@@ -124,6 +139,27 @@ class SQLValidator:
         for func in function_matches:
             if func.lower() not in self.allowed_functions and not re.match(r'^[a-z_]+$', func.lower()):
                 warnings.append(f"Unknown function: {func}")
+
+        # Schema-aware проверка квалифицированных колонок (alias/table.column)
+        try:
+            if self.table_columns:
+                qual_cols = re.findall(r'\b([a-z_][a-z0-9_]*)\s*\.\s*([a-z_][a-z0-9_]*)\b', sanitized_sql, re.IGNORECASE)
+                known_cols_global: Set[str] = set()
+                for cols in self.table_columns.values():
+                    known_cols_global.update(cols)
+                for tbl_or_alias, col in qual_cols:
+                    t_low = tbl_or_alias.lower()
+                    c_low = col.lower()
+                    if t_low in self.table_columns:
+                        if c_low not in self.table_columns[t_low]:
+                            errors.append(f"Unknown column: {tbl_or_alias}.{col}")
+                    else:
+                        # alias неизвестен — проверим, что такая колонка вообще существует в схеме
+                        if c_low not in known_cols_global:
+                            errors.append(f"Unknown column: {tbl_or_alias}.{col}")
+        except Exception:
+            # не ломаем валидацию, если эвристика не сработала
+            pass
         
         # Автоматическое добавление LIMIT если нет
         if not re.search(r'\blimit\b', sanitized_sql, re.IGNORECASE):

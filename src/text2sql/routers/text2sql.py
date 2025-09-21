@@ -515,7 +515,21 @@ async def llm_query(payload: LLMQuery,
     else:
         chosen_level = level_map.get(payload.validation_level, ValidationLevel.MODERATE)
 
+    # Подготовим schema-aware валидатор
     validator = SQLValidator(chosen_level)
+    try:
+        # кэшируем колонки из information_schema
+        tbl_cols = {}
+        res = db.execute(text("""
+            SELECT table_name, column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+        """))
+        for table_name, column_name in res.fetchall():
+            tbl_cols.setdefault(table_name, set()).add(column_name)
+        validator.set_table_columns(tbl_cols)
+    except Exception:
+        pass
     result = validator.validate(raw_sql)
     if not result["valid"]:
         # Пишем историю даже при невалидном SQL
@@ -543,6 +557,29 @@ async def llm_query(payload: LLMQuery,
     # Выполнение
     try:
         svc = Text2SQLService(db)
+        # Префлайт EXPLAIN для раннего отлова ошибок колонок/таблиц
+        try:
+            db.execute(text(f"EXPLAIN {result['sanitized_sql']}"))
+        except Exception as ex:
+            # Один авто-ретрай с подсказкой для LLM
+            hint = str(ex)
+            llm = ClaudeText2SQL()
+            repair_prompt = (
+                f"Исправь SQL с учётом ошибки СУБД. Ошибка: {hint}. "
+                f"Используй только реально существующие таблицы/колонки из схемы. Вопрос: {question}"
+            )
+            try:
+                raw_sql2 = await llm.generate_sql(repair_prompt, schema_docs, examples)
+                result2 = validator.validate(raw_sql2)
+                if result2["valid"]:
+                    db.execute(text(f"EXPLAIN {result2['sanitized_sql']}"))
+                    result = result2
+                    raw_sql = raw_sql2
+                else:
+                    return {"sql": raw_sql2, "validation": result2, "error": "SQL validation failed (after repair)"}
+            except Exception:
+                return {"sql": raw_sql, "validation": result, "error": f"EXPLAIN failed: {hint}"}
+
         cols, rows = svc.execute(result["sanitized_sql"]) 
 
         # Сохраняем историю (превью первых строк)
