@@ -813,76 +813,104 @@ class OperatorMachineViewItem(BaseModel):
         from_attributes = True
         populate_by_name = True 
 
+# --- КЭШ и single-flight для /machines/operator-view ---
+import os, time, asyncio  # локальные импорты безопасны для читаемости
+_OPVIEW_CACHE = {"data": None, "at": 0.0}
+_OPVIEW_TTL = float(os.getenv('OPVIEW_CACHE_TTL', '15'))           # сек
+_OPVIEW_STALE_MAX = float(os.getenv('OPVIEW_STALE_MAX', '60'))      # сек (отдаём устаревшее при ошибке)
+_OPVIEW_COOLDOWN = float(os.getenv('OPVIEW_COOLDOWN', '20'))        # сек (пауза после фейла)
+_OPVIEW_LOCK = asyncio.Lock()
+_OPVIEW_LAST_FAIL_AT = 0.0
+
 # Изменяем путь и убираем operator_id из аргументов
 @app.get("/machines/operator-view", response_model=List[OperatorMachineViewItem])
 async def get_operator_machines_view(db: Session = Depends(get_db_session)):
     """
-    Получает список ВСЕХ активных станков с информацией
-    о последней активной наладке и последнем показании (ОПТИМИЗИРОВАННАЯ ВЕРСИЯ).
+    Получает список ВСЕХ активных станков с информацией (с TTL-кэшем и single-flight).
     """
-    logger.info("Fetching optimized operator machine view for ALL operators")
-    try:
-        active_setup_statuses = ('created', 'pending_qc', 'allowed', 'started')
-        
-        sql_query = text(f"""
-        WITH latest_readings AS (
-            -- Находим последнее показание для каждой АКТИВНОЙ наладки
+    global _OPVIEW_CACHE, _OPVIEW_LAST_FAIL_AT
+
+    now = time.time()
+    # Быстрая отдача свежего кэша
+    if _OPVIEW_CACHE["data"] is not None and (now - _OPVIEW_CACHE["at"] <= _OPVIEW_TTL):
+        return _OPVIEW_CACHE["data"]
+
+    # Cooldown после фейла — отдаём устаревшее, если есть
+    if _OPVIEW_LAST_FAIL_AT and (now - _OPVIEW_LAST_FAIL_AT < _OPVIEW_COOLDOWN):
+        if _OPVIEW_CACHE["data"] is not None and (now - _OPVIEW_CACHE["at"] <= _OPVIEW_STALE_MAX):
+            return _OPVIEW_CACHE["data"]
+        return []
+
+    async with _OPVIEW_LOCK:
+        # Повторная проверка кэша внутри замка
+        now = time.time()
+        if _OPVIEW_CACHE["data"] is not None and (now - _OPVIEW_CACHE["at"] <= _OPVIEW_TTL):
+            return _OPVIEW_CACHE["data"]
+
+        logger.info("Fetching optimized operator machine view for ALL operators")
+        try:
+            active_setup_statuses = ('created', 'pending_qc', 'allowed', 'started')
+            sql_query = text(f"""
+            WITH latest_readings AS (
+                SELECT 
+                    mr.setup_job_id,
+                    mr.machine_id,
+                    mr.reading, 
+                    mr.created_at AT TIME ZONE 'Asia/Jerusalem' as created_at,
+                    ROW_NUMBER() OVER (PARTITION BY mr.setup_job_id ORDER BY mr.created_at DESC) as rn
+                FROM machine_readings mr
+                WHERE mr.setup_job_id IS NOT NULL
+            ),
+            latest_setups AS (
+                SELECT 
+                    id,
+                    planned_quantity,
+                    additional_quantity,
+                    part_id,
+                    status,
+                    machine_id,
+                    ROW_NUMBER() OVER (PARTITION BY machine_id ORDER BY created_at DESC) as rn
+                FROM setup_jobs
+                WHERE status IN :active_statuses AND end_time IS NULL
+            )
             SELECT 
-                mr.setup_job_id,
-                mr.machine_id,
-                mr.reading, 
-                mr.created_at AT TIME ZONE 'Asia/Jerusalem' as created_at,
-                ROW_NUMBER() OVER (PARTITION BY mr.setup_job_id ORDER BY mr.created_at DESC) as rn
-            FROM machine_readings mr
-            WHERE mr.setup_job_id IS NOT NULL
-        ),
-        latest_setups AS (
-            -- Находим последнюю активную наладку для каждого станка
-            SELECT 
-                id,
-                planned_quantity,
-                additional_quantity,
-                part_id,
-                status,
-                machine_id,
-                ROW_NUMBER() OVER (PARTITION BY machine_id ORDER BY created_at DESC) as rn
-            FROM setup_jobs
-            WHERE status IN :active_statuses AND end_time IS NULL
-        )
-        SELECT 
-            m.id,
-            m.name,
-            lr.reading as last_reading,
-            lr.created_at as last_reading_time,
-            ls.id as setup_id,
-            p.drawing_number,
-            ls.planned_quantity,
-            ls.additional_quantity,
-            COALESCE(ls.status, 'idle') as status
-        FROM machines m
-        LEFT JOIN (
-            SELECT * FROM latest_setups WHERE rn = 1
-        ) ls ON m.id = ls.machine_id
-        LEFT JOIN (
-            SELECT * FROM latest_readings WHERE rn = 1
-        ) lr ON ls.id = lr.setup_job_id  -- 🔧 СВЯЗЫВАЕМ ПО НАЛАДКЕ, А НЕ ПО СТАНКУ
-        LEFT JOIN parts p ON ls.part_id = p.id
-        WHERE m.is_active = true
-        ORDER BY m.name;
-        """)
+                m.id,
+                m.name,
+                lr.reading as last_reading,
+                lr.created_at as last_reading_time,
+                ls.id as setup_id,
+                p.drawing_number,
+                ls.planned_quantity,
+                ls.additional_quantity,
+                COALESCE(ls.status, 'idle') as status
+            FROM machines m
+            LEFT JOIN (
+                SELECT * FROM latest_setups WHERE rn = 1
+            ) ls ON m.id = ls.machine_id
+            LEFT JOIN (
+                SELECT * FROM latest_readings WHERE rn = 1
+            ) lr ON ls.id = lr.setup_job_id
+            LEFT JOIN parts p ON ls.part_id = p.id
+            WHERE m.is_active = true
+            ORDER BY m.name;
+            """)
 
-        result = db.execute(sql_query, {"active_statuses": active_setup_statuses})
-        rows = result.fetchall()
+            result = db.execute(sql_query, {"active_statuses": active_setup_statuses})
+            rows = result.fetchall()
+            result_list = [OperatorMachineViewItem.from_orm(row) for row in rows]
 
-        # Используем .from_orm() для прямого преобразования в Pydantic модель
-        result_list = [OperatorMachineViewItem.from_orm(row) for row in rows]
-        
-        logger.info(f"Successfully prepared operator machine view with {len(result_list)} machines.")
-        return result_list
+            _OPVIEW_CACHE["data"], _OPVIEW_CACHE["at"] = result_list, time.time()
+            _OPVIEW_LAST_FAIL_AT = 0.0
+            logger.info(f"Successfully prepared operator machine view with {len(result_list)} machines.")
+            return result_list
 
-    except Exception as e:
-        logger.error(f"Error fetching optimized operator machine view: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error fetching operator machine view")
+        except Exception as e:
+            _OPVIEW_LAST_FAIL_AT = time.time()
+            logger.error(f"Error fetching optimized operator machine view: {e}", exc_info=True)
+            # stale-while-error
+            if _OPVIEW_CACHE["data"] is not None and (now - _OPVIEW_CACHE["at"] <= _OPVIEW_STALE_MAX):
+                return _OPVIEW_CACHE["data"]
+            raise HTTPException(status_code=500, detail="Internal server error fetching operator machine view")
 
 async def check_lot_completion_and_update_status(lot_id: int, db: Session):
     """
