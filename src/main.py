@@ -3625,7 +3625,8 @@ async def get_daily_allowed_setups(
                 l.lot_number               AS lot_number,
                 sj.planned_quantity        AS planned_quantity,
                 sj.created_at              AS setup_created_at,
-                sj.qa_date                 AS setup_allowed_at,
+                -- Приводим время разрешения к IL через двойную конвертацию
+                (sj.qa_date AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem') AS setup_allowed_at,
                 em.full_name               AS machinist_name,
                 eq.full_name               AS qa_employee_name,
                 EXTRACT(EPOCH FROM (sj.qa_date - sj.created_at)) / 3600.0 AS duration_created_to_allowed_hours,
@@ -3643,19 +3644,9 @@ async def get_daily_allowed_setups(
             LEFT JOIN lots l ON l.id = sj.lot_id
             LEFT JOIN employees em ON em.id = sj.employee_id
             LEFT JOIN employees eq ON eq.id = sj.qa_id
-            WHERE (
-                -- Классический случай: есть qa_date в выбранный день (IL)
-                (sj.qa_date IS NOT NULL
-                 AND DATE(sj.qa_date AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem') = :target_date)
-                OR
-                -- Расширенный случай: qa_date ещё нет, но QA уже указан и сетап создан/запущен в выбранный день (IL)
-                (sj.qa_date IS NULL
-                 AND sj.qa_id IS NOT NULL
-                 AND (
-                      DATE(sj.created_at  AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem') = :target_date
-                   OR DATE(sj.start_time  AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem') = :target_date
-                 ))
-            )
+            WHERE 
+                sj.qa_date IS NOT NULL
+                AND DATE(sj.qa_date AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Jerusalem') = :target_date
         )
         SELECT 
             setup_job_id,
