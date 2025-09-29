@@ -141,3 +141,40 @@ async def send_setup_to_qc(setup_id: int, db: Session = Depends(get_db_session))
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Ошибка при отправке в ОТК: {e}")
+
+
+class ApproveSetupPayload(BaseModel):
+    qa_id: int
+
+
+@router.post("/setup/{setup_id}/approve", summary="Разрешить наладку (allowed) и зафиксировать qa_date, qa_id")
+async def approve_setup(setup_id: int, payload: ApproveSetupPayload, db: Session = Depends(get_db_session)):
+    try:
+        setup = db.query(SetupDB).filter(SetupDB.id == setup_id).first()
+        if not setup:
+            raise HTTPException(status_code=404, detail="Наладка не найдена")
+        if setup.status not in ("pending_qc", "created"):
+            raise HTTPException(status_code=400, detail=f"Ожидался статус 'pending_qc' или 'created', текущий: '{setup.status}'")
+
+        setup.status = 'allowed'
+        setup.qa_id = payload.qa_id
+        setup.qa_date = datetime.now()
+        db.commit()
+
+        # Отправляем уведомление через встроенный QC роутер (локально внутри сервиса)
+        try:
+            # Импортируем здесь, чтобы избежать циклических импортов на уровне модуля
+            from .qc import notify_setup_allowed, NotifyRequest
+            # Вызовем хендлер напрямую, передав сессию
+            req = NotifyRequest(setup_id=setup.id)
+            # notify_setup_allowed — async; вызовем и проигнорируем ошибки, чтобы не ломать approve
+            await notify_setup_allowed(req, db)
+        except Exception as notify_err:
+            logger.warning(f"Approve ok, но уведомление не отправлено: {notify_err}")
+
+        return {"success": True, "status": setup.status}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Ошибка при разрешении наладки: {e}")
