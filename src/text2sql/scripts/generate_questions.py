@@ -16,7 +16,14 @@ import httpx
 """
 
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
-MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-3-5-sonnet-20240620")
+# Поддержка псевдонимов для автоматического использования последней версии
+_raw_model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
+if _raw_model == "opus":
+    MODEL = "claude-opus-4-1-20250805"
+elif _raw_model == "sonnet":
+    MODEL = "claude-sonnet-4-20250514"  # Последняя версия Sonnet
+else:
+    MODEL = _raw_model
 API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
 BASE = Path(__file__).resolve().parents[1] / "knowledge" / "harvest"

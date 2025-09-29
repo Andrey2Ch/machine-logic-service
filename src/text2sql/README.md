@@ -62,9 +62,32 @@ print(result['sql'])  # SELECT COUNT(*) as open_batches FROM batches WHERE statu
 2. Обновление схемы: `scripts/generate_schema_docs.py`
 3. Тестирование: `GET /api/text2sql/evaluate`
 
+## Модели Anthropic
+
+Сервис использует последние модели Anthropic:
+
+- **По умолчанию**: `claude-sonnet-4-20250514` (последняя версия Sonnet, май 2025)
+- **Псевдонимы**: 
+  - `opus` → `claude-opus-4-1-20250805`
+  - `sonnet` → `claude-sonnet-4-20250514`
+
+### Настройка модели
+
+```bash
+# Использовать Sonnet (по умолчанию, быстрее и дешевле)
+export ANTHROPIC_MODEL="sonnet"
+
+# Использовать Opus (самая мощная)
+export ANTHROPIC_MODEL="opus"
+
+# Использовать конкретную версию
+export ANTHROPIC_MODEL="claude-sonnet-4-20250514"
+```
+
 ## Статус
 
 - ✅ MVP Backend Foundation
 - ✅ MVP Frontend Integration  
 - ✅ Семантический слой и RAG
+- ✅ Обновлено до Claude Sonnet 4 (май 2025)
 - 🔄 Production-готовность (в процессе)

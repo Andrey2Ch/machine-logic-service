@@ -8,9 +8,15 @@ ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 
 
 class ClaudeText2SQL:
-    def __init__(self, model: str = "claude-3-5-sonnet-20240620", max_tokens: int = 1000, temperature: float = 0.0):
+    def __init__(self, model: str = "claude-sonnet-4-20250514", max_tokens: int = 1000, temperature: float = 0.0):
         self.api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        self.model = model
+        # Поддержка псевдонимов для автоматического использования последней версии
+        if model == "opus":
+            self.model = "claude-opus-4-1-20250805"
+        elif model == "sonnet":
+            self.model = "claude-sonnet-4-20250514"  # Последняя версия Sonnet
+        else:
+            self.model = model
         self.max_tokens = max_tokens
         self.temperature = temperature
 
