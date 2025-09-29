@@ -33,7 +33,8 @@ class Text2SQLMetrics:
     def execute_sql_safe(self, sql: str) -> Tuple[bool, List[Dict[str, Any]]]:
         """Безопасное выполнение SQL с обработкой ошибок"""
         try:
-            with self.db.begin():
+            ctx = self.db.begin_nested() if self.db.in_transaction() else self.db.begin()
+            with ctx:
                 result = self.db.execute(text(sql))
                 cols = list(result.keys())
                 rows = [dict(zip(cols, r)) for r in result.fetchall()]

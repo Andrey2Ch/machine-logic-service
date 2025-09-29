@@ -90,7 +90,8 @@ class Text2SQLService:
 
     def execute(self, sql: str) -> Tuple[List[str], List[Dict[str, Any]]]:
         safe_sql = self._enforce_safe(sql)
-        with self.db.begin():
+        ctx = self.db.begin_nested() if self.db.in_transaction() else self.db.begin()
+        with ctx:
             try:
                 bind = getattr(self.db, "bind", None)
                 if bind is not None and hasattr(bind, "dialect") and "postgres" in bind.dialect.name:
