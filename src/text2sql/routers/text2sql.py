@@ -641,6 +641,46 @@ async def llm_query(payload: LLMQuery,
         # В случае ошибки просто продолжаем с файловой схемой
         schema_text = ""
 
+    # Fallback: если не удалось получить live-схему, парсим schema_docs.md в минимальную карту таблиц/колонок
+    if not tbl_cols:
+        try:
+            parsed: dict[str, set[str]] = {}
+            # Ищем блоки CREATE TABLE <name> ( ... ) и вытаскиваем имена колонок
+            lines = (schema_docs or "").splitlines()
+            i = 0
+            import re as _re
+            while i < len(lines):
+                m = _re.search(r"^\s*CREATE\s+TABLE\s+([a-z_][a-z0-9_]*)\s*\(", lines[i], _re.IGNORECASE)
+                if not m:
+                    i += 1
+                    continue
+                tname = m.group(1)
+                cols: set[str] = set()
+                i += 1
+                while i < len(lines) and ")" not in lines[i]:
+                    # парсим первую лексему как имя поля
+                    mcol = _re.match(r"^\s*([a-z_][a-z0-9_]*)\s+", lines[i], _re.IGNORECASE)
+                    if mcol:
+                        col = mcol.group(1)
+                        # отбрасываем служебные слова
+                        if col.lower() not in {"primary", "foreign", "unique", "constraint"}:
+                            cols.add(col)
+                    i += 1
+                if cols:
+                    parsed[tname] = cols
+                # пропустим строку с ")" если на ней закончили
+                i += 1
+            if parsed:
+                tbl_cols = parsed
+                # Сформируем текст для контекста (как в LIVE SCHEMA)
+                lines2: list[str] = []
+                for t in sorted(tbl_cols.keys()):
+                    cols_list = ", ".join(sorted(tbl_cols[t]))
+                    lines2.append(f"- {t}({cols_list})")
+                schema_text = "\n".join(lines2)
+        except Exception:
+            pass
+
     # Построим компактный ALLOWED_SCHEMA, релевантный вопросу, чтобы не обрезать JSON (без [:8000])
     def _build_allowed_schema_subset(q: str, full: dict[str, set[str]]) -> dict[str, list[str]]:
         q_low = (q or "").lower()
