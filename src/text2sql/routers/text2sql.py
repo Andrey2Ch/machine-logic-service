@@ -641,6 +641,37 @@ async def llm_query(payload: LLMQuery,
         # В случае ошибки просто продолжаем с файловой схемой
         schema_text = ""
 
+    # Построим компактный ALLOWED_SCHEMA, релевантный вопросу, чтобы не обрезать JSON (без [:8000])
+    def _build_allowed_schema_subset(q: str, full: dict[str, set[str]]) -> dict[str, list[str]]:
+        q_low = (q or "").lower()
+        # базовые таблицы домена, которые почти всегда нужны
+        pinned = {"employees", "setup_jobs", "machines", "lots", "parts"}
+        scored: list[tuple[int, str]] = []
+        for t, cols in full.items():
+            score = 0
+            if t in pinned:
+                score += 100
+            # наивный скоринг по вхождению токенов таблицы/колонок в вопрос
+            if t in q_low:
+                score += 10
+            for c in cols:
+                if c in q_low:
+                    score += 1
+            scored.append((score, t))
+        scored.sort(reverse=True)
+        # оставим топ-12 таблиц максимум, чтобы контекст был компактным
+        keep_tables = {t for _, t in scored[:12]}
+        # гарантированно добавим pinned
+        keep_tables |= pinned
+        subset: dict[str, list[str]] = {}
+        for t in sorted(full.keys()):
+            if t not in keep_tables:
+                continue
+            subset[t] = sorted(list(full[t]))
+        return subset
+
+    allowed_schema = _build_allowed_schema_subset(question, tbl_cols) if tbl_cols else {}
+
     # Перенос временного контекста из последнего запроса сессии (e.g., "вчера")
     # Временные подсказки из последних запросов
     hints = _derive_time_hints(db, session_id)
@@ -664,13 +695,12 @@ async def llm_query(payload: LLMQuery,
             combined_schema = f"{combined_schema}\n\n# BASE INSTRUCTIONS (R77)\n{base_instructions[:2000]}\n\n- Use ONLY tables/columns listed in SCHEMA/LIVE SCHEMA.\n- Prefer semantic views if available.\n- Add LIMIT if missing.\n- Avoid hallucinations; do not invent tables/columns.\n- Timezone: Asia/Jerusalem."
 
         # Попытка 1: структурированный план с жёстким списком допустимых колонок
-        allowed_schema = {t: sorted(list(cols)) for t, cols in (tbl_cols or {}).items()}
         try:
             plan_json = await llm.generate_structured_plan(
                 question=(f"[CONTEXT] {time_hint}\n\n{question}" if time_hint else question),
                 schema_docs=combined_schema,
                 examples=examples,
-                allowed_schema_json=json.dumps(allowed_schema)[:8000]
+                allowed_schema_json=json.dumps(allowed_schema)
             )
             plan_obj = json.loads(plan_json)
             raw_sql = compile_plan_to_sql(plan_obj, allowed_schema)
@@ -693,8 +723,8 @@ async def llm_query(payload: LLMQuery,
     }
     role = (x_user_role or "").strip().lower()
     if payload.validation_level is None:
-        # По умолчанию: admin → permissive, остальные → strict
-        chosen_level = ValidationLevel.PERMISSIVE if role == "admin" else ValidationLevel.STRICT
+        # По умолчанию делаем строгую валидацию, чтобы не пропускать несуществующие колонки
+        chosen_level = ValidationLevel.STRICT
     else:
         chosen_level = level_map.get(payload.validation_level, ValidationLevel.MODERATE)
 
