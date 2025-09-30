@@ -57,12 +57,13 @@ class SQLValidator:
             r'\bcase\s+when\b',
         ]
         
-        # Разрешенные таблицы (можно настроить и сузить до вьюх семантического слоя)
+        # Разрешенные таблицы (базовый набор); фактически расширяется динамически через set_table_columns
         self.allowed_tables = {
-            'batches', 'batch_operations', 'machines',
-            'employees', 'access_attempts', 'cards', 'setup_jobs',
+            'batches', 'batch_operations', 'machines', 'employees', 'access_attempts', 'cards', 'setup_jobs',
             # семантические вьюхи (если есть)
-            'batches_with_shifts', 'setups_with_operators'
+            'batches_with_shifts', 'setups_with_operators',
+            # частые справочники
+            'parts', 'lots'
         }
         
         # Разрешенные функции
@@ -131,6 +132,9 @@ class SQLValidator:
             if not t_low:
                 continue
             used_tables.add(t_low)
+            # если таблица встречается в живой схеме (table_columns), считаем её разрешенной
+            if t_low in self.table_columns:
+                self.allowed_tables.add(t_low)
             if t_low not in self.allowed_tables and t_low not in self.table_columns:
                 # неизвестная таблица — считаем ошибкой, чтобы не пускать до БД
                 errors.append(f"Unknown table: {table}")
