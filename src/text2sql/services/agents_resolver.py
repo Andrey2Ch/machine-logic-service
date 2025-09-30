@@ -34,17 +34,32 @@ async def resolve_entities_llm(question: str, db: Session, api_key: str, example
       "parts": List[str]       # drawing_number
     }
     """
-    # 1) Детерминистический парсинг: извлекаем номера деталей из вопроса НАПРЯМУЮ
-    part_candidates = re.findall(r"\b\d{4,}(?:-\d+)?\b", question)
+    # 1) Детерминистический парсинг: извлекаем номера деталей/лотов из вопроса НАПРЯМУЮ
+    qlow = question.lower()
+    is_lot_question = "лот" in qlow or "lot" in qlow
+    
+    # Извлекаем числовые паттерны
+    numeric_candidates = re.findall(r"\b\d{4,}(?:-\d+)?\b", question)
+    
     parts_resolved: List[int] = []
-    if part_candidates:
+    lots_resolved: List[int] = []
+    
+    if numeric_candidates:
         try:
-            rows = db.execute(text("""
-                SELECT id FROM parts WHERE drawing_number = ANY(:dnums)
-            """), {"dnums": part_candidates}).fetchall()
-            parts_resolved = [r.id for r in rows]
+            if is_lot_question:
+                # Вопрос про лоты → ищем lot_number
+                rows = db.execute(text("""
+                    SELECT id FROM lots WHERE lot_number = ANY(:nums)
+                """), {"nums": numeric_candidates}).fetchall()
+                lots_resolved = [r.id for r in rows]
+            else:
+                # Вопрос про детали → ищем drawing_number
+                rows = db.execute(text("""
+                    SELECT id FROM parts WHERE drawing_number = ANY(:dnums)
+                """), {"dnums": numeric_candidates}).fetchall()
+                parts_resolved = [r.id for r in rows]
         except Exception:
-            parts_resolved = []
+            pass
     
     # 2) Загружаем доступные employees/machines для LLM (их немного, можно показать)
     try:
@@ -120,7 +135,8 @@ Extract entities and intent. Return JSON only."""
             "timeframe": result.get("timeframe"),
             "employees": [],
             "machines": [],
-            "parts": parts_resolved  # УЖЕ извлечены детерминистически выше!
+            "parts": parts_resolved,  # УЖЕ извлечены детерминистически выше!
+            "lots": lots_resolved     # Тоже детерминистически!
         }
         
         # Employees
@@ -152,17 +168,36 @@ Extract entities and intent. Return JSON only."""
 
 
 def resolve_entities(question: str, db: Session) -> Dict[str, Any]:
-    """Резолвит сущности (employees/machines) и timeframe/intent из вопроса.
+    """Детерминистический fallback резолвер (без LLM).
 
     Возвращает:
       {
         "intent": str,
-        "timeframe": str | None,  # e.g., 'yesterday'
+        "timeframe": str | None,
         "employees": List[int],
-        "machines": List[int]
+        "machines": List[int],
+        "parts": List[int],
+        "lots": List[int]
       }
     """
     qlow = (question or "").lower()
+    
+    # 0) Детали/лоты (как в LLM версии)
+    is_lot_question = "лот" in qlow or "lot" in qlow
+    numeric_candidates = re.findall(r"\b\d{4,}(?:-\d+)?\b", question)
+    
+    parts: List[int] = []
+    lots: List[int] = []
+    if numeric_candidates:
+        try:
+            if is_lot_question:
+                rows = db.execute(text("SELECT id FROM lots WHERE lot_number = ANY(:nums)"), {"nums": numeric_candidates}).fetchall()
+                lots = [r.id for r in rows]
+            else:
+                rows = db.execute(text("SELECT id FROM parts WHERE drawing_number = ANY(:dnums)"), {"dnums": numeric_candidates}).fetchall()
+                parts = [r.id for r in rows]
+        except Exception:
+            pass
 
     # 1) timeframe: вчера / месяц ГГГГ (ru/en)
     timeframe = None
@@ -239,29 +274,13 @@ def resolve_entities(question: str, db: Session) -> Dict[str, Any]:
     except Exception:
         machines = []
 
-    # 5) parts (детали): ищем по drawing_number (например, "1036-02", "45679")
-    parts: List[int] = []
-    try:
-        # паттерн: цифры + дефис + цифры, или просто 4+ цифры подряд
-        part_candidates = re.findall(r"\b\d{4,}(?:-\d+)?\b", question)
-        if part_candidates:
-            rows = db.execute(text(
-                """
-                SELECT id, drawing_number
-                FROM parts
-                WHERE drawing_number = ANY(:dnums)
-                """
-            ), {"dnums": part_candidates}).fetchall()
-            parts = [r.id for r in rows]
-    except Exception:
-        parts = []
-
     return {
         "intent": intent,
         "timeframe": timeframe,
         "employees": employees,
         "machines": machines,
         "parts": parts,
+        "lots": lots,
     }
 
 

@@ -65,7 +65,8 @@ Rules:
 - Timeframe: {timeframe or "null"}
 - Employee IDs: {entities.get("employees") or []}
 - Machine IDs: {entities.get("machines") or []}
-- Part IDs: {entities.get("parts") or []}"""
+- Part IDs: {entities.get("parts") or []}
+- Lot IDs: {entities.get("lots") or []}"""
     
     user_prompt = f"""{schema_text}
 
@@ -91,6 +92,7 @@ Apply filters for:
 - Employee IDs (setup_jobs.employee_id IN (...))
 - Machine IDs (setup_jobs.machine_id IN (...))
 - Part IDs (setup_jobs.part_id IN (...)) - CRITICAL if part numbers mentioned!
+- Lot IDs (lots.id IN (...)) - CRITICAL if lot numbers mentioned!
 
 Return JSON plan only."""
 

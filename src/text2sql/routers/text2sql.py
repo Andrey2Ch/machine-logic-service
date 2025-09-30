@@ -8,8 +8,7 @@ from src.text2sql.services.text2sql_metrics import Text2SQLMetrics
 from src.text2sql.services.sql_validator import SQLValidator, ValidationLevel
 from src.text2sql.services.llm_provider_claude import ClaudeText2SQL
 from src.text2sql.services.plan_compiler import compile_plan_to_sql, PlanCompileError
-from src.text2sql.services.agents_resolver import resolve_entities, resolve_entities_llm
-from src.text2sql.services.agents_planner import build_plan, build_plan_llm
+# Multi-agent режим удален - Single LLM работает лучше
 import psycopg2.extras
 import os
 import re
@@ -29,7 +28,6 @@ class LLMQuery(BaseModel):
     validation_level: str | None = None  # strict, moderate, permissive (если не задано, выберем по роли)
     return_sql_only: bool = False
     session_id: str | None = None
-    mode: str | None = None  # 'single' | 'agents'
 
 class FeedbackItem(BaseModel):
     question: str
@@ -746,81 +744,22 @@ async def llm_query(payload: LLMQuery,
         if base_instructions:
             combined_schema = f"{combined_schema}\n\n# BASE INSTRUCTIONS (R77)\n{base_instructions[:2000]}\n\n- Use ONLY tables/columns listed in SCHEMA/LIVE SCHEMA.\n- Prefer semantic views if available.\n- Add LIMIT if missing.\n- Avoid hallucinations; do not invent tables/columns.\n- Timezone: Asia/Jerusalem."
 
-        use_agents = (payload.mode or "").lower() == "agents"
-        if use_agents:
-            # 0) Resolver Agent (LLM)
-            ents = await resolve_entities_llm(question, db, llm.api_key, examples)
-            print(f"DEBUG: Resolver Agent result: {ents}")
-            
-            # 1) Planner Agent (LLM)
-            plan_obj = await build_plan_llm(
-                intent=ents.get("intent") or "generic",
-                timeframe=ents.get("timeframe"),
-                entities={
-                    "employees": ents.get("employees") or [],
-                    "machines": ents.get("machines") or [],
-                    "parts": ents.get("parts") or []
-                },
-                allowed_schema=allowed_schema,
-                api_key=llm.api_key,
+        # Попытка 1: структурированный план с жёстким списком допустимых колонок
+        try:
+            plan_json = await llm.generate_structured_plan(
+                question=(f"[CONTEXT] {time_hint}\n\n{question}" if time_hint else question),
+                schema_docs=combined_schema,
                 examples=examples,
-                original_question=question
+                allowed_schema_json=json.dumps(allowed_schema)
             )
-            print(f"DEBUG: Planner Agent result: {json.dumps(plan_obj, indent=2)}")
-            # 1.5) Санитизация плана под доступную схему (убрать недоступные таблицы/поля; parts -> lots.lot_number)
-            try:
-                allowed_tables = set(allowed_schema.keys())
-                # удалим запрещённые joins
-                plan_obj["joins"] = [j for j in (plan_obj.get("joins") or [])
-                                      if j.get("left", "").split(".")[0] in allowed_tables and j.get("right", "").split(".")[0] in allowed_tables]
-                # если parts нет — заменим select parts.drawing_number на lots.lot_number (если есть lots), иначе уберём
-                if "parts" not in allowed_tables:
-                    new_select = []
-                    for s in (plan_obj.get("select") or []):
-                        t = s.get("table"); c = s.get("column")
-                        if t == "parts" and c == "drawing_number":
-                            if "lots" in allowed_tables and "lot_number" in allowed_schema.get("lots", []):
-                                new_select.append({"table": "lots", "column": "lot_number", "alias": s.get("alias") or "part_lot"})
-                            # иначе пропускаем
-                        else:
-                            new_select.append(s)
-                    plan_obj["select"] = new_select
-                    # удалим упоминания parts из order_by
-                    plan_obj["order_by"] = [o for o in (plan_obj.get("order_by") or []) if o.get("table") != "parts"]
-                    # удалим JOIN на parts, если остался
-                    plan_obj["joins"] = [j for j in (plan_obj.get("joins") or []) if j.get("right", "").split(".")[0] != "parts" and j.get("left", "").split(".")[0] != "parts"]
-                    # уберём table из списка tables
-                    plan_obj["tables"] = [t for t in (plan_obj.get("tables") or []) if t != "parts"]
-                # если lots отсутствует — аналогично вычистим упоминания lots
-                if "lots" not in allowed_tables:
-                    plan_obj["select"] = [s for s in (plan_obj.get("select") or []) if s.get("table") != "lots"]
-                    plan_obj["order_by"] = [o for o in (plan_obj.get("order_by") or []) if o.get("table") != "lots"]
-                    plan_obj["joins"] = [j for j in (plan_obj.get("joins") or []) if j.get("right", "").split(".")[0] != "lots" and j.get("left", "").split(".")[0] != "lots"]
-                    plan_obj["tables"] = [t for t in (plan_obj.get("tables") or []) if t != "lots"]
-            except Exception:
-                pass
-            # если план пустой — вернёмся к single
-            if not plan_obj.get("tables"):
-                use_agents = False
-            else:
-                raw_sql = compile_plan_to_sql(plan_obj, allowed_schema)
-        if not use_agents:
-            # Попытка 1: структурированный план с жёстким списком допустимых колонок
-            try:
-                plan_json = await llm.generate_structured_plan(
-                    question=(f"[CONTEXT] {time_hint}\n\n{question}" if time_hint else question),
-                    schema_docs=combined_schema,
-                    examples=examples,
-                    allowed_schema_json=json.dumps(allowed_schema)
-                )
-                plan_obj = json.loads(plan_json)
-                raw_sql = compile_plan_to_sql(plan_obj, allowed_schema)
-            except Exception:
-                # Fallback: текстовый режим, но со строгим ALLOWED_SCHEMA
-                user_q = question
-                if time_hint:
-                    user_q = f"[CONTEXT] {time_hint}\n\n{question}"
-                raw_sql = await llm.generate_sql(user_q, combined_schema, examples, json.dumps(allowed_schema))
+            plan_obj = json.loads(plan_json)
+            raw_sql = compile_plan_to_sql(plan_obj, allowed_schema)
+        except Exception:
+            # Fallback: текстовый режим, но со строгим ALLOWED_SCHEMA
+            user_q = question
+            if time_hint:
+                user_q = f"[CONTEXT] {time_hint}\n\n{question}"
+            raw_sql = await llm.generate_sql(user_q, combined_schema, examples, json.dumps(allowed_schema))
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
