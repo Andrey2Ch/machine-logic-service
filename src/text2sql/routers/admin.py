@@ -312,3 +312,31 @@ async def create_view_batches_with_shifts(db: Session = Depends(get_db_session))
         db.rollback()
         logger.error(f"Ошибка создания view: {e}")
         raise HTTPException(status_code=500, detail=f"Ошибка создания view: {str(e)}")
+
+
+@router.post("/create_view_setups_with_operators")
+async def create_view_setups_with_operators(db: Session = Depends(get_db_session)):
+    """Создает/обновляет view setups_with_operators для типовых запросов наладок."""
+    try:
+        sql = """
+        create or replace view setups_with_operators as
+        select
+          sj.id           as setup_id,
+          sj.start_time,
+          sj.end_time,
+          sj.status,
+          m.id            as machine_id,
+          m.name          as machine_name,
+          e.id            as operator_id,
+          e.full_name     as operator_name
+        from setup_jobs sj
+        join machines m on sj.machine_id = m.id
+        left join employees e on sj.employee_id = e.id;
+        """
+        db.execute(text(sql))
+        db.commit()
+        return {"success": True, "message": "view setups_with_operators создано/обновлено"}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Ошибка создания view: {e}")
+        raise HTTPException(status_code=500, detail=f"Ошибка создания view: {str(e)}")

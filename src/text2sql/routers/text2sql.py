@@ -10,6 +10,7 @@ from src.text2sql.services.llm_provider_claude import ClaudeText2SQL
 import psycopg2.extras
 import os
 import re
+import json
 
 router = APIRouter(prefix="/api/text2sql", tags=["text2sql"])
 
@@ -400,6 +401,124 @@ def _parse_few_shot_examples(md_text: str):
     return examples
 
 
+def _load_knowledge_examples(base_dir: str) -> list[tuple[str, str]]:
+    """Загрузка примеров из knowledge/harvest/*/pairs/select/*examples-with-questions*.jsonl"""
+    examples: list[tuple[str, str]] = []
+    try:
+        root = os.path.join(base_dir, "knowledge", "harvest")
+        if not os.path.isdir(root):
+            return examples
+        for vendor in os.listdir(root):
+            vdir = os.path.join(root, vendor, "pairs", "select")
+            if not os.path.isdir(vdir):
+                continue
+            for fname in os.listdir(vdir):
+                if not fname.endswith(".jsonl"):
+                    continue
+                if "examples-with-questions" not in fname:
+                    continue
+                fpath = os.path.join(vdir, fname)
+                try:
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                obj = json.loads(line)
+                                q = obj.get("question_ru") or obj.get("question_en") or obj.get("question_he")
+                                sql = obj.get("sql")
+                                if q and sql and isinstance(sql, str):
+                                    examples.append((str(q), sql))
+                            except Exception:
+                                continue
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return examples
+
+
+def _derive_time_hints(db: Session, session_id: str) -> list[str]:
+    """Из последних 10 записей пытаемся извлечь времовой контекст (вчера/сегодня/последние N часов/дней/неделя/месяц)."""
+    hints: list[str] = []
+    try:
+        rows = db.execute(text(
+            """
+            SELECT question, COALESCE(validated_sql, sql) AS sql
+            FROM text2sql_history
+            WHERE session_id = :sid
+            ORDER BY created_at DESC
+            LIMIT 10
+            """
+        ), {"sid": session_id}).fetchall()
+    except Exception:
+        rows = []
+
+    def add_once(h: str):
+        if h not in hints:
+            hints.append(h)
+
+    import re as _re
+    for r in rows:
+        q = (r.question or "").lower()
+        s = (r.sql or "").lower()
+        # Russian/English keywords
+        if "вчера" in q or "yesterday" in q or "interval '1 day'" in s or "current_date - 1" in s:
+            add_once("yesterday (timezone Asia/Jerusalem)")
+        if "сегодня" in q or "today" in q or "current_date" in s and "- 1" not in s:
+            add_once("today (timezone Asia/Jerusalem)")
+        if "на этой неделе" in q or "this week" in q or "date_trunc('week'" in s:
+            add_once("this week (timezone Asia/Jerusalem)")
+        if "на прошлой неделе" in q or "last week" in q:
+            add_once("last week (timezone Asia/Jerusalem)")
+        if "в этом месяце" in q or "this month" in q or "date_trunc('month'" in s:
+            add_once("this month (timezone Asia/Jerusalem)")
+        if "в прошлом месяце" in q or "last month" in q:
+            add_once("last month (timezone Asia/Jerusalem)")
+        # квартал/год
+        if "в этом квартале" in q or "this quarter" in q or "date_trunc('quarter'" in s:
+            add_once("this quarter (timezone Asia/Jerusalem)")
+        if "в прошлом квартале" in q or "last quarter" in q:
+            add_once("last quarter (timezone Asia/Jerusalem)")
+        if "в этом году" in q or "this year" in q or "date_trunc('year'" in s:
+            add_once("this year (timezone Asia/Jerusalem)")
+        if "в прошлом году" in q or "last year" in q:
+            add_once("last year (timezone Asia/Jerusalem)")
+        # "за последние N часов/дней"
+        m = _re.search(r"за\s+последние\s+(\d+)\s+(час|часа|часов|день|дня|дней)", q)
+        if m:
+            n = m.group(1)
+            unit = m.group(2)
+            unit_en = {
+                "час": "hours", "часа": "hours", "часов": "hours",
+                "день": "days", "дня": "days", "дней": "days",
+            }[unit]
+            add_once(f"last {n} {unit_en} (timezone Asia/Jerusalem)")
+        m2 = _re.search(r"last\s+(\d+)\s+(hours|days)", q)
+        if m2:
+            add_once(f"last {m2.group(1)} {m2.group(2)} (timezone Asia/Jerusalem)")
+        # минуты/секунды
+        m3 = _re.search(r"за\s+последние\s+(\d+)\s+(минут|минуты|минута|секунд|секунды|секунда)", q)
+        if m3:
+            n = m3.group(1)
+            unit = m3.group(2)
+            unit_en = {
+                "минут": "minutes", "минуты": "minutes", "минута": "minutes",
+                "секунд": "seconds", "секунды": "seconds", "секунда": "seconds",
+            }[unit]
+            add_once(f"last {n} {unit_en} (timezone Asia/Jerusalem)")
+        m4 = _re.search(r"last\s+(\d+)\s+(minutes|minute|secs|seconds|second)", q)
+        if m4:
+            unit = m4.group(2)
+            unit_std = "seconds" if unit.startswith("sec") else "minutes"
+            add_once(f"last {m4.group(1)} {unit_std} (timezone Asia/Jerusalem)")
+        # SQL-based generic patterns
+        if "now() - interval '" in s:
+            add_once("use the same relative now()-interval window as previous")
+    return hints
+
+
 @router.post("/llm_query")
 async def llm_query(payload: LLMQuery,
                     db: Session = Depends(get_db_session),
@@ -411,10 +530,14 @@ async def llm_query(payload: LLMQuery,
     docs_dir = os.path.join(base_dir, "docs")
     schema_path = os.path.join(docs_dir, "schema_docs.md")
     examples_path = os.path.join(docs_dir, "few_shot_examples.md")
+    views_plan_path = os.path.join(docs_dir, "analytics_views_plan.md")
+    base_instructions_path = os.path.join(docs_dir, "Text2SQL_R77_AI.txt")
 
     schema_docs = _read_file_utf8(schema_path)
     few_shot_md = _read_file_utf8(examples_path)
     examples = _parse_few_shot_examples(few_shot_md)
+    # knowledge examples
+    examples = _load_knowledge_examples(base_dir) + examples
     print(f"DEBUG: Loaded {len(examples)} examples")
     for i, (q, sql) in enumerate(examples[:3]):  # покажем первые 3
         print(f"  {i+1}. Q: {q}")
@@ -493,10 +616,55 @@ async def llm_query(payload: LLMQuery,
     
     print(f"DEBUG: Final question: {question}")
 
+    # LIVE-SCHEMA: прочитаем актуальные таблицы/колонки для LLM и валидатора
+    tbl_cols: dict[str, set[str]] = {}
+    schema_text = ""
+    try:
+        res = db.execute(text(
+            """
+            SELECT table_name, column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+            ORDER BY table_name, ordinal_position
+            """
+        ))
+        for table_name, column_name in res.fetchall():
+            tbl_cols.setdefault(table_name, set()).add(column_name)
+        # Сформируем компактное описание схемы
+        lines: list[str] = []
+        for t in sorted(tbl_cols.keys()):
+            cols = ", ".join(sorted(tbl_cols[t]))
+            lines.append(f"- {t}({cols})")
+        schema_text = "\n".join(lines)
+    except Exception:
+        # В случае ошибки просто продолжаем с файловой схемой
+        schema_text = ""
+
+    # Перенос временного контекста из последнего запроса сессии (e.g., "вчера")
+    # Временные подсказки из последних запросов
+    hints = _derive_time_hints(db, session_id)
+    time_hint = None
+    if hints:
+        time_hint = "; ".join(hints[:2])  # не перегружать промпт
+
     # Генерация SQL через Claude
     llm = ClaudeText2SQL()
     try:
-        raw_sql = await llm.generate_sql(question, schema_docs, examples)
+        combined_schema = schema_docs
+        if schema_text:
+            combined_schema = f"{schema_docs}\n\n# LIVE SCHEMA (auto-generated)\n{schema_text}"
+        # Добавим план аналитических вьюх как подсказку, если есть
+        views_plan = _read_file_utf8(views_plan_path)
+        if views_plan:
+            combined_schema = f"{combined_schema}\n\n# ANALYTICS VIEWS PLAN\n{views_plan[:2000]}"
+        # Добавим BASE INSTRUCTIONS (теория/правила) из R77, коротко
+        base_instructions = _read_file_utf8(base_instructions_path)
+        if base_instructions:
+            combined_schema = f"{combined_schema}\n\n# BASE INSTRUCTIONS (R77)\n{base_instructions[:2000]}\n\n- Use ONLY tables/columns listed in SCHEMA/LIVE SCHEMA.\n- Prefer semantic views if available.\n- Add LIMIT if missing.\n- Avoid hallucinations; do not invent tables/columns.\n- Timezone: Asia/Jerusalem."
+        user_q = question
+        if time_hint:
+            user_q = f"[CONTEXT] {time_hint}\n\n{question}"
+        raw_sql = await llm.generate_sql(user_q, combined_schema, examples)
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
@@ -518,19 +686,31 @@ async def llm_query(payload: LLMQuery,
     # Подготовим schema-aware валидатор
     validator = SQLValidator(chosen_level)
     try:
-        # кэшируем колонки из information_schema
-        tbl_cols = {}
-        res = db.execute(text("""
-            SELECT table_name, column_name
-            FROM information_schema.columns
-            WHERE table_schema = 'public'
-        """))
-        for table_name, column_name in res.fetchall():
-            tbl_cols.setdefault(table_name, set()).add(column_name)
-        validator.set_table_columns(tbl_cols)
+        if tbl_cols:
+            validator.set_table_columns(tbl_cols)
     except Exception:
         pass
     result = validator.validate(raw_sql)
+    # Простейшая коррекция по синонимам таблиц (например, setups -> setup_jobs)
+    if not result["valid"]:
+        try:
+            unknown_table_errors = [e for e in result.get("errors", []) if e.startswith("Unknown table:")]
+            if unknown_table_errors:
+                synonyms = {
+                    "setups": "setup_jobs",
+                    "setup": "setup_jobs",
+                }
+                fixed_sql = raw_sql
+                import re as _re
+                for wrong, correct in synonyms.items():
+                    fixed_sql = _re.sub(rf"\b{_re.escape(wrong)}\b", correct, fixed_sql, flags=_re.IGNORECASE)
+                if fixed_sql != raw_sql:
+                    result2 = validator.validate(fixed_sql)
+                    if result2["valid"]:
+                        raw_sql = fixed_sql
+                        result = result2
+        except Exception:
+            pass
     if not result["valid"]:
         # Пишем историю даже при невалидном SQL
         try:

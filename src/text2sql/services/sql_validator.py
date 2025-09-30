@@ -62,7 +62,7 @@ class SQLValidator:
             'batches', 'batch_operations', 'machines',
             'employees', 'access_attempts', 'cards', 'setup_jobs',
             # семантические вьюхи (если есть)
-            'batches_with_shifts'
+            'batches_with_shifts', 'setups_with_operators'
         }
         
         # Разрешенные функции
@@ -132,7 +132,8 @@ class SQLValidator:
                 continue
             used_tables.add(t_low)
             if t_low not in self.allowed_tables and t_low not in self.table_columns:
-                warnings.append(f"Unknown table: {table}")
+                # неизвестная таблица — считаем ошибкой, чтобы не пускать до БД
+                errors.append(f"Unknown table: {table}")
         
         # Проверка функций
         function_matches = re.findall(r'\b(\w+)\s*\(', sanitized_sql, re.IGNORECASE)
@@ -143,6 +144,13 @@ class SQLValidator:
         # Schema-aware проверка квалифицированных колонок (alias/table.column)
         try:
             if self.table_columns:
+                # соберем алиасы из FROM/JOIN: table_name [AS] alias
+                alias_map: Dict[str, str] = {}
+                for m in re.finditer(r"\bfrom\s+([a-z_][a-z0-9_]*)\s+(?:as\s+)?([a-z_][a-z0-9_]*)\b", sanitized_sql, re.IGNORECASE):
+                    alias_map[m.group(2).lower()] = m.group(1).lower()
+                for m in re.finditer(r"\bjoin\s+([a-z_][a-z0-9_]*)\s+(?:as\s+)?([a-z_][a-z0-9_]*)\b", sanitized_sql, re.IGNORECASE):
+                    alias_map[m.group(2).lower()] = m.group(1).lower()
+
                 qual_cols = re.findall(r'\b([a-z_][a-z0-9_]*)\s*\.\s*([a-z_][a-z0-9_]*)\b', sanitized_sql, re.IGNORECASE)
                 known_cols_global: Set[str] = set()
                 for cols in self.table_columns.values():
@@ -150,8 +158,10 @@ class SQLValidator:
                 for tbl_or_alias, col in qual_cols:
                     t_low = tbl_or_alias.lower()
                     c_low = col.lower()
-                    if t_low in self.table_columns:
-                        if c_low not in self.table_columns[t_low]:
+                    # разрешаем alias: подменяем на реальную таблицу, если знаем
+                    real_table = alias_map.get(t_low, t_low)
+                    if real_table in self.table_columns:
+                        if c_low not in self.table_columns[real_table]:
                             errors.append(f"Unknown column: {tbl_or_alias}.{col}")
                     else:
                         # alias неизвестен — проверим, что такая колонка вообще существует в схеме
