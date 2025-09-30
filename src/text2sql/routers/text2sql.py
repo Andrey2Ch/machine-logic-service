@@ -626,13 +626,13 @@ async def llm_query(payload: LLMQuery,
     try:
         res = db.execute(text(
             """
-            SELECT table_name, column_name
+            SELECT table_schema, table_name, column_name
             FROM information_schema.columns
-            WHERE table_schema = 'public'
-            ORDER BY table_name, ordinal_position
+            WHERE table_schema = ANY (current_schemas(TRUE))
+            ORDER BY table_schema, table_name, ordinal_position
             """
         ))
-        for table_name, column_name in res.fetchall():
+        for table_schema, table_name, column_name in res.fetchall():
             tbl_cols.setdefault(table_name, set()).add(column_name)
         # Сформируем компактное описание схемы
         lines: list[str] = []
@@ -714,6 +714,15 @@ async def llm_query(payload: LLMQuery,
         return subset
 
     allowed_schema = _build_allowed_schema_subset(question, tbl_cols) if tbl_cols else {}
+    try:
+        # DEBUG: покажем первые 10 таблиц из разрешённой схемы
+        if allowed_schema:
+            sample = list(sorted(allowed_schema.keys()))[:10]
+            print(f"DEBUG: ALLOWED_SCHEMA tables (sample): {sample}")
+            if 'parts' in allowed_schema:
+                print(f"DEBUG: parts columns: {sorted(allowed_schema.get('parts', []))[:10]}")
+    except Exception:
+        pass
 
     # Перенос временного контекста из последнего запроса сессии (e.g., "вчера")
     # Временные подсказки из последних запросов
@@ -743,6 +752,38 @@ async def llm_query(payload: LLMQuery,
             ents = resolve_entities(question, db)
             # 1) Planner
             plan_obj = build_plan(ents.get("intent") or "generic", ents.get("timeframe"), {"employees": ents.get("employees") or [], "machines": ents.get("machines") or []})
+            # 1.5) Санитизация плана под доступную схему (убрать недоступные таблицы/поля; parts -> lots.lot_number)
+            try:
+                allowed_tables = set(allowed_schema.keys())
+                # удалим запрещённые joins
+                plan_obj["joins"] = [j for j in (plan_obj.get("joins") or [])
+                                      if j.get("left", "").split(".")[0] in allowed_tables and j.get("right", "").split(".")[0] in allowed_tables]
+                # если parts нет — заменим select parts.drawing_number на lots.lot_number (если есть lots), иначе уберём
+                if "parts" not in allowed_tables:
+                    new_select = []
+                    for s in (plan_obj.get("select") or []):
+                        t = s.get("table"); c = s.get("column")
+                        if t == "parts" and c == "drawing_number":
+                            if "lots" in allowed_tables and "lot_number" in allowed_schema.get("lots", []):
+                                new_select.append({"table": "lots", "column": "lot_number", "alias": s.get("alias") or "part_lot"})
+                            # иначе пропускаем
+                        else:
+                            new_select.append(s)
+                    plan_obj["select"] = new_select
+                    # удалим упоминания parts из order_by
+                    plan_obj["order_by"] = [o for o in (plan_obj.get("order_by") or []) if o.get("table") != "parts"]
+                    # удалим JOIN на parts, если остался
+                    plan_obj["joins"] = [j for j in (plan_obj.get("joins") or []) if j.get("right", "").split(".")[0] != "parts" and j.get("left", "").split(".")[0] != "parts"]
+                    # уберём table из списка tables
+                    plan_obj["tables"] = [t for t in (plan_obj.get("tables") or []) if t != "parts"]
+                # если lots отсутствует — аналогично вычистим упоминания lots
+                if "lots" not in allowed_tables:
+                    plan_obj["select"] = [s for s in (plan_obj.get("select") or []) if s.get("table") != "lots"]
+                    plan_obj["order_by"] = [o for o in (plan_obj.get("order_by") or []) if o.get("table") != "lots"]
+                    plan_obj["joins"] = [j for j in (plan_obj.get("joins") or []) if j.get("right", "").split(".")[0] != "lots" and j.get("left", "").split(".")[0] != "lots"]
+                    plan_obj["tables"] = [t for t in (plan_obj.get("tables") or []) if t != "lots"]
+            except Exception:
+                pass
             # если план пустой — вернёмся к single
             if not plan_obj.get("tables"):
                 use_agents = False
