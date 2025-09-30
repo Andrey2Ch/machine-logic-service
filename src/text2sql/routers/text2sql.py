@@ -8,6 +8,8 @@ from src.text2sql.services.text2sql_metrics import Text2SQLMetrics
 from src.text2sql.services.sql_validator import SQLValidator, ValidationLevel
 from src.text2sql.services.llm_provider_claude import ClaudeText2SQL
 from src.text2sql.services.plan_compiler import compile_plan_to_sql, PlanCompileError
+from src.text2sql.services.agents_resolver import resolve_entities
+from src.text2sql.services.agents_planner import build_plan
 import psycopg2.extras
 import os
 import re
@@ -27,6 +29,7 @@ class LLMQuery(BaseModel):
     validation_level: str | None = None  # strict, moderate, permissive (если не задано, выберем по роли)
     return_sql_only: bool = False
     session_id: str | None = None
+    mode: str | None = None  # 'single' | 'agents'
 
 class FeedbackItem(BaseModel):
     question: str
@@ -734,22 +737,34 @@ async def llm_query(payload: LLMQuery,
         if base_instructions:
             combined_schema = f"{combined_schema}\n\n# BASE INSTRUCTIONS (R77)\n{base_instructions[:2000]}\n\n- Use ONLY tables/columns listed in SCHEMA/LIVE SCHEMA.\n- Prefer semantic views if available.\n- Add LIMIT if missing.\n- Avoid hallucinations; do not invent tables/columns.\n- Timezone: Asia/Jerusalem."
 
-        # Попытка 1: структурированный план с жёстким списком допустимых колонок
-        try:
-            plan_json = await llm.generate_structured_plan(
-                question=(f"[CONTEXT] {time_hint}\n\n{question}" if time_hint else question),
-                schema_docs=combined_schema,
-                examples=examples,
-                allowed_schema_json=json.dumps(allowed_schema)
-            )
-            plan_obj = json.loads(plan_json)
-            raw_sql = compile_plan_to_sql(plan_obj, allowed_schema)
-        except Exception:
-            # Fallback: текстовый режим, но со строгим ALLOWED_SCHEMA
-            user_q = question
-            if time_hint:
-                user_q = f"[CONTEXT] {time_hint}\n\n{question}"
-            raw_sql = await llm.generate_sql(user_q, combined_schema, examples, json.dumps(allowed_schema))
+        use_agents = (payload.mode or "").lower() == "agents"
+        if use_agents:
+            # 0) Resolver
+            ents = resolve_entities(question, db)
+            # 1) Planner
+            plan_obj = build_plan(ents.get("intent") or "generic", ents.get("timeframe"), {"employees": ents.get("employees") or [], "machines": ents.get("machines") or []})
+            # если план пустой — вернёмся к single
+            if not plan_obj.get("tables"):
+                use_agents = False
+            else:
+                raw_sql = compile_plan_to_sql(plan_obj, allowed_schema)
+        if not use_agents:
+            # Попытка 1: структурированный план с жёстким списком допустимых колонок
+            try:
+                plan_json = await llm.generate_structured_plan(
+                    question=(f"[CONTEXT] {time_hint}\n\n{question}" if time_hint else question),
+                    schema_docs=combined_schema,
+                    examples=examples,
+                    allowed_schema_json=json.dumps(allowed_schema)
+                )
+                plan_obj = json.loads(plan_json)
+                raw_sql = compile_plan_to_sql(plan_obj, allowed_schema)
+            except Exception:
+                # Fallback: текстовый режим, но со строгим ALLOWED_SCHEMA
+                user_q = question
+                if time_hint:
+                    user_q = f"[CONTEXT] {time_hint}\n\n{question}"
+                raw_sql = await llm.generate_sql(user_q, combined_schema, examples, json.dumps(allowed_schema))
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
