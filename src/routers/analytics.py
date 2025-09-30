@@ -153,6 +153,10 @@ async def lots_overview(
     search: Optional[str] = Query(None),
     part_search: Optional[str] = Query(None),
     status_filter: Optional[str] = Query(None),
+    area_name: Optional[str] = Query(None),
+    machine: Optional[str] = Query(None),
+    order_by: Optional[str] = Query(None, description="created_at|lot_number|drawing_number|status|machine_name|area_name"),
+    order: Optional[str] = Query('desc', description="asc|desc"),
     date_from: Optional[datetime] = Query(None),
     date_to: Optional[datetime] = Query(None),
     db: Session = Depends(get_db_session),
@@ -191,9 +195,40 @@ async def lots_overview(
         if date_to:
             q = q.filter(prod_start_sq.c.prod_start != None).filter(prod_start_sq.c.prod_start <= date_to)
 
+        # Latest setup per lot (for machine/area filtering and sorting)
+        latest_setup_sq = db.query(
+            SetupDB.lot_id.label('lot_id'),
+            func.max(SetupDB.id).label('setup_id')
+        ).group_by(SetupDB.lot_id).subquery()
+        q = q.outerjoin(latest_setup_sq, latest_setup_sq.c.lot_id == LotDB.id)
+        q = q.outerjoin(SetupDB, SetupDB.id == latest_setup_sq.c.setup_id)
+        q = q.outerjoin(MachineDB, MachineDB.id == SetupDB.machine_id)
+        q = q.outerjoin(AreaDB, AreaDB.id == MachineDB.location_id)
+
+        if area_name and area_name.strip():
+            q = q.filter(AreaDB.name == area_name.strip())
+        if machine and machine.strip():
+            q = q.filter(MachineDB.name == machine.strip())
+
+        # Server-side sorting (safe subset)
+        col_map = {
+            'created_at': LotDB.created_at,
+            'lot_number': LotDB.lot_number,
+            'drawing_number': PartDB.drawing_number,
+            'status': LotDB.status,
+            'machine_name': MachineDB.name,
+            'area_name': AreaDB.name,
+        }
+        sort_col = col_map.get((order_by or 'created_at'))
+        if sort_col is None:
+            sort_col = LotDB.created_at
+
         total = q.count()
         offset = (page - 1) * per_page
-        lots = q.order_by(LotDB.created_at.desc()).offset(offset).limit(per_page).all()
+        if (order or 'desc').lower() == 'asc':
+            lots = q.order_by(sort_col.asc(), LotDB.id.asc()).offset(offset).limit(per_page).all()
+        else:
+            lots = q.order_by(sort_col.desc(), LotDB.id.desc()).offset(offset).limit(per_page).all()
         lot_ids = [l.id for l in lots]
 
         # planned: вычислить через setups
