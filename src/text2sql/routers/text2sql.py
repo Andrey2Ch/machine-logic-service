@@ -8,8 +8,8 @@ from src.text2sql.services.text2sql_metrics import Text2SQLMetrics
 from src.text2sql.services.sql_validator import SQLValidator, ValidationLevel
 from src.text2sql.services.llm_provider_claude import ClaudeText2SQL
 from src.text2sql.services.plan_compiler import compile_plan_to_sql, PlanCompileError
-from src.text2sql.services.agents_resolver import resolve_entities
-from src.text2sql.services.agents_planner import build_plan
+from src.text2sql.services.agents_resolver import resolve_entities, resolve_entities_llm
+from src.text2sql.services.agents_planner import build_plan, build_plan_llm
 import psycopg2.extras
 import os
 import re
@@ -748,10 +748,24 @@ async def llm_query(payload: LLMQuery,
 
         use_agents = (payload.mode or "").lower() == "agents"
         if use_agents:
-            # 0) Resolver
-            ents = resolve_entities(question, db)
-            # 1) Planner
-            plan_obj = build_plan(ents.get("intent") or "generic", ents.get("timeframe"), {"employees": ents.get("employees") or [], "machines": ents.get("machines") or []})
+            # 0) Resolver Agent (LLM)
+            ents = await resolve_entities_llm(question, db, llm.api_key, examples)
+            print(f"DEBUG: Resolver Agent result: {ents}")
+            
+            # 1) Planner Agent (LLM)
+            plan_obj = await build_plan_llm(
+                intent=ents.get("intent") or "generic",
+                timeframe=ents.get("timeframe"),
+                entities={
+                    "employees": ents.get("employees") or [],
+                    "machines": ents.get("machines") or [],
+                    "parts": ents.get("parts") or []
+                },
+                allowed_schema=allowed_schema,
+                api_key=llm.api_key,
+                examples=examples
+            )
+            print(f"DEBUG: Planner Agent result: {json.dumps(plan_obj, indent=2)}")
             # 1.5) Санитизация плана под доступную схему (убрать недоступные таблицы/поля; parts -> lots.lot_number)
             try:
                 allowed_tables = set(allowed_schema.keys())

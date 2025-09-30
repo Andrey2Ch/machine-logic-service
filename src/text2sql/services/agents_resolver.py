@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Set, Tuple
 import re
+import json
+import httpx
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -18,6 +20,137 @@ def _normalize_machine_name(name: str) -> str:
 
 def _normalize_person_name(name: str) -> str:
     return (name or "").strip().lower()
+
+
+async def resolve_entities_llm(question: str, db: Session, api_key: str, examples: List[Tuple[str, str]] = None) -> Dict[str, Any]:
+    """LLM-based Resolver Agent: извлекает entities, intent, timeframe из вопроса.
+    
+    Возвращает JSON:
+    {
+      "intent": str,  # "list_machinists" | "count_machines_by_machinists" | "generic"
+      "timeframe": str | null,  # "yesterday" | "month:2025-08"
+      "employees": List[str],  # имена/username
+      "machines": List[str],   # названия станков
+      "parts": List[str]       # drawing_number
+    }
+    """
+    # 1) Загружаем доступные entities из БД для подсказки
+    try:
+        emp_rows = db.execute(text("SELECT COALESCE(full_name, username)::text AS name FROM employees WHERE is_active IS NULL OR is_active = TRUE LIMIT 50")).fetchall()
+        employees_list = [r.name for r in emp_rows if r.name]
+        
+        mach_rows = db.execute(text("SELECT name FROM machines WHERE is_active=TRUE LIMIT 50")).fetchall()
+        machines_list = [r.name for r in mach_rows if r.name]
+        
+        parts_rows = db.execute(text("SELECT drawing_number FROM parts LIMIT 50")).fetchall()
+        parts_list = [r.drawing_number for r in parts_rows if r.drawing_number]
+    except Exception:
+        employees_list = []
+        machines_list = []
+        parts_list = []
+    
+    # 2) Составляем промпт для LLM
+    system_prompt = """You are a Resolver Agent. Your task is to extract structured information from a natural language question about manufacturing data.
+
+Extract:
+- intent: "list_machinists" (кто/имена наладчиков) | "count_machines_by_machinists" (сколько станков у наладчика) | "generic" (all other)
+- timeframe: "yesterday" | "month:YYYY-MM" | null
+- employees: list of employee names mentioned (exact match from available list)
+- machines: list of machine names mentioned (exact match from available list)
+- parts: list of part drawing numbers mentioned (exact match from available list)
+
+Return ONLY valid JSON in this format:
+{
+  "intent": "...",
+  "timeframe": "..." or null,
+  "employees": ["..."],
+  "machines": ["..."],
+  "parts": ["..."]
+}"""
+    
+    available_context = f"""Available employees (first 50): {', '.join(employees_list[:50])}
+Available machines (first 50): {', '.join(machines_list[:50])}
+Available parts (first 50): {', '.join(parts_list[:50])}"""
+    
+    user_prompt = f"""{available_context}
+
+Question: {question}
+
+Extract entities and intent. Return JSON only."""
+    
+    # 3) Вызываем Claude API
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+    payload = {
+        "model": "claude-3-5-sonnet-20241022",
+        "max_tokens": 1000,
+        "temperature": 0.0,
+        "system": system_prompt,
+        "messages": [{"role": "user", "content": user_prompt}],
+    }
+    
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post("https://api.anthropic.com/v1/messages", headers=headers, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+        
+        content = "".join(part.get("text", "") for part in data.get("content", []) if part.get("type") == "text")
+        
+        # Извлекаем JSON из ответа
+        json_match = re.search(r"\{.*\}", content, re.DOTALL)
+        if json_match:
+            result = json.loads(json_match.group(0))
+        else:
+            result = json.loads(content)
+        
+        # 4) Резолвим имена в IDs
+        resolved = {
+            "intent": result.get("intent", "generic"),
+            "timeframe": result.get("timeframe"),
+            "employees": [],
+            "machines": [],
+            "parts": []
+        }
+        
+        # Employees
+        if result.get("employees"):
+            emp_names = [n.lower().strip() for n in result["employees"]]
+            emp_rows = db.execute(text("""
+                SELECT id, COALESCE(full_name, username)::text AS name
+                FROM employees
+                WHERE (is_active IS NULL OR is_active = TRUE)
+                  AND LOWER(COALESCE(full_name, username)::text) = ANY(:names)
+            """), {"names": emp_names}).fetchall()
+            resolved["employees"] = [r.id for r in emp_rows]
+        
+        # Machines
+        if result.get("machines"):
+            mach_names = [n.strip() for n in result["machines"]]
+            mach_rows = db.execute(text("""
+                SELECT id FROM machines
+                WHERE is_active=TRUE AND name = ANY(:names)
+            """), {"names": mach_names}).fetchall()
+            resolved["machines"] = [r.id for r in mach_rows]
+        
+        # Parts
+        if result.get("parts"):
+            part_nums = [n.strip() for n in result["parts"]]
+            part_rows = db.execute(text("""
+                SELECT id FROM parts
+                WHERE drawing_number = ANY(:nums)
+            """), {"nums": part_nums}).fetchall()
+            resolved["parts"] = [r.id for r in part_rows]
+        
+        return resolved
+    
+    except Exception as e:
+        print(f"ERROR: LLM Resolver failed: {e}")
+        # Fallback to deterministic resolver
+        return resolve_entities(question, db)
 
 
 def resolve_entities(question: str, db: Session) -> Dict[str, Any]:
@@ -108,11 +241,29 @@ def resolve_entities(question: str, db: Session) -> Dict[str, Any]:
     except Exception:
         machines = []
 
+    # 5) parts (детали): ищем по drawing_number (например, "1036-02", "45679")
+    parts: List[int] = []
+    try:
+        # паттерн: цифры + дефис + цифры, или просто 4+ цифры подряд
+        part_candidates = re.findall(r"\b\d{4,}(?:-\d+)?\b", question)
+        if part_candidates:
+            rows = db.execute(text(
+                """
+                SELECT id, drawing_number
+                FROM parts
+                WHERE drawing_number = ANY(:dnums)
+                """
+            ), {"dnums": part_candidates}).fetchall()
+            parts = [r.id for r in rows]
+    except Exception:
+        parts = []
+
     return {
         "intent": intent,
         "timeframe": timeframe,
         "employees": employees,
         "machines": machines,
+        "parts": parts,
     }
 
 
