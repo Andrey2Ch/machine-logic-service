@@ -18,7 +18,7 @@ def _month_filter(expr: str, timeframe: str | None) -> Dict[str, str] | None:
 
 async def build_plan_llm(intent: str, timeframe: str | None, entities: Dict[str, List[int]],
                          allowed_schema: Dict[str, List[str]], api_key: str,
-                         examples: List[Tuple[str, str]] = None) -> Dict[str, Any]:
+                         examples: List[Tuple[str, str]] = None, original_question: str = "") -> Dict[str, Any]:
     """LLM-based Planner Agent: строит JSON план на основе intent и entities.
     
     Args:
@@ -71,18 +71,26 @@ Rules:
 
 {entities_text}
 
-Task: Build a JSON plan based on the intent and entities.
+Original question: {original_question}
+
+Task: Build a JSON plan based on the intent, entities, and original question.
 
 Common patterns:
 - list_machinists: SELECT employees.full_name, machines.name, setup_jobs.start_time FROM setup_jobs JOIN employees/machines/parts
 - count_machines_by_machinists: SELECT COUNT(DISTINCT setup_jobs.machine_id) FROM setup_jobs
 - generic: Determine best approach based on entities
 
+IMPORTANT:
+- If question mentions "лот" or "lot": JOIN lots table and include lots.lot_number, lots.initial_planned_quantity
+- If question mentions "деталь/part" + specific part number: MUST filter by part_id
+- Always include machines.name if machines are mentioned
+- Always include parts.drawing_number if parts are mentioned
+
 Apply filters for:
 - Timeframe (if provided)
 - Employee IDs (setup_jobs.employee_id IN (...))
 - Machine IDs (setup_jobs.machine_id IN (...))
-- Part IDs (setup_jobs.part_id IN (...))
+- Part IDs (setup_jobs.part_id IN (...)) - CRITICAL if part numbers mentioned!
 
 Return JSON plan only."""
 

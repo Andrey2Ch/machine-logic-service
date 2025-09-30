@@ -34,22 +34,30 @@ async def resolve_entities_llm(question: str, db: Session, api_key: str, example
       "parts": List[str]       # drawing_number
     }
     """
-    # 1) Загружаем доступные entities из БД для подсказки
+    # 1) Детерминистический парсинг: извлекаем номера деталей из вопроса НАПРЯМУЮ
+    part_candidates = re.findall(r"\b\d{4,}(?:-\d+)?\b", question)
+    parts_resolved: List[int] = []
+    if part_candidates:
+        try:
+            rows = db.execute(text("""
+                SELECT id FROM parts WHERE drawing_number = ANY(:dnums)
+            """), {"dnums": part_candidates}).fetchall()
+            parts_resolved = [r.id for r in rows]
+        except Exception:
+            parts_resolved = []
+    
+    # 2) Загружаем доступные employees/machines для LLM (их немного, можно показать)
     try:
-        emp_rows = db.execute(text("SELECT COALESCE(full_name, username)::text AS name FROM employees WHERE is_active IS NULL OR is_active = TRUE LIMIT 50")).fetchall()
+        emp_rows = db.execute(text("SELECT COALESCE(full_name, username)::text AS name FROM employees WHERE is_active IS NULL OR is_active = TRUE")).fetchall()
         employees_list = [r.name for r in emp_rows if r.name]
         
-        mach_rows = db.execute(text("SELECT name FROM machines WHERE is_active=TRUE LIMIT 50")).fetchall()
+        mach_rows = db.execute(text("SELECT name FROM machines WHERE is_active=TRUE")).fetchall()
         machines_list = [r.name for r in mach_rows if r.name]
-        
-        parts_rows = db.execute(text("SELECT drawing_number FROM parts LIMIT 50")).fetchall()
-        parts_list = [r.drawing_number for r in parts_rows if r.drawing_number]
     except Exception:
         employees_list = []
         machines_list = []
-        parts_list = []
     
-    # 2) Составляем промпт для LLM
+    # 3) Вызываем LLM для извлечения employees/machines/intent/timeframe
     system_prompt = """You are a Resolver Agent. Your task is to extract structured information from a natural language question about manufacturing data.
 
 Extract:
@@ -57,20 +65,19 @@ Extract:
 - timeframe: "yesterday" | "month:YYYY-MM" | null
 - employees: list of employee names mentioned (exact match from available list)
 - machines: list of machine names mentioned (exact match from available list)
-- parts: list of part drawing numbers mentioned (exact match from available list)
 
 Return ONLY valid JSON in this format:
 {
   "intent": "...",
   "timeframe": "..." or null,
   "employees": ["..."],
-  "machines": ["..."],
-  "parts": ["..."]
-}"""
+  "machines": ["..."]
+}
+
+NOTE: Parts are detected separately via regex."""
     
-    available_context = f"""Available employees (first 50): {', '.join(employees_list[:50])}
-Available machines (first 50): {', '.join(machines_list[:50])}
-Available parts (first 50): {', '.join(parts_list[:50])}"""
+    available_context = f"""Available employees: {', '.join(employees_list)}
+Available machines: {', '.join(machines_list)}"""
     
     user_prompt = f"""{available_context}
 
@@ -107,13 +114,13 @@ Extract entities and intent. Return JSON only."""
         else:
             result = json.loads(content)
         
-        # 4) Резолвим имена в IDs
+        # 4) Резолвим employees/machines имена в IDs
         resolved = {
             "intent": result.get("intent", "generic"),
             "timeframe": result.get("timeframe"),
             "employees": [],
             "machines": [],
-            "parts": []
+            "parts": parts_resolved  # УЖЕ извлечены детерминистически выше!
         }
         
         # Employees
@@ -135,15 +142,6 @@ Extract entities and intent. Return JSON only."""
                 WHERE is_active=TRUE AND name = ANY(:names)
             """), {"names": mach_names}).fetchall()
             resolved["machines"] = [r.id for r in mach_rows]
-        
-        # Parts
-        if result.get("parts"):
-            part_nums = [n.strip() for n in result["parts"]]
-            part_rows = db.execute(text("""
-                SELECT id FROM parts
-                WHERE drawing_number = ANY(:nums)
-            """), {"nums": part_nums}).fetchall()
-            resolved["parts"] = [r.id for r in part_rows]
         
         return resolved
     

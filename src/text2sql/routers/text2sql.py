@@ -763,7 +763,8 @@ async def llm_query(payload: LLMQuery,
                 },
                 allowed_schema=allowed_schema,
                 api_key=llm.api_key,
-                examples=examples
+                examples=examples,
+                original_question=question
             )
             print(f"DEBUG: Planner Agent result: {json.dumps(plan_obj, indent=2)}")
             # 1.5) Санитизация плана под доступную схему (убрать недоступные таблицы/поля; parts -> lots.lot_number)
