@@ -33,10 +33,31 @@ def resolve_entities(question: str, db: Session) -> Dict[str, Any]:
     """
     qlow = (question or "").lower()
 
-    # 1) timeframe (минимум: вчера)
+    # 1) timeframe: вчера / месяц ГГГГ (ru/en)
     timeframe = None
     if "вчера" in qlow or "yesterday" in qlow:
         timeframe = "yesterday"
+    else:
+        # месяцы ru/en → YYYY-MM
+        months = {
+            "январ": "01", "feb": "02", "феврал": "02", "март": "03", "march": "03",
+            "апрел": "04", "april": "04", "май": "05", "may": "05", "июн": "06", "june": "06",
+            "июл": "07", "july": "07", "август": "08", "aug": "08", "сентябр": "09", "sep": "09",
+            "октябр": "10", "oct": "10", "ноябр": "11", "nov": "11", "декабр": "12", "dec": "12",
+        }
+        m = re.search(r"(январ|феврал|март|апрел|май|июн|июл|август|сентябр|октябр|ноябр|декабр|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[^\d]{0,10}(20\d{2})",
+                      qlow)
+        if m:
+            mon_key = m.group(1)
+            year = m.group(2)
+            # нормализуем английские краткие формы
+            map_en = {"jan":"январ","feb":"феврал","mar":"март","apr":"апрел","jun":"июн","jul":"июл",
+                      "aug":"август","sep":"сентябр","oct":"октябр","nov":"ноябр","dec":"декабр"}
+            mon_key = map_en.get(mon_key, mon_key)
+            for k, mm in months.items():
+                if mon_key.startswith(k):
+                    timeframe = f"month:{year}-{mm}"
+                    break
 
     # 2) intent (очень грубо)
     #   - кто/имена/наладчик → списки имён
@@ -71,7 +92,7 @@ def resolve_entities(question: str, db: Session) -> Dict[str, Any]:
     except Exception:
         employees = []
 
-    # 4) machines (на будущее; сейчас редко встречается в таких вопросах)
+    # 4) machines
     machines: List[int] = []
     try:
         rows = db.execute(text("SELECT id, name FROM machines WHERE is_active=TRUE")).fetchall()
