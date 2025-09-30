@@ -195,20 +195,25 @@ async def lots_overview(
         if date_to:
             q = q.filter(prod_start_sq.c.prod_start != None).filter(prod_start_sq.c.prod_start <= date_to)
 
-        # Latest setup per lot (for machine/area filtering and sorting)
-        latest_setup_sq = db.query(
-            SetupDB.lot_id.label('lot_id'),
-            func.max(SetupDB.id).label('setup_id')
-        ).group_by(SetupDB.lot_id).subquery()
-        q = q.outerjoin(latest_setup_sq, latest_setup_sq.c.lot_id == LotDB.id)
-        q = q.outerjoin(SetupDB, SetupDB.id == latest_setup_sq.c.setup_id)
-        q = q.outerjoin(MachineDB, MachineDB.id == SetupDB.machine_id)
-        q = q.outerjoin(AreaDB, AreaDB.id == MachineDB.location_id)
+        # Подсчитываем total ДО тяжёлых join'ов
+        total = q.count()
 
-        if area_name and area_name.strip():
-            q = q.filter(AreaDB.name == area_name.strip())
-        if machine and machine.strip():
-            q = q.filter(MachineDB.name == machine.strip())
+        # Latest setup per lot (for machine/area filtering and sorting) — подключаем только если нужно
+        need_machine_area = bool(area_name and area_name.strip()) or bool(machine and machine.strip())
+        if need_machine_area or (order_by in ['machine_name', 'area_name']):
+            latest_setup_sq = db.query(
+                SetupDB.lot_id.label('lot_id'),
+                func.max(SetupDB.id).label('setup_id')
+            ).group_by(SetupDB.lot_id).subquery()
+            q = q.outerjoin(latest_setup_sq, latest_setup_sq.c.lot_id == LotDB.id)
+            q = q.outerjoin(SetupDB, SetupDB.id == latest_setup_sq.c.setup_id)
+            q = q.outerjoin(MachineDB, MachineDB.id == SetupDB.machine_id)
+            q = q.outerjoin(AreaDB, AreaDB.id == MachineDB.location_id)
+
+            if area_name and area_name.strip():
+                q = q.filter(AreaDB.name == area_name.strip())
+            if machine and machine.strip():
+                q = q.filter(MachineDB.name == machine.strip())
 
         # Server-side sorting (safe subset)
         col_map = {
@@ -223,7 +228,6 @@ async def lots_overview(
         if sort_col is None:
             sort_col = LotDB.created_at
 
-        total = q.count()
         offset = (page - 1) * per_page
         if (order or 'desc').lower() == 'asc':
             lots = q.order_by(sort_col.asc(), LotDB.id.asc()).offset(offset).limit(per_page).all()
