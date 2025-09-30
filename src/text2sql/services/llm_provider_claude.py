@@ -93,4 +93,45 @@ class ClaudeText2SQL:
             return m.group(1).strip()
         return content.strip()
 
+    async def generate_structured_plan(self, question: str, schema_docs: str, examples: List[Tuple[str, str]],
+                                       allowed_schema_json: str) -> str:
+        if not self.api_key:
+            raise RuntimeError("ANTHROPIC_API_KEY is not set")
+
+        context = self._compose_context(question, schema_docs, examples)
+        system = (
+            "You are a Text-to-SQL planner. Return ONLY valid JSON plan with keys: "
+            "tables, joins, select, filters, group_by, order_by, limit. "
+            "All table/column choices MUST be picked from ALLOWED_SCHEMA."
+        )
+        user = (
+            f"ALLOWED_SCHEMA (JSON):\n{allowed_schema_json}\n\n"
+            f"Context:\n{context[:4000]}\n\n"
+            f"Task: Build a minimal correct plan for the user's question.\n"
+            f"User question: {question}\n"
+            "Return ONLY the JSON (no code fences, no explanations)."
+        )
+
+        headers = {
+            "x-api-key": self.api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+        payload = {
+            "model": self.model,
+            "max_tokens": 800,
+            "temperature": 0.0,
+            "system": system,
+            "messages": [
+                {"role": "user", "content": user}
+            ],
+        }
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(ANTHROPIC_API_URL, headers=headers, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+        content = "".join(part.get("text", "") for part in data.get("content", []) if part.get("type") == "text")
+        return content.strip()
+
 
