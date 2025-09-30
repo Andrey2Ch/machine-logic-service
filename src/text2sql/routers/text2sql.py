@@ -745,11 +745,11 @@ async def llm_query(payload: LLMQuery,
             plan_obj = json.loads(plan_json)
             raw_sql = compile_plan_to_sql(plan_obj, allowed_schema)
         except Exception:
-            # Fallback: текстовый режим
+            # Fallback: текстовый режим, но со строгим ALLOWED_SCHEMA
             user_q = question
             if time_hint:
                 user_q = f"[CONTEXT] {time_hint}\n\n{question}"
-            raw_sql = await llm.generate_sql(user_q, combined_schema, examples)
+            raw_sql = await llm.generate_sql(user_q, combined_schema, examples, json.dumps(allowed_schema))
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
@@ -834,7 +834,7 @@ async def llm_query(payload: LLMQuery,
                 f"Используй только реально существующие таблицы/колонки из схемы. Вопрос: {question}"
             )
             try:
-                raw_sql2 = await llm.generate_sql(repair_prompt, schema_docs, examples)
+                raw_sql2 = await llm.generate_sql(repair_prompt, schema_docs, examples, json.dumps(allowed_schema))
                 result2 = validator.validate(raw_sql2)
                 if result2["valid"]:
                     db.execute(text(f"EXPLAIN {result2['sanitized_sql']}"))

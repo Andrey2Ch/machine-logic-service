@@ -48,18 +48,28 @@ class ClaudeText2SQL:
             ctx_parts.append(f"Q: {ex_q}\nSQL:\n{ex_sql}\n\n")
         return "".join(ctx_parts)[:max_chars]
 
-    async def generate_sql(self, question: str, schema_docs: str, examples: List[Tuple[str, str]]) -> str:
+    async def generate_sql(self, question: str, schema_docs: str, examples: List[Tuple[str, str]], allowed_schema_json: str | None = None) -> str:
         if not self.api_key:
             raise RuntimeError("ANTHROPIC_API_KEY is not set")
 
         context = self._compose_context(question, schema_docs, examples)
         system = self._build_system_prompt()
-        user = (
-            f"Context:\n{context}\n\n"
-            f"Task: Generate a valid PostgreSQL SQL for the user's question."
-            f"\nUser question (any language): {question}\n"
-            "Return ONLY the SQL in a fenced code block."
-        )
+        if allowed_schema_json:
+            # Строгое ограничение допустимых таблиц/колонок
+            user = (
+                f"ALLOWED_SCHEMA (JSON):\n{allowed_schema_json}\n\n"
+                f"Context:\n{context}\n\n"
+                "Rules: Use ONLY tables and columns present in ALLOWED_SCHEMA. Do NOT invent fields. "
+                "Prefer semantic views if present. Add LIMIT if missing. Return ONLY SQL in a fenced code block.\n\n"
+                f"User question (any language): {question}\n"
+            )
+        else:
+            user = (
+                f"Context:\n{context}\n\n"
+                f"Task: Generate a valid PostgreSQL SQL for the user's question."
+                f"\nUser question (any language): {question}\n"
+                "Return ONLY the SQL in a fenced code block."
+            )
         
         # Debug: print full context
         print(f"DEBUG: Full context length: {len(context)}")
