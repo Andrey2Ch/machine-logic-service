@@ -103,10 +103,24 @@ async def update_lot(
             lot.part_id = lot_update.part_id
         
         if lot_update.initial_planned_quantity is not None:
-            lot.initial_planned_quantity = lot_update.initial_planned_quantity
-            # Пересчитать total_planned_quantity
-            additional = (lot.total_planned_quantity or lot.initial_planned_quantity) - (lot.initial_planned_quantity or 0)
-            lot.total_planned_quantity = lot_update.initial_planned_quantity + max(0, additional)
+            new_initial = lot_update.initial_planned_quantity
+            lot.initial_planned_quantity = new_initial
+            
+            # Синхронизируем с активным сетапом
+            setup = db.query(SetupDB).filter(
+                SetupDB.lot_id == lot_id,
+                SetupDB.end_time == None,
+                SetupDB.status.in_(['created', 'started', 'pending_qc', 'allowed'])
+            ).first()
+            
+            if setup:
+                # Обновляем planned_quantity в сетапе
+                setup.planned_quantity = new_initial
+                # Пересчитываем total из сетапа (истина в сетапах!)
+                lot.total_planned_quantity = setup.planned_quantity + (setup.additional_quantity or 0)
+            else:
+                # Нет сетапа - total = initial
+                lot.total_planned_quantity = new_initial
         
         if lot_update.due_date is not None:
             lot.due_date = lot_update.due_date
@@ -272,7 +286,7 @@ async def update_lot_quantity(
 ):
     """
     Обновляет дополнительное количество для лота.
-    Сохраняет additional_quantity в setup_jobs и пересчитывает total_planned_quantity в lots.
+    ИСТИНА В СЕТАПАХ: меняется setup_jobs.additional_quantity, lot.total пересчитывается.
     """
     try:
         # Найти лот
@@ -280,28 +294,32 @@ async def update_lot_quantity(
         if not lot:
             raise HTTPException(status_code=404, detail="Лот не найден")
         
-        # Найти setup_job для этого лота
-        setup_job = db.query(SetupDB).filter(SetupDB.lot_id == lot_id).first()
-        if not setup_job:
-            raise HTTPException(status_code=404, detail="Наладка для лота не найдена")
+        # Найти АКТИВНЫЙ setup_job для этого лота
+        setup_job = db.query(SetupDB).filter(
+            SetupDB.lot_id == lot_id,
+            SetupDB.end_time == None,
+            SetupDB.status.in_(['created', 'started', 'pending_qc', 'allowed'])
+        ).first()
         
-        # Обновить additional_quantity в setup_jobs
+        if not setup_job:
+            raise HTTPException(status_code=404, detail="Активная наладка для лота не найдена")
+        
+        # Обновить additional_quantity в setup_jobs (ИСТОЧНИК ИСТИНЫ)
         setup_job.additional_quantity = quantity_update.additional_quantity
         
-        # Пересчитать total_planned_quantity в lots
-        initial_quantity = lot.initial_planned_quantity or 0
-        lot.total_planned_quantity = initial_quantity + quantity_update.additional_quantity
+        # Пересчитать total_planned_quantity в lots ИЗ СЕТАПА
+        lot.total_planned_quantity = setup_job.planned_quantity + setup_job.additional_quantity
         
         # Сохранить изменения
         db.commit()
         
-        logger.info(f"Обновлено количество для лота {lot_id}: additional={quantity_update.additional_quantity}, total={lot.total_planned_quantity}")
+        logger.info(f"Обновлено количество для лота {lot_id}: setup.additional={quantity_update.additional_quantity}, lot.total={lot.total_planned_quantity}")
         
         return {
             "success": True,
             "message": "Количество успешно обновлено",
             "lot_id": lot_id,
-            "initial_planned_quantity": initial_quantity,
+            "initial_planned_quantity": lot.initial_planned_quantity,
             "additional_quantity": quantity_update.additional_quantity,
             "total_planned_quantity": lot.total_planned_quantity
         }
