@@ -21,6 +21,7 @@ from .routers import events as events_router
 from .routers import catalog as catalog_router
 from .routers import employees as employees_router
 from .routers import cards as cards_router
+from .routers import time_tracking as time_tracking_router
 from src.models.setup import SetupStatus, BatchLabelInfo
 from src.models.reports import LotSummaryReport, ProductionPerformanceReport, QualityReport
 from typing import Optional, Dict, List, Union
@@ -3756,6 +3757,7 @@ app.include_router(warehouse_router.router)
 app.include_router(catalog_router.router)
 app.include_router(employees_router.router)
 app.include_router(cards_router.router)
+app.include_router(time_tracking_router.router)
 from .text2sql.routers import router as text2sql_router, admin_router as text2sql_admin_router, examples_router as text2sql_examples_router
 app.include_router(text2sql_router)
 app.include_router(text2sql_admin_router)
