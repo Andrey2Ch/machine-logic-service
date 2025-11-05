@@ -3,11 +3,15 @@
 # 1. Build Stage
 FROM python:3.10-slim-bookworm AS builder
 
-# Install build dependencies
+# Install build dependencies (including for dlib and face-recognition)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libpq-dev \
     libffi-dev \
+    cmake \
+    libopenblas-dev \
+    liblapack-dev \
+    libjpeg-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Set environment variables
@@ -25,10 +29,13 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # 2. Production Stage
 FROM python:3.10-slim-bookworm AS runner
 
-# Install runtime dependencies only
+# Install runtime dependencies (including for face-recognition)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq5 \
     dos2unix \
+    libopenblas0 \
+    liblapack3 \
+    libjpeg62-turbo \
     && rm -rf /var/lib/apt/lists/*
 
 # Set environment variables
