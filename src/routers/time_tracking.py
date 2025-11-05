@@ -444,36 +444,41 @@ async def delete_face_embedding(embedding_id: int, db: Session = Depends(get_db_
 
 # ==================== Terminal Management ====================
 
+class TerminalRegister(BaseModel):
+    """Модель для регистрации терминала"""
+    device_id: str
+    device_name: str
+    location_description: Optional[str] = None
+
+
 @router.post("/terminals/register")
 async def register_terminal(
-    device_id: str,
-    device_name: str,
-    location_description: Optional[str] = None,
+    terminal: TerminalRegister,
     db: Session = Depends(get_db_session)
 ):
     """Зарегистрировать новый терминал"""
-    existing = db.query(TerminalDB).filter(TerminalDB.device_id == device_id).first()
+    existing = db.query(TerminalDB).filter(TerminalDB.device_id == terminal.device_id).first()
     
     if existing:
         # Обновить существующий
-        existing.device_name = device_name
-        existing.location_description = location_description or existing.location_description
+        existing.device_name = terminal.device_name
+        existing.location_description = terminal.location_description or existing.location_description
         existing.last_seen_at = datetime.utcnow()
         existing.is_active = True
         db.commit()
         return {"success": True, "terminal_id": existing.id, "message": "Терминал обновлен"}
     else:
         # Создать новый
-        terminal = TerminalDB(
-            device_id=device_id,
-            device_name=device_name,
-            location_description=location_description,
+        new_terminal = TerminalDB(
+            device_id=terminal.device_id,
+            device_name=terminal.device_name,
+            location_description=terminal.location_description,
             last_seen_at=datetime.utcnow()
         )
-        db.add(terminal)
+        db.add(new_terminal)
         db.commit()
-        db.refresh(terminal)
-        return {"success": True, "terminal_id": terminal.id, "message": "Терминал зарегистрирован"}
+        db.refresh(new_terminal)
+        return {"success": True, "terminal_id": new_terminal.id, "message": "Терминал зарегистрирован"}
 
 
 @router.get("/terminals")
