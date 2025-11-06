@@ -98,6 +98,11 @@ async def update_work_shift(employee_id: int, shift_date: date, db: Session):
     """
     Обновить агрегированные данные смены
     Вычисляет общее время работы на основе записей входа/выхода
+    
+    Логика: суммирует время по парам вход-выход
+    - 10:50 ВХОД, 10:51 ВЫХОД = 1 минута
+    - 11:36 ВХОД, 11:39 ВЫХОД = 3 минуты
+    - Итого: 4 минуты
     """
     # Получить все записи за день
     entries = db.query(TimeEntryDB).filter(
@@ -105,18 +110,34 @@ async def update_work_shift(employee_id: int, shift_date: date, db: Session):
         func.date(TimeEntryDB.entry_time) == shift_date
     ).order_by(TimeEntryDB.entry_time).all()
     
-    # Найти первый вход и последний выход
-    check_in = next((e for e in entries if e.entry_type == 'check_in'), None)
-    check_out = next((e for e in reversed(entries) if e.entry_type == 'check_out'), None)
+    if not entries:
+        return
     
-    total_hours = None
-    status = 'incomplete'
+    # Найти первый вход и последний выход для сводки
+    first_check_in = next((e for e in entries if e.entry_type == 'check_in'), None)
+    last_check_out = next((e for e in reversed(entries) if e.entry_type == 'check_out'), None)
     
-    if check_in and check_out:
-        delta = check_out.entry_time - check_in.entry_time
-        total_hours = delta.total_seconds() / 3600
+    # Вычислить СУММАРНОЕ время по парам вход-выход
+    total_seconds = 0
+    current_check_in = None
+    
+    for entry in entries:
+        if entry.entry_type == 'check_in':
+            current_check_in = entry.entry_time
+        elif entry.entry_type == 'check_out' and current_check_in:
+            # Нашли пару: суммируем время
+            delta = entry.entry_time - current_check_in
+            total_seconds += delta.total_seconds()
+            current_check_in = None  # Сбрасываем для следующей пары
+    
+    total_hours = total_seconds / 3600 if total_seconds > 0 else None
+    
+    # Определить статус
+    if last_check_out and first_check_in:
+        # Есть хотя бы одна полная пара
         status = 'complete'
-    elif check_in:
+    elif first_check_in:
+        # Есть вход, но нет последнего выхода
         status = 'incomplete'
     else:
         status = 'absent'
@@ -128,8 +149,8 @@ async def update_work_shift(employee_id: int, shift_date: date, db: Session):
     ).first()
     
     if shift:
-        shift.check_in_time = check_in.entry_time if check_in else None
-        shift.check_out_time = check_out.entry_time if check_out else None
+        shift.check_in_time = first_check_in.entry_time if first_check_in else None
+        shift.check_out_time = last_check_out.entry_time if last_check_out else None
         shift.total_hours = total_hours
         shift.status = status
         shift.updated_at = datetime.utcnow()
@@ -137,8 +158,8 @@ async def update_work_shift(employee_id: int, shift_date: date, db: Session):
         shift = WorkShiftDB(
             employee_id=employee_id,
             shift_date=shift_date,
-            check_in_time=check_in.entry_time if check_in else None,
-            check_out_time=check_out.entry_time if check_out else None,
+            check_in_time=first_check_in.entry_time if first_check_in else None,
+            check_out_time=last_check_out.entry_time if last_check_out else None,
             total_hours=total_hours,
             status=status
         )
