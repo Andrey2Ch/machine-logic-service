@@ -419,13 +419,14 @@ async def get_face_embeddings(db: Session = Depends(get_db_session)):
 
 @router.post("/face-embeddings/upload")
 async def upload_face_photo(
-    employee_id: int,
+    factory_number: str,
     file: UploadFile = File(...),
     db: Session = Depends(get_db_session)
 ):
     """
     Загрузить фото лица для сотрудника
     
+    Принимает factory_number и файл фото.
     Извлекает face embedding из фото и сохраняет в БД.
     Требует установленную библиотеку face_recognition.
     """
@@ -437,10 +438,10 @@ async def upload_face_photo(
     except ImportError:
         raise HTTPException(500, "Библиотека face_recognition не установлена")
     
-    # Проверить что сотрудник существует
-    employee = db.query(EmployeeDB).filter(EmployeeDB.id == employee_id).first()
+    # Найти сотрудника по factory_number
+    employee = db.query(EmployeeDB).filter(EmployeeDB.factory_number == factory_number).first()
     if not employee:
-        raise HTTPException(404, "Сотрудник не найден")
+        raise HTTPException(404, f"Сотрудник с PIN {factory_number} не найден")
     
     # Прочитать изображение
     contents = await file.read()
@@ -458,14 +459,14 @@ async def upload_face_photo(
     
     # Деактивировать старые embeddings этого сотрудника
     db.query(FaceEmbeddingDB).filter(
-        FaceEmbeddingDB.employee_id == employee_id
+        FaceEmbeddingDB.employee_id == employee.id
     ).update({"is_active": False})
     
     # Сохранить новый embedding
     face_emb = FaceEmbeddingDB(
-        employee_id=employee_id,
+        employee_id=employee.id,
         embedding=pickle.dumps(embedding),
-        photo_url=f"/uploads/faces/{employee_id}_{file.filename}"
+        photo_url=f"/uploads/faces/{employee.id}_{file.filename}"
     )
     db.add(face_emb)
     db.commit()
