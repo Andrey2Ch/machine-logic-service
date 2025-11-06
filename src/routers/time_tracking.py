@@ -238,6 +238,37 @@ async def create_batch_entries(entries: List[TimeEntryCreate], db: Session = Dep
     return {"results": results, "total": len(entries), "success_count": sum(1 for r in results if r["success"])}
 
 
+@router.get("/my-status")
+async def get_employee_status(telegram_id: int, db: Session = Depends(get_db_session)):
+    """
+    Получить текущий статус сотрудника (последняя запись)
+    
+    Возвращает:
+    - last_entry_type: "check_in" | "check_out" | null
+    - can_check_in: bool
+    - can_check_out: bool
+    """
+    employee = db.query(EmployeeDB).filter(EmployeeDB.telegram_id == telegram_id).first()
+    if not employee:
+        raise HTTPException(404, "Сотрудник не найден")
+    
+    # Получить последнюю запись
+    last_entry = db.query(TimeEntryDB).filter(
+        TimeEntryDB.employee_id == employee.id
+    ).order_by(desc(TimeEntryDB.entry_time)).first()
+    
+    last_entry_type = last_entry.entry_type if last_entry else None
+    
+    return {
+        "employee_id": employee.id,
+        "employee_name": employee.full_name,
+        "last_entry_type": last_entry_type,
+        "last_entry_time": last_entry.entry_time if last_entry else None,
+        "can_check_in": last_entry_type != "check_in",  # можно войти, если последнее действие не вход
+        "can_check_out": last_entry_type == "check_in"  # можно выйти, только если последнее действие вход
+    }
+
+
 @router.get("/my-today")
 async def get_my_today_entries(telegram_id: int, db: Session = Depends(get_db_session)):
     """
