@@ -480,7 +480,7 @@ async def upload_face_photo(
     return {
         "success": True,
         "embedding_id": face_emb.id,
-        "employee_id": employee_id,
+        "employee_id": employee.id,
         "employee_name": employee.full_name
     }
 
