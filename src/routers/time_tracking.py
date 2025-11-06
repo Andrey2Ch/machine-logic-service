@@ -1,7 +1,7 @@
 """
 Роутер для учета рабочего времени сотрудников
 """
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import func, desc
@@ -419,17 +419,19 @@ async def get_face_embeddings(db: Session = Depends(get_db_session)):
 
 @router.post("/face-embeddings/upload")
 async def upload_face_photo(
-    factory_number: str,
     file: UploadFile = File(...),
+    factory_number: str = Form(...),
     db: Session = Depends(get_db_session)
 ):
     """
     Загрузить фото лица для сотрудника
     
-    Принимает factory_number и файл фото.
+    Принимает factory_number (из FormData) и файл фото.
     Извлекает face embedding из фото и сохраняет в БД.
     Требует установленную библиотеку face_recognition.
     """
+    logger.info(f"Загрузка фото для factory_number: {factory_number}")
+    
     try:
         import face_recognition
         import numpy as np
@@ -441,6 +443,7 @@ async def upload_face_photo(
     # Найти сотрудника по factory_number
     employee = db.query(EmployeeDB).filter(EmployeeDB.factory_number == factory_number).first()
     if not employee:
+        logger.error(f"Сотрудник с PIN {factory_number} не найден")
         raise HTTPException(404, f"Сотрудник с PIN {factory_number} не найден")
     
     # Прочитать изображение
