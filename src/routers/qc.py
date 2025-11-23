@@ -235,8 +235,8 @@ async def notify_defect_detected(
     Отправляет уведомления о браке оператору, наладчику и админам.
     Вызывается из isramat-dashboard при создании батча defect.
     """
-        logger.info(f"Получен запрос на уведомление о браке: {request.model_dump()}")
-        logger.info(f"Defect notification request details: operator_id={request.operator_id}, machinist_id={request.machinist_id}, setup_job_id={request.setup_job_id}")
+    logger.info(f"Получен запрос на уведомление о браке: {request.model_dump()}")
+    logger.info(f"Defect notification request details: operator_id={request.operator_id}, machinist_id={request.machinist_id}, setup_job_id={request.setup_job_id}")
     
     try:
         # Формируем сообщение
