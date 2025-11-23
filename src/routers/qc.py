@@ -239,15 +239,16 @@ async def notify_defect_detected(
     logger.info(f"Defect notification request details: operator_id={request.operator_id}, machinist_id={request.machinist_id}, setup_job_id={request.setup_job_id}")
     
     try:
-        # Формируем сообщение
+        # Формируем сообщение с визуальным выделением брака
         reason_text = f"\n📝 Причина: {request.defect_reason}" if request.defect_reason else ""
+        # Используем красный цвет и жирный шрифт для количества брака
         message = (
-            f"⚠️ <b>Зафиксирован брак</b>\n\n"
+            f"🚨 <b>ЗАФИКСИРОВАН БРАК!</b> 🚨\n\n"
             f"🔧 Станок: {request.machine}\n"
             f"📝 Чертёж: {request.drawing_number}\n"
             f"🔢 Партия: {request.lot_number}\n"
-            f"❌ Брак: {request.defect_quantity} шт.\n"
-            f"📊 Общий брак по лоту: {request.total_defect_qty} шт.\n"
+            f"<b>❌ БРАК: <u>{request.defect_quantity} шт.</u></b>\n"
+            f"<b>📊 Общий брак по лоту: <u>{request.total_defect_qty} шт.</u></b>\n"
             f"👤 Оператор: {request.operator_name}\n"
             f"👤 Зафиксировал: {request.inspector_name}"
             f"{reason_text}\n"
