@@ -32,6 +32,21 @@ class LotInfoItem(BaseModel):
 class NotifyRequest(BaseModel):
     setup_id: int
 
+class DefectNotificationRequest(BaseModel):
+    """Модель для уведомления о браке"""
+    machine: str
+    drawing_number: str
+    lot_number: str
+    defect_quantity: int
+    total_defect_qty: int
+    operator_name: str
+    inspector_name: str
+    defect_reason: Optional[str] = None
+    timestamp: str
+    operator_id: Optional[int] = None
+    machinist_id: Optional[int] = None
+    setup_job_id: Optional[int] = None
+
 
 @router.get("/lots-pending-qc", response_model=List[LotInfoItem])
 async def get_lots_pending_qc(
@@ -209,4 +224,105 @@ async def notify_setup_allowed(
         raise e
     except Exception as e:
         logger.error(f"Ошибка при отправке уведомления для наладки {setup_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера при отправке уведомления") 
+        raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера при отправке уведомления")
+
+@router.post("/defect/notify", summary="Отправить уведомление о браке")
+async def notify_defect_detected(
+    request: DefectNotificationRequest,
+    db: Session = Depends(get_db_session)
+):
+    """
+    Отправляет уведомления о браке оператору, наладчику и админам.
+    Вызывается из isramat-dashboard при создании батча defect.
+    """
+    logger.info(f"Получен запрос на уведомление о браке: {request.model_dump()}")
+    
+    try:
+        # Формируем сообщение
+        reason_text = f"\n📝 Причина: {request.defect_reason}" if request.defect_reason else ""
+        message = (
+            f"⚠️ <b>Зафиксирован брак</b>\n\n"
+            f"🔧 Станок: {request.machine}\n"
+            f"📝 Чертёж: {request.drawing_number}\n"
+            f"🔢 Партия: {request.lot_number}\n"
+            f"❌ Брак: {request.defect_quantity} шт.\n"
+            f"📊 Общий брак по лоту: {request.total_defect_qty} шт.\n"
+            f"👤 Оператор: {request.operator_name}\n"
+            f"👤 Зафиксировал: {request.inspector_name}"
+            f"{reason_text}\n"
+            f"⏰ Время: {request.timestamp}"
+        )
+        
+        recipients = []
+        successful_sends = 0
+        
+        # 1. Оператор - только если брак по его станку
+        if request.operator_id:
+            try:
+                operator = db.query(EmployeeDB.telegram_id, EmployeeDB.full_name).filter(
+                    EmployeeDB.id == request.operator_id,
+                    EmployeeDB.telegram_id.isnot(None),
+                    EmployeeDB.telegram_id != -1,
+                    EmployeeDB.is_active == True
+                ).first()
+                
+                if operator:
+                    recipients.append(('operator', operator.telegram_id, operator.full_name))
+            except Exception as e:
+                logger.error(f"Error finding operator for defect notification: {e}")
+        
+        # 2. Наладчик - если брак по его наладке
+        if request.machinist_id:
+            try:
+                machinist = db.query(EmployeeDB.telegram_id, EmployeeDB.full_name).filter(
+                    EmployeeDB.id == request.machinist_id,
+                    EmployeeDB.telegram_id.isnot(None),
+                    EmployeeDB.telegram_id != -1,
+                    EmployeeDB.is_active == True
+                ).first()
+                
+                if machinist:
+                    recipients.append(('machinist', machinist.telegram_id, machinist.full_name))
+            except Exception as e:
+                logger.error(f"Error finding machinist for defect notification: {e}")
+        
+        # 3. Админы - всегда
+        try:
+            admins = db.query(EmployeeDB.telegram_id, EmployeeDB.full_name).filter(
+                EmployeeDB.role_id == 3,  # Admin role
+                EmployeeDB.telegram_id.isnot(None),
+                EmployeeDB.telegram_id != -1,
+                EmployeeDB.is_active == True
+            ).all()
+            
+            for admin in admins:
+                recipients.append(('admin', admin.telegram_id, admin.full_name))
+        except Exception as e:
+            logger.error(f"Error finding admins for defect notification: {e}")
+        
+        # Отправляем уведомления
+        sent_recipients = []
+        for role, telegram_id, name in recipients:
+            try:
+                await send_telegram_message(
+                    chat_id=telegram_id,
+                    text=message
+                )
+                successful_sends += 1
+                sent_recipients.append(f"{role}:{name}")
+                logger.info(f"Defect notification sent to {role} ({name}, {telegram_id})")
+            except Exception as e:
+                logger.error(f"Failed to send defect notification to {telegram_id}: {e}")
+        
+        logger.info(f"Defect notifications sent: {successful_sends}/{len(recipients)}")
+        
+        return {
+            "success": True,
+            "sent": successful_sends,
+            "total_recipients": len(recipients),
+            "recipients": sent_recipients
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in defect notification: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ошибка при отправке уведомлений о браке: {str(e)}") 
