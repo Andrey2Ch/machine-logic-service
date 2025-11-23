@@ -235,7 +235,8 @@ async def notify_defect_detected(
     Отправляет уведомления о браке оператору, наладчику и админам.
     Вызывается из isramat-dashboard при создании батча defect.
     """
-    logger.info(f"Получен запрос на уведомление о браке: {request.model_dump()}")
+        logger.info(f"Получен запрос на уведомление о браке: {request.model_dump()}")
+        logger.info(f"Defect notification request details: operator_id={request.operator_id}, machinist_id={request.machinist_id}, setup_job_id={request.setup_job_id}")
     
     try:
         # Формируем сообщение
@@ -272,6 +273,8 @@ async def notify_defect_detected(
                 logger.error(f"Error finding operator for defect notification: {e}")
         
         # 2. Наладчик - если брак по его наладке
+        # Сначала пробуем через machinist_id, если нет - через setup_job_id
+        machinist_found = False
         if request.machinist_id:
             try:
                 machinist = db.query(EmployeeDB.telegram_id, EmployeeDB.full_name).filter(
@@ -283,8 +286,37 @@ async def notify_defect_detected(
                 
                 if machinist:
                     recipients.append(('machinist', machinist.telegram_id, machinist.full_name))
+                    machinist_found = True
+                    logger.info(f"Found machinist via machinist_id: {request.machinist_id}")
             except Exception as e:
                 logger.error(f"Error finding machinist for defect notification: {e}")
+        
+        # Если наладчик не найден через machinist_id, пробуем через setup_job_id
+        if not machinist_found and request.setup_job_id:
+            try:
+                logger.info(f"Trying to find machinist via setup_job_id: {request.setup_job_id}")
+                setup = db.query(SetupDB.employee_id).filter(SetupDB.id == request.setup_job_id).first()
+                if setup:
+                    logger.info(f"Setup found: employee_id={setup.employee_id}")
+                    if setup.employee_id:
+                        machinist = db.query(EmployeeDB.telegram_id, EmployeeDB.full_name).filter(
+                            EmployeeDB.id == setup.employee_id,
+                            EmployeeDB.telegram_id.isnot(None),
+                            EmployeeDB.telegram_id != -1,
+                            EmployeeDB.is_active == True
+                        ).first()
+                        
+                        if machinist:
+                            recipients.append(('machinist', machinist.telegram_id, machinist.full_name))
+                            logger.info(f"Found machinist via setup_job_id: {request.setup_job_id}, name={machinist.full_name}, telegram_id={machinist.telegram_id}")
+                        else:
+                            logger.warning(f"Machinist with employee_id={setup.employee_id} not found or has no telegram_id")
+                    else:
+                        logger.warning(f"Setup {request.setup_job_id} has no employee_id")
+                else:
+                    logger.warning(f"Setup with id={request.setup_job_id} not found")
+            except Exception as e:
+                logger.error(f"Error finding machinist via setup_job_id: {e}", exc_info=True)
         
         # 3. Админы - всегда
         try:
@@ -301,18 +333,26 @@ async def notify_defect_detected(
             logger.error(f"Error finding admins for defect notification: {e}")
         
         # Отправляем уведомления
+        logger.info(f"Total recipients found: {len(recipients)}")
+        if len(recipients) == 0:
+            logger.warning("No recipients found for defect notification! Check operator_id, machinist_id, and admin role_id.")
+        
         sent_recipients = []
         for role, telegram_id, name in recipients:
             try:
-                await send_telegram_message(
+                logger.info(f"Attempting to send defect notification to {role} ({name}, telegram_id={telegram_id})")
+                result = await send_telegram_message(
                     chat_id=telegram_id,
                     text=message
                 )
-                successful_sends += 1
-                sent_recipients.append(f"{role}:{name}")
-                logger.info(f"Defect notification sent to {role} ({name}, {telegram_id})")
+                if result:
+                    successful_sends += 1
+                    sent_recipients.append(f"{role}:{name}")
+                    logger.info(f"Defect notification sent successfully to {role} ({name}, {telegram_id})")
+                else:
+                    logger.error(f"send_telegram_message returned False for {role} ({name}, {telegram_id})")
             except Exception as e:
-                logger.error(f"Failed to send defect notification to {telegram_id}: {e}")
+                logger.error(f"Failed to send defect notification to {telegram_id}: {e}", exc_info=True)
         
         logger.info(f"Defect notifications sent: {successful_sends}/{len(recipients)}")
         
