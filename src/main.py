@@ -1616,6 +1616,7 @@ from enum import Enum
 class LotStatus(str, Enum):
     """Статусы лотов для синхронизации между Telegram-ботом и FastAPI"""
     NEW = "new"                    # Новый лот от Order Manager
+    ASSIGNED = "assigned"         # Распределен на станок (назначен через канбан-доску, но наладка еще не создана)
     IN_PRODUCTION = "in_production"  # Лот в производстве (после начала наладки)
     POST_PRODUCTION = "post_production"  # Лот после производства (все наладки завершены)
     CLOSED = "closed"              # Закрытый лот (все батчи проверены и распределены)
@@ -1644,6 +1645,8 @@ class LotResponse(LotBase):
     total_planned_quantity: Optional[int] = None # Общее количество (плановое + дополнительное)
     part: Optional[PartResponse] = None # Для возврата информации о детали вместе с лотом
     machine_name: Optional[str] = None  # 🔄 Название станка последней активной наладки
+    assigned_machine_id: Optional[int] = None  # Назначенный станок (для статуса assigned)
+    assigned_order: Optional[int] = None  # Порядок в очереди на станке
 
     class Config:
         from_attributes = True # <--- ИСПРАВЛЕНО с orm_mode
@@ -1830,6 +1833,11 @@ async def get_lots(
 class LotStatusUpdate(BaseModel):
     status: LotStatus
 
+class LotAssignmentUpdate(BaseModel):
+    status: Optional[LotStatus] = None
+    assigned_machine_id: Optional[int] = None
+    assigned_order: Optional[int] = None
+
 class LotQuantityUpdate(BaseModel):
     additional_quantity: int = Field(..., ge=0, description="Дополнительное количество (неотрицательное число)")
 
@@ -1856,6 +1864,53 @@ async def update_lot_status(
         db.refresh(lot)
         
         logger.info(f"Статус лота {lot_id} обновлен с '{old_status}' на '{status_update.status.value}'")
+        
+        return lot
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+
+@app.patch("/lots/{lot_id}", response_model=LotResponse, tags=["Lots"])
+async def update_lot_assignment(
+    lot_id: int,
+    assignment_update: LotAssignmentUpdate,
+    db: Session = Depends(get_db_session)
+):
+    """
+    Обновить назначение лота на станок (для канбан-доски).
+    Обновляет статус, assigned_machine_id и assigned_order.
+    """
+    try:
+        # Найти лот
+        lot = db.query(LotDB).options(selectinload(LotDB.part)).filter(LotDB.id == lot_id).first()
+        if not lot:
+            raise HTTPException(status_code=404, detail=f"Lot with id {lot_id} not found")
+        
+        # Обновляем статус, если передан
+        if assignment_update.status is not None:
+            old_status = lot.status
+            lot.status = assignment_update.status.value
+            logger.info(f"Статус лота {lot_id} обновлен с '{old_status}' на '{assignment_update.status.value}'")
+        
+        # Обновляем assigned_machine_id, если передан
+        if assignment_update.assigned_machine_id is not None:
+            # Проверяем существование станка, если ID не null
+            if assignment_update.assigned_machine_id is not None:
+                machine = db.query(MachineDB).filter(MachineDB.id == assignment_update.assigned_machine_id).first()
+                if not machine:
+                    raise HTTPException(status_code=404, detail=f"Machine with id {assignment_update.assigned_machine_id} not found")
+            lot.assigned_machine_id = assignment_update.assigned_machine_id
+        
+        # Обновляем assigned_order, если передан
+        if assignment_update.assigned_order is not None:
+            lot.assigned_order = assignment_update.assigned_order
+        
+        db.commit()
+        db.refresh(lot)
+        
+        logger.info(f"Назначение лота {lot_id} обновлено: status={lot.status}, assigned_machine_id={lot.assigned_machine_id}, assigned_order={lot.assigned_order}")
         
         return lot
         

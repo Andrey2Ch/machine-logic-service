@@ -88,6 +88,8 @@ class LotDB(Base):
     initial_planned_quantity = Column(Integer, nullable=True)
     total_planned_quantity = Column(Integer, nullable=True)
     status = Column(String(50), nullable=False, default='new') # Статус лота
+    assigned_machine_id = Column(Integer, ForeignKey("machines.id"), nullable=True)  # Назначенный станок (для статуса assigned)
+    assigned_order = Column(Integer, nullable=True)  # Порядок в очереди на станке
 
     # Добавляем обратную связь к BatchDB
     batches = relationship("BatchDB", back_populates="lot")
