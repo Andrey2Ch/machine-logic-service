@@ -147,7 +147,8 @@ async def search_new_lots(
     db: Session = Depends(get_db_session)
 ):
     """
-    Поиск предсозданных лотов для чертежа (status='new'), по аналогии с логикой бота.
+    Поиск предсозданных лотов для чертежа (status='new' или 'assigned').
+    assigned - это частный случай "Новый", лоты назначены на станок, но наладка еще не создана.
     Возвращает: id, lot_number, initial_planned_quantity, due_date, order_manager_name
     """
     try:
@@ -163,7 +164,7 @@ async def search_new_lots(
             .join(PartDB, PartDB.id == LotDB.part_id)
             .outerjoin(EmployeeDB, EmployeeDB.id == LotDB.order_manager_id)
             .filter(PartDB.drawing_number == drawing_number)
-            .filter(LotDB.status == 'new')
+            .filter(LotDB.status.in_(['new', 'assigned']))  # Включаем и new, и assigned
             .order_by(LotDB.created_at.desc())
             .limit(limit)
             .all()
