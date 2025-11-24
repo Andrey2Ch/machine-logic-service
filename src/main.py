@@ -652,6 +652,26 @@ async def create_setup(setup: SetupInput, db: Session = Depends(get_db_session))
     )
     
     db.add(new_setup)
+    db.flush()  # Flush to get new_setup.id
+    
+    # ОБНОВЛЕНИЕ ПРИВЯЗОК ЛОТА: независимо от предыдущего assigned, привязываем к станку, где создана наладка
+    # Находим максимальный assigned_order для этого станка
+    max_order = db.query(func.max(LotDB.assigned_order)).filter(
+        LotDB.assigned_machine_id == setup.machine_id,
+        LotDB.id != lot.id  # Исключаем текущий лот
+    ).scalar() or 0
+    
+    # Обновляем привязки лота к станку, где создана наладка
+    lot.assigned_machine_id = setup.machine_id
+    lot.assigned_order = max_order + 1
+    
+    # Перевод лота в производство: если наладка создана, лот переходит в in_production
+    if lot.status == 'new':
+        lot.status = 'in_production'
+    elif lot.status == 'assigned':
+        # Если лот был assigned на другой станок, переводим в in_production, так как наладка создана
+        lot.status = 'in_production'
+    
     db.commit()
     db.refresh(new_setup)
     

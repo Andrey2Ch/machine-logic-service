@@ -78,7 +78,9 @@ class CreateSetupPayload(BaseModel):
 @router.post("/setup/create", summary="Создать наладку по предсозданному лоту")
 async def create_setup(payload: CreateSetupPayload, db: Session = Depends(get_db_session)):
     """
-    Создание наладки по предсозданному лоту (status='new').
+    Создание наладки по предсозданному лоту.
+    ВАЖНО: Независимо от того, был ли лот assigned на другой станок, наладка создается на указанном станке,
+    и все привязки лота обновляются на этот станок.
     Используется дашбордом (аналог save_setup_job в боте для варианта с предсозданным лотом).
     """
     try:
@@ -87,11 +89,10 @@ async def create_setup(payload: CreateSetupPayload, db: Session = Depends(get_db
               .join(PartDB, PartDB.id == LotDB.part_id)
               .filter(LotDB.lot_number == payload.lot_number)
               .filter(PartDB.drawing_number == payload.drawing_number)
-              .filter(LotDB.status == 'new')
               .first()
         )
         if not lot:
-            raise HTTPException(status_code=404, detail="Лот не найден или не 'new'")
+            raise HTTPException(status_code=404, detail="Лот не найден")
 
         setup = SetupDB(
             employee_id=payload.employee_id,
@@ -102,14 +103,29 @@ async def create_setup(payload: CreateSetupPayload, db: Session = Depends(get_db
             status='created'
         )
         db.add(setup)
+        db.flush()  # Flush to get setup.id
+
+        # ОБНОВЛЕНИЕ ПРИВЯЗОК ЛОТА: независимо от предыдущего assigned, привязываем к станку, где создана наладка
+        # Находим максимальный assigned_order для этого станка
+        max_order = db.query(func.max(LotDB.assigned_order)).filter(
+            LotDB.assigned_machine_id == payload.machine_id,
+            LotDB.id != lot.id  # Исключаем текущий лот
+        ).scalar() or 0
+        
+        # Обновляем привязки лота к станку, где создана наладка
+        lot.assigned_machine_id = payload.machine_id
+        lot.assigned_order = max_order + 1
 
         # Перевод лота в производство + фиксация момента создания наладки
         if lot.status == 'new':
             lot.status = 'in_production'
+        elif lot.status == 'assigned':
+            # Если лот был assigned, переводим в in_production, так как наладка создана
+            lot.status = 'in_production'
+        
         # Устанавливаем start_time для статуса 'created' как момент регистрации наладки
         # (это нужно, чтобы витрина и бот видели чертеж сразу после регистрации)
         if setup.status == 'created' and getattr(setup, 'start_time', None) is None:
-            from datetime import datetime
             setup.start_time = datetime.utcnow()
 
         db.commit()
