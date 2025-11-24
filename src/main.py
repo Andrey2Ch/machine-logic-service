@@ -1837,6 +1837,8 @@ class LotAssignmentUpdate(BaseModel):
     status: Optional[LotStatus] = None
     assigned_machine_id: Optional[int] = None
     assigned_order: Optional[int] = None
+    actual_diameter: Optional[float] = None
+    actual_profile_type: Optional[str] = None
 
 class LotQuantityUpdate(BaseModel):
     additional_quantity: int = Field(..., ge=0, description="Дополнительное количество (неотрицательное число)")
@@ -1907,10 +1909,28 @@ async def update_lot_assignment(
         if assignment_update.assigned_order is not None:
             lot.assigned_order = assignment_update.assigned_order
         
+        # Обновляем actual_diameter, если передан
+        if assignment_update.actual_diameter is not None:
+            lot.actual_diameter = assignment_update.actual_diameter
+        elif assignment_update.actual_diameter is None and hasattr(assignment_update, 'actual_diameter'):
+            # Если явно передан null, очищаем поле
+            lot.actual_diameter = None
+        
+        # Обновляем actual_profile_type, если передан
+        if assignment_update.actual_profile_type is not None:
+            # Валидация типа профиля
+            valid_types = ['round', 'hexagon', 'square']
+            if assignment_update.actual_profile_type not in valid_types:
+                raise HTTPException(status_code=400, detail=f"Неверный тип профиля. Допустимые значения: {', '.join(valid_types)}")
+            lot.actual_profile_type = assignment_update.actual_profile_type
+        elif assignment_update.actual_profile_type is None and hasattr(assignment_update, 'actual_profile_type'):
+            # Если явно передан null, очищаем поле
+            lot.actual_profile_type = None
+        
         db.commit()
         db.refresh(lot)
         
-        logger.info(f"Назначение лота {lot_id} обновлено: status={lot.status}, assigned_machine_id={lot.assigned_machine_id}, assigned_order={lot.assigned_order}")
+        logger.info(f"Назначение лота {lot_id} обновлено: status={lot.status}, assigned_machine_id={lot.assigned_machine_id}, assigned_order={lot.assigned_order}, actual_diameter={lot.actual_diameter}, actual_profile_type={lot.actual_profile_type}")
         
         return lot
         
