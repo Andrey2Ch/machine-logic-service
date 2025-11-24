@@ -1828,7 +1828,7 @@ async def get_lots(
     logger.info(f"Запрос списка лотов: search='{search}', part_search='{part_search}', skip={skip}, limit={limit}. Возвращено {len(lots)} из {total_count} лотов.")
     
     response.headers["X-Total-Count"] = str(total_count)
-    # ---------- Добавляем название станка из последней активной наладки ----------
+    # ---------- Добавляем название станка из последней активной наладки или из assigned_machine_id ----------
     if lots:
         lot_ids = [lot.id for lot in lots]
         active_statuses = ['created', 'started', 'pending_qc', 'allowed', 'in_production']
@@ -1843,6 +1843,16 @@ async def get_lots(
         for lot_id, machine_name, _ in setup_rows:
             if lot_id not in machine_map:  # берем самый свежий (первый в сортировке)
                 machine_map[lot_id] = machine_name
+
+        # Для лотов со статусом 'assigned' получаем machine_name из assigned_machine_id, если нет наладки
+        assigned_lots = [lot for lot in lots if lot.status == 'assigned' and lot.assigned_machine_id and lot.id not in machine_map]
+        if assigned_lots:
+            assigned_machine_ids = list(set([lot.assigned_machine_id for lot in assigned_lots if lot.assigned_machine_id]))
+            assigned_machines = db.query(MachineDB.id, MachineDB.name).filter(MachineDB.id.in_(assigned_machine_ids)).all()
+            assigned_machine_map: Dict[int, str] = {m.id: m.name for m in assigned_machines}
+            for lot in assigned_lots:
+                if lot.assigned_machine_id and lot.assigned_machine_id in assigned_machine_map:
+                    machine_map[lot.id] = assigned_machine_map[lot.assigned_machine_id]
 
         for lot in lots:
             lot.machine_name = machine_map.get(lot.id)
