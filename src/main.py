@@ -2282,8 +2282,9 @@ async def get_setups(
                 "created_at": setup.created_at.isoformat() if setup.created_at else None,
                 "start_time": setup.start_time.isoformat() if setup.start_time else None,
                 "end_time": setup.end_time.isoformat() if setup.end_time else None,
-                "actual_produced": setup.actual_produced,
-                "planned_quantity": setup.planned_quantity
+                "planned_quantity": setup.planned_quantity,
+                "additional_quantity": setup.additional_quantity,
+                "part_id": setup.part_id
             })
         
         return result
