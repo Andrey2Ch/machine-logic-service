@@ -2134,6 +2134,98 @@ async def close_lot(lot_id: int, db: Session = Depends(get_db_session)):
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Внутренняя ошибка сервера при закрытии лота: {str(e)}")
 
+@app.get("/lots/{lot_id}/cycle-time", tags=["Lots"])
+async def get_lot_cycle_time_stats(lot_id: int, db: Session = Depends(get_db_session)):
+    """
+    Получить статистику по времени цикла для детали из указанного лота.
+    
+    Возвращает среднее и минимальное время цикла по ВСЕМ наладкам этой детали (не только по лоту),
+    а также информацию о наладке с минимальным временем цикла.
+    
+    Returns:
+        {
+            "avg_cycle_time": int | null,        # Среднее время цикла в секундах
+            "min_cycle_time": int | null,        # Минимальное время цикла в секундах
+            "min_machine_name": str | null,      # Название станка с минимальным временем
+            "min_machinist_name": str | null     # Имя наладчика с минимальным временем
+        }
+    """
+    try:
+        # Проверяем существование лота
+        lot = db.query(LotDB).filter(LotDB.id == lot_id).first()
+        if not lot:
+            raise HTTPException(status_code=404, detail=f"Лот с ID {lot_id} не найден")
+        
+        # Запрос берет все наладки для детали (part_id) из указанного лота
+        # и считает среднее/минимум по всем историческим данным
+        sql_query = text("""
+            WITH lot_info AS (
+                SELECT 
+                    l.id as lot_id,
+                    l.part_id
+                FROM lots l
+                WHERE l.id = :lot_id
+            ),
+            part_cycle_times AS (
+                SELECT 
+                    sj.id,
+                    sj.cycle_time,
+                    sj.status,
+                    m.name as machine_name,
+                    e.full_name as machinist_name
+                FROM setup_jobs sj
+                JOIN lots l ON l.id = sj.lot_id
+                JOIN lot_info li ON l.part_id = li.part_id  -- ВСЕ лоты этой детали
+                LEFT JOIN machines m ON m.id = sj.machine_id
+                LEFT JOIN employees e ON e.id = sj.employee_id
+                WHERE sj.cycle_time IS NOT NULL 
+                    AND sj.cycle_time > 0
+            )
+            SELECT 
+                -- Среднее время цикла (округлено до целого)
+                ROUND(AVG(cycle_time)::numeric, 0)::int as avg_cycle_time,
+                -- Минимальное время цикла
+                MIN(cycle_time)::int as min_cycle_time,
+                -- Информация о наладке с минимальным временем
+                (
+                    SELECT machine_name 
+                    FROM part_cycle_times pct
+                    WHERE pct.cycle_time = (SELECT MIN(cycle_time) FROM part_cycle_times)
+                    LIMIT 1
+                ) as min_machine_name,
+                (
+                    SELECT machinist_name 
+                    FROM part_cycle_times pct
+                    WHERE pct.cycle_time = (SELECT MIN(cycle_time) FROM part_cycle_times)
+                    LIMIT 1
+                ) as min_machinist_name
+            FROM part_cycle_times
+        """)
+        
+        result = db.execute(sql_query, {"lot_id": lot_id}).fetchone()
+        
+        # Если нет данных, возвращаем null значения
+        if not result or result.avg_cycle_time is None:
+            return {
+                "avg_cycle_time": None,
+                "min_cycle_time": None,
+                "min_machine_name": None,
+                "min_machinist_name": None
+            }
+        
+        return {
+            "avg_cycle_time": result.avg_cycle_time,
+            "min_cycle_time": result.min_cycle_time,
+            "min_machine_name": result.min_machine_name,
+            "min_machinist_name": result.min_machinist_name
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Ошибка при получении статистики cycle_time для лота {lot_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ошибка при получении статистики cycle_time: {str(e)}")
+
 # <<< КОНЕЦ НОВЫХ ЭНДПОИНТОВ ДЛЯ ЛОТОВ >>>
 
 # === ОТЧЕТНОСТЬ И АНАЛИТИКА ДЛЯ ORDER MANAGER ===
