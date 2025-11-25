@@ -2228,6 +2228,70 @@ async def get_lot_cycle_time_stats(lot_id: int, db: Session = Depends(get_db_ses
 
 # <<< КОНЕЦ НОВЫХ ЭНДПОИНТОВ ДЛЯ ЛОТОВ >>>
 
+# === ЭНДПОИНТЫ ДЛЯ НАЛАДОК (SETUPS) ===
+
+@app.get("/setups/", tags=["Setups"])
+async def get_setups(
+    status_filter: Optional[str] = Query(None, description="Фильтр по статусу (можно через запятую)"),
+    lot_id: Optional[int] = Query(None, description="Фильтр по ID лота"),
+    machine_id: Optional[int] = Query(None, description="Фильтр по ID станка"),
+    limit: Optional[int] = Query(100, description="Максимальное количество записей"),
+    offset: Optional[int] = Query(0, description="Смещение для пагинации"),
+    db: Session = Depends(get_db_session)
+):
+    """
+    Получить список наладок с возможностью фильтрации.
+    
+    Примеры использования:
+    - /setups/?limit=500 - получить последние 500 наладок
+    - /setups/?status_filter=started,in_production - получить наладки с определенными статусами
+    - /setups/?lot_id=123 - получить наладки для конкретного лота
+    - /setups/?machine_id=5 - получить наладки для конкретного станка
+    """
+    try:
+        # Базовый запрос
+        query = db.query(SetupDB).order_by(SetupDB.created_at.desc())
+        
+        # Применяем фильтры
+        if status_filter:
+            # Поддержка нескольких статусов через запятую
+            statuses = [s.strip() for s in status_filter.split(',')]
+            query = query.filter(SetupDB.status.in_(statuses))
+        
+        if lot_id:
+            query = query.filter(SetupDB.lot_id == lot_id)
+            
+        if machine_id:
+            query = query.filter(SetupDB.machine_id == machine_id)
+        
+        # Применяем пагинацию
+        query = query.offset(offset).limit(limit)
+        
+        setups = query.all()
+        
+        # Формируем ответ
+        result = []
+        for setup in setups:
+            result.append({
+                "id": setup.id,
+                "lot_id": setup.lot_id,
+                "machine_id": setup.machine_id,
+                "employee_id": setup.employee_id,
+                "status": setup.status,
+                "cycle_time": setup.cycle_time,
+                "created_at": setup.created_at.isoformat() if setup.created_at else None,
+                "start_time": setup.start_time.isoformat() if setup.start_time else None,
+                "end_time": setup.end_time.isoformat() if setup.end_time else None,
+                "actual_produced": setup.actual_produced,
+                "planned_quantity": setup.planned_quantity
+            })
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Ошибка при получении списка наладок: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ошибка при получении списка наладок: {str(e)}")
+
 # === ОТЧЕТНОСТЬ И АНАЛИТИКА ДЛЯ ORDER MANAGER ===
 
 @app.get("/reports/lots-summary", response_model=LotSummaryReport, tags=["Reports"])
