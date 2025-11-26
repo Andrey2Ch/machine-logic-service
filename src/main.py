@@ -2226,6 +2226,230 @@ async def get_lot_cycle_time_stats(lot_id: int, db: Session = Depends(get_db_ses
         logger.error(f"Ошибка при получении статистики cycle_time для лота {lot_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Ошибка при получении статистики cycle_time: {str(e)}")
 
+# === НОВЫЕ ОПТИМИЗИРОВАННЫЕ ENDPOINTS ДЛЯ CYCLE_TIME ===
+
+@app.get("/parts/{part_id}/cycle-time", tags=["Parts"])
+async def get_part_cycle_time(part_id: int, db: Session = Depends(get_db_session)):
+    """
+    Получить среднее время цикла для детали (БЫСТРЫЙ запрос).
+    Читает напрямую из parts.avg_cycle_time без JOIN'ов.
+    
+    Returns:
+        {
+            "avg_cycle_time": int | null  # Среднее время цикла в секундах
+        }
+    """
+    try:
+        part = db.query(PartDB).filter(PartDB.id == part_id).first()
+        if not part:
+            raise HTTPException(status_code=404, detail=f"Деталь с ID {part_id} не найдена")
+        
+        return {"avg_cycle_time": part.avg_cycle_time}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Ошибка при получении cycle_time для детали {part_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ошибка при получении cycle_time: {str(e)}")
+
+
+@app.post("/parts/cycle-times", tags=["Parts"])
+async def get_multiple_cycle_times(part_ids: List[int], db: Session = Depends(get_db_session)):
+    """
+    BULK запрос: получить cycle_time для множества деталей ОДНИМ запросом.
+    Оптимизирован для загрузки Kanban board - возвращает данные для всех лотов сразу.
+    
+    Args:
+        part_ids: Список ID деталей
+        
+    Returns:
+        Dict[int, int | null]: Словарь {part_id: avg_cycle_time}
+        
+    Example:
+        POST /parts/cycle-times
+        Body: [123, 456, 789]
+        Response: {"123": 45, "456": 60, "789": null}
+    """
+    try:
+        if not part_ids:
+            return {}
+        
+        # Один запрос для всех деталей
+        results = db.query(PartDB.id, PartDB.avg_cycle_time)\
+            .filter(PartDB.id.in_(part_ids))\
+            .all()
+        
+        # Возвращаем словарь {part_id: avg_cycle_time}
+        return {str(r.id): r.avg_cycle_time for r in results}
+        
+    except Exception as e:
+        logger.error(f"Ошибка при получении cycle_times для деталей: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ошибка при получении cycle_times: {str(e)}")
+
+
+@app.get("/lots/{lot_id}/cycle-time-detailed", tags=["Lots"])
+async def get_lot_cycle_time_detailed(lot_id: int, db: Session = Depends(get_db_session)):
+    """
+    Получить ДЕТАЛЬНУЮ статистику по времени цикла для модалки "Детали лота".
+    
+    Включает:
+    - Среднее время (из parts.avg_cycle_time)
+    - Минимальное время с информацией о станке и наладчике
+    - Количество исторических наладок
+    - Флаг is_estimated (true если нет истории, значит это ручная оценка)
+    
+    Returns:
+        {
+            "avg_cycle_time": int | null,
+            "min_cycle_time": int | null,
+            "min_machine_name": str | null,
+            "min_machinist_name": str | null,
+            "total_historical_setups": int,
+            "is_estimated": bool  # true = ручная оценка, false = рассчитано из истории
+        }
+    """
+    try:
+        # Проверяем существование лота и получаем part_id
+        lot = db.query(LotDB).filter(LotDB.id == lot_id).first()
+        if not lot:
+            raise HTTPException(status_code=404, detail=f"Лот с ID {lot_id} не найден")
+        
+        # Получаем среднее время из parts (быстро, без JOIN)
+        part = db.query(PartDB).filter(PartDB.id == lot.part_id).first()
+        avg_cycle_time = part.avg_cycle_time if part else None
+        
+        # Получаем дополнительную информацию для модалки (минимум, станок, наладчик)
+        min_info = db.execute(text("""
+            SELECT 
+                MIN(sj.cycle_time) as min_cycle_time,
+                COUNT(*) as total_setups,
+                (
+                    SELECT m.name 
+                    FROM setup_jobs sj2
+                    JOIN machines m ON m.id = sj2.machine_id
+                    WHERE sj2.part_id = :part_id
+                        AND sj2.cycle_time = (
+                            SELECT MIN(cycle_time) 
+                            FROM setup_jobs 
+                            WHERE part_id = :part_id 
+                                AND cycle_time IS NOT NULL 
+                                AND cycle_time > 0
+                        )
+                    LIMIT 1
+                ) as min_machine_name,
+                (
+                    SELECT e.full_name
+                    FROM setup_jobs sj2
+                    JOIN employees e ON e.id = sj2.employee_id
+                    WHERE sj2.part_id = :part_id
+                        AND sj2.cycle_time = (
+                            SELECT MIN(cycle_time) 
+                            FROM setup_jobs 
+                            WHERE part_id = :part_id 
+                                AND cycle_time IS NOT NULL 
+                                AND cycle_time > 0
+                        )
+                    LIMIT 1
+                ) as min_machinist_name
+            FROM setup_jobs sj
+            WHERE sj.part_id = :part_id
+                AND sj.cycle_time IS NOT NULL
+                AND sj.cycle_time > 0
+        """), {"part_id": lot.part_id}).fetchone()
+        
+        total_setups = min_info.total_setups if min_info else 0
+        
+        return {
+            "avg_cycle_time": avg_cycle_time,
+            "min_cycle_time": min_info.min_cycle_time if min_info and min_info.min_cycle_time else None,
+            "min_machine_name": min_info.min_machine_name if min_info else None,
+            "min_machinist_name": min_info.min_machinist_name if min_info else None,
+            "total_historical_setups": total_setups,
+            "is_estimated": total_setups == 0  # True если нет истории (ручная оценка)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Ошибка при получении детальной статистики cycle_time для лота {lot_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ошибка при получении детальной статистики: {str(e)}")
+
+
+@app.put("/parts/{part_id}/cycle-time", tags=["Parts"])
+async def update_part_cycle_time(
+    part_id: int, 
+    cycle_time: int,
+    db: Session = Depends(get_db_session)
+):
+    """
+    Установить/обновить среднее время цикла для детали ВРУЧНУЮ.
+    
+    РАЗРЕШЕНО только если нет исторических данных (для новых деталей).
+    Если есть история наладок, время цикла рассчитывается автоматически триггером.
+    
+    Args:
+        part_id: ID детали
+        cycle_time: Среднее время цикла в секундах (должно быть > 0)
+        
+    Returns:
+        {
+            "success": bool,
+            "avg_cycle_time": int,
+            "message": str
+        }
+        
+    Raises:
+        403: Если у детали есть история наладок (нельзя редактировать вручную)
+        400: Если cycle_time <= 0
+        404: Если деталь не найдена
+    """
+    try:
+        if cycle_time <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="cycle_time должен быть положительным числом"
+            )
+        
+        # Проверяем существование детали
+        part = db.query(PartDB).filter(PartDB.id == part_id).first()
+        if not part:
+            raise HTTPException(status_code=404, detail=f"Деталь с ID {part_id} не найдена")
+        
+        # Проверяем наличие исторических данных
+        history_count = db.query(SetupDB)\
+            .filter(SetupDB.part_id == part_id)\
+            .filter(SetupDB.cycle_time.isnot(None))\
+            .filter(SetupDB.cycle_time > 0)\
+            .count()
+        
+        if history_count > 0:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Нельзя изменить cycle_time вручную. "
+                       f"Найдено {history_count} исторических наладок. "
+                       f"Значение рассчитывается автоматически из истории."
+            )
+        
+        # Обновляем время цикла
+        part.avg_cycle_time = cycle_time
+        db.commit()
+        
+        logger.info(f"Вручную установлено cycle_time={cycle_time} для детали {part_id} (drawing: {part.drawing_number})")
+        
+        return {
+            "success": True,
+            "avg_cycle_time": cycle_time,
+            "message": f"Время цикла успешно установлено: {cycle_time} сек"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Ошибка при обновлении cycle_time для детали {part_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ошибка при обновлении cycle_time: {str(e)}")
+
+
 # <<< КОНЕЦ НОВЫХ ЭНДПОИНТОВ ДЛЯ ЛОТОВ >>>
 
 # === ЭНДПОИНТЫ ДЛЯ НАЛАДОК (SETUPS) ===

@@ -70,6 +70,7 @@ class PartDB(Base):
     drawing_number = Column(String(255), unique=True, index=True)
     material = Column(Text, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    avg_cycle_time = Column(Integer, nullable=True)  # Среднее время цикла в секундах
     # is_active = Column(Boolean, default=True)
 
 class LotDB(Base):
