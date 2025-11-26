@@ -8,12 +8,14 @@ SELECT
     l.status as lot_status,
     l.assigned_machine_id,
     m.name as machine_name,
-    l.drawing_number,
+    l.part_id,
+    p.drawing_number,
     l.initial_planned_quantity,
     l.total_planned_quantity,
     l.created_at as lot_created
 FROM lots l
 LEFT JOIN machines m ON m.id = l.assigned_machine_id
+LEFT JOIN parts p ON p.id = l.part_id
 WHERE l.lot_number = '2530694-1';
 
 -- 2. Все наладки для этого лота
