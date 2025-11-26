@@ -1835,11 +1835,12 @@ async def get_lots(
     # ---------- Добавляем название станка из последней активной наладки или из assigned_machine_id ----------
     if lots:
         lot_ids = [lot.id for lot in lots]
-        active_statuses = ['created', 'started', 'pending_qc', 'allowed', 'in_production']
+        active_statuses = ['created', 'started', 'pending_qc', 'allowed']
         setup_rows = (
             db.query(SetupDB.lot_id, MachineDB.name, SetupDB.created_at, SetupDB.status, SetupDB.id)
               .join(MachineDB, SetupDB.machine_id == MachineDB.id)
               .filter(SetupDB.lot_id.in_(lot_ids))
+              .filter(SetupDB.status.in_(active_statuses))  # Только активные наладки!
               .order_by(SetupDB.lot_id, SetupDB.created_at.desc())
               .all()
         )
