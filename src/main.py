@@ -1120,6 +1120,14 @@ async def complete_setup(setup_id: int, db: Session = Depends(get_db_session)):
             logger.info(f"Found queued setup {queued_setup.id}, activating it")
             # Активируем следующую наладку
             queued_setup.status = 'created'
+            
+            # 🔧 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Обновляем статус лота при активации очередной наладки
+            if queued_setup.lot_id:
+                queued_lot = db.query(LotDB).filter(LotDB.id == queued_setup.lot_id).first()
+                if queued_lot and queued_lot.status in ('new', 'assigned'):
+                    logger.info(f"Updating lot {queued_lot.id} (number: {queued_lot.lot_number}) "
+                              f"from status '{queued_lot.status}' to 'in_production' due to queued setup activation")
+                    queued_lot.status = 'in_production'
 
         try:
             db.commit()
