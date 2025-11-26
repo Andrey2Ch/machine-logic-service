@@ -2380,7 +2380,7 @@ async def get_lot_cycle_time_detailed(lot_id: int, db: Session = Depends(get_db_
 @app.put("/parts/{part_id}/cycle-time", tags=["Parts"])
 async def update_part_cycle_time(
     part_id: int, 
-    cycle_time: int,
+    cycle_time: int = Body(..., embed=True, description="Новое время цикла в секундах"),
     db: Session = Depends(get_db_session)
 ):
     """
