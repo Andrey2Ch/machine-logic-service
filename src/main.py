@@ -1669,6 +1669,8 @@ class LotResponse(LotBase):
     machine_name: Optional[str] = None  # 🔄 Название станка последней активной наладки
     assigned_machine_id: Optional[int] = None  # Назначенный станок (для статуса assigned)
     assigned_order: Optional[int] = None  # Порядок в очереди на станке
+    actual_produced: Optional[int] = None  # Текущее произведенное количество из machine_readings
+    setup_status: Optional[str] = None  # Статус активной наладки
 
     class Config:
         from_attributes = True # <--- ИСПРАВЛЕНО с orm_mode
@@ -1835,16 +1837,21 @@ async def get_lots(
         lot_ids = [lot.id for lot in lots]
         active_statuses = ['created', 'started', 'pending_qc', 'allowed', 'in_production']
         setup_rows = (
-            db.query(SetupDB.lot_id, MachineDB.name, SetupDB.created_at)
+            db.query(SetupDB.lot_id, MachineDB.name, SetupDB.created_at, SetupDB.status, SetupDB.id)
               .join(MachineDB, SetupDB.machine_id == MachineDB.id)
               .filter(SetupDB.lot_id.in_(lot_ids))
               .order_by(SetupDB.lot_id, SetupDB.created_at.desc())
               .all()
         )
         machine_map: Dict[int, str] = {}
-        for lot_id, machine_name, _ in setup_rows:
+        setup_status_map: Dict[int, str] = {}
+        setup_id_map: Dict[int, int] = {}
+        
+        for lot_id, machine_name, _, setup_status, setup_id in setup_rows:
             if lot_id not in machine_map:  # берем самый свежий (первый в сортировке)
                 machine_map[lot_id] = machine_name
+                setup_status_map[lot_id] = setup_status
+                setup_id_map[lot_id] = setup_id
 
         # Для лотов со статусом 'assigned' получаем machine_name из assigned_machine_id, если нет наладки
         assigned_lots = [lot for lot in lots if lot.status == 'assigned' and lot.assigned_machine_id and lot.id not in machine_map]
@@ -1856,8 +1863,42 @@ async def get_lots(
                 if lot.assigned_machine_id and lot.assigned_machine_id in assigned_machine_map:
                     machine_map[lot.id] = assigned_machine_map[lot.assigned_machine_id]
 
+        # Получаем последние readings для активных наладок
+        actual_produced_map: Dict[int, int] = {}
+        if setup_id_map:
+            setup_ids = list(setup_id_map.values())
+            # Используем подзапрос для получения последнего reading для каждой наладки
+            readings_subquery = (
+                db.query(
+                    ReadingDB.setup_job_id,
+                    func.max(ReadingDB.id).label('max_id')
+                )
+                .filter(ReadingDB.setup_job_id.in_(setup_ids))
+                .group_by(ReadingDB.setup_job_id)
+                .subquery()
+            )
+            
+            readings = (
+                db.query(ReadingDB.setup_job_id, ReadingDB.reading)
+                .join(
+                    readings_subquery,
+                    (ReadingDB.setup_job_id == readings_subquery.c.setup_job_id) &
+                    (ReadingDB.id == readings_subquery.c.max_id)
+                )
+                .all()
+            )
+            
+            reading_map: Dict[int, int] = {r.setup_job_id: r.reading for r in readings}
+            
+            # Связываем lot_id -> reading через setup_id
+            for lot_id, setup_id in setup_id_map.items():
+                if setup_id in reading_map:
+                    actual_produced_map[lot_id] = reading_map[setup_id]
+        
         for lot in lots:
             lot.machine_name = machine_map.get(lot.id)
+            lot.setup_status = setup_status_map.get(lot.id)
+            lot.actual_produced = actual_produced_map.get(lot.id)
 
     return lots
 

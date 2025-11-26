@@ -98,6 +98,11 @@ class LotDB(Base):
     batches = relationship("BatchDB", back_populates="lot")
     # Добавляем связь с PartDB для удобства доступа (если еще нет)
     part = relationship("PartDB") # Без back_populates, если у PartDB нет обратной связи
+    
+    # Временные атрибуты (не в БД, заполняются в endpoint для Kanban)
+    machine_name = None  # Название станка (уже используется)
+    actual_produced = None  # Текущее произведенное количество из machine_readings
+    setup_status = None  # Статус активной наладки
 
 class SetupDB(Base):
     __tablename__ = "setup_jobs"
