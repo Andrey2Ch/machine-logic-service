@@ -78,3 +78,4 @@ EXECUTE FUNCTION update_part_avg_cycle_time();
 -- GROUP BY p.id, p.drawing_number, p.avg_cycle_time
 -- LIMIT 10;
 
+
