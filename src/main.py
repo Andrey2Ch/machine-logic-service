@@ -70,6 +70,7 @@ async def startup_event():
 class PartBase(BaseModel):
     drawing_number: str = Field(..., description="Номер чертежа детали, должен быть уникальным")
     material: Optional[str] = Field(None, description="Материал детали")
+    avg_cycle_time: Optional[int] = Field(None, description="Среднее время цикла в секундах (для новых деталей - оценка)")
 
 class PartCreate(PartBase):
     pass
@@ -101,7 +102,8 @@ async def create_part(part_in: PartCreate, db: Session = Depends(get_db_session)
     
     new_part = PartDB(
         drawing_number=part_in.drawing_number,
-        material=part_in.material
+        material=part_in.material,
+        avg_cycle_time=part_in.avg_cycle_time  # Сохраняем cycle_time если указано
         # created_at будет установлен по умолчанию
     )
     db.add(new_part)
