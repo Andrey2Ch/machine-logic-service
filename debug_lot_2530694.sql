@@ -31,7 +31,7 @@ SELECT
     e.full_name as operator_name
 FROM setup_jobs sj
 LEFT JOIN machines m ON m.id = sj.machine_id
-LEFT JOIN employees e ON e.id = sj.operator_id
+LEFT JOIN employees e ON e.id = sj.employee_id
 WHERE sj.lot_id = (SELECT id FROM lots WHERE lot_number = '2530694-1')
 ORDER BY sj.created_at DESC;
 
