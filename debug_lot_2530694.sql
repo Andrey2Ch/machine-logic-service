@@ -28,7 +28,6 @@ SELECT
     sj.actual_quantity,
     sj.cycle_time,
     sj.created_at as setup_created,
-    sj.updated_at as setup_updated,
     e.full_name as operator_name
 FROM setup_jobs sj
 LEFT JOIN machines m ON m.id = sj.machine_id
@@ -42,7 +41,6 @@ SELECT
     sj.id,
     sj.status,
     sj.created_at,
-    sj.updated_at,
     CASE 
         WHEN sj.status IN ('created', 'started', 'pending_qc', 'allowed', 'queued') THEN 'ACTIVE'
         ELSE 'INACTIVE'
