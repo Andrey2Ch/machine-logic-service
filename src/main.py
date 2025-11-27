@@ -71,6 +71,7 @@ class PartBase(BaseModel):
     drawing_number: str = Field(..., description="Номер чертежа детали, должен быть уникальным")
     material: Optional[str] = Field(None, description="Материал детали")
     avg_cycle_time: Optional[int] = Field(None, description="Среднее время цикла в секундах (для новых деталей - оценка)")
+    recommended_diameter: Optional[float] = Field(None, description="Рекомендованный размер заготовки в мм (3-38 мм)")
 
 class PartCreate(PartBase):
     pass
@@ -93,6 +94,8 @@ async def create_part(part_in: PartCreate, db: Session = Depends(get_db_session)
     Создать новую деталь.
     - **drawing_number**: Номер чертежа (уникальный)
     - **material**: Материал (опционально)
+    - **avg_cycle_time**: Среднее время цикла в секундах (опционально)
+    - **recommended_diameter**: Рекомендованный размер заготовки в мм (опционально)
     """
     logger.info(f"Запрос на создание детали: {part_in.model_dump()}")
     existing_part = db.query(PartDB).filter(PartDB.drawing_number == part_in.drawing_number).first()
@@ -103,7 +106,8 @@ async def create_part(part_in: PartCreate, db: Session = Depends(get_db_session)
     new_part = PartDB(
         drawing_number=part_in.drawing_number,
         material=part_in.material,
-        avg_cycle_time=part_in.avg_cycle_time  # Сохраняем cycle_time если указано
+        avg_cycle_time=part_in.avg_cycle_time,  # Сохраняем cycle_time если указано
+        recommended_diameter=part_in.recommended_diameter  # Сохраняем recommended_diameter если указано
         # created_at будет установлен по умолчанию
     )
     db.add(new_part)
