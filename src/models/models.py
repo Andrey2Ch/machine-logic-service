@@ -76,8 +76,9 @@ class PartDB(Base):
     drawing_number = Column(String(255), unique=True, index=True)
     material = Column(Text, nullable=True)
     recommended_diameter = Column(Float, nullable=True)  # Рекомендованный диаметр в мм
-    profile_type = Column(String(20), nullable=True, default='round')  # Тип профиля
-    part_length = Column(Float, nullable=True)  # Длина детали в мм (добавлено в Phase 0)
+    profile_type = Column(String(20), nullable=True, default='round')  # Тип профиля (round/hex/square)
+    part_length = Column(Float, nullable=True)  # Длина детали в мм
+    drawing_url = Column(Text, nullable=True)  # URL чертежа (Cloudinary)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     avg_cycle_time = Column(Integer, nullable=True)  # Среднее время цикла в секундах
     # is_active = Column(Boolean, default=True)

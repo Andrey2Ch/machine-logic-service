@@ -88,13 +88,22 @@ class PartBase(BaseModel):
     material: Optional[str] = Field(None, description="Материал детали")
     avg_cycle_time: Optional[int] = Field(None, description="Среднее время цикла в секундах (для новых деталей - оценка)")
     recommended_diameter: Optional[float] = Field(None, description="Рекомендованный размер заготовки в мм (3-38 мм)")
+    part_length: Optional[float] = Field(None, description="Длина детали в мм")
+    profile_type: Optional[str] = Field('round', description="Тип профиля (round/hex/square)")
+    drawing_url: Optional[str] = Field(None, description="URL чертежа (Cloudinary)")
 
 class PartCreate(PartBase):
     pass
 
-class PartUpdate(PartBase): # Для возможного будущего обновления
-    drawing_number: Optional[str] = None # При обновлении можно разрешить менять не все поля
+class PartUpdate(BaseModel):
+    """Модель для обновления детали — все поля опциональны"""
+    drawing_number: Optional[str] = None
     material: Optional[str] = None
+    avg_cycle_time: Optional[int] = None
+    recommended_diameter: Optional[float] = None
+    part_length: Optional[float] = None
+    profile_type: Optional[str] = None
+    drawing_url: Optional[str] = None
 
 class PartResponse(PartBase):
     id: int
@@ -122,9 +131,11 @@ async def create_part(part_in: PartCreate, db: Session = Depends(get_db_session)
     new_part = PartDB(
         drawing_number=part_in.drawing_number,
         material=part_in.material,
-        avg_cycle_time=part_in.avg_cycle_time,  # Сохраняем cycle_time если указано
-        recommended_diameter=part_in.recommended_diameter  # Сохраняем recommended_diameter если указано
-        # created_at будет установлен по умолчанию
+        avg_cycle_time=part_in.avg_cycle_time,
+        recommended_diameter=part_in.recommended_diameter,
+        part_length=part_in.part_length,
+        profile_type=part_in.profile_type or 'round',
+        drawing_url=part_in.drawing_url
     )
     db.add(new_part)
     try:
@@ -172,6 +183,81 @@ async def get_parts(
     except Exception as e:
         logger.error(f"Ошибка при получении списка деталей (search='{search}', skip={skip}, limit={limit}): {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Внутренняя ошибка сервера при получении списка деталей: {str(e)}")
+
+@app.get("/parts/{part_id}", response_model=PartResponse, tags=["Parts"])
+async def get_part(part_id: int, db: Session = Depends(get_db_session)):
+    """Получить деталь по ID."""
+    try:
+        part = db.query(PartDB).filter(PartDB.id == part_id).first()
+        if not part:
+            raise HTTPException(status_code=404, detail=f"Деталь с ID {part_id} не найдена")
+        return part
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Ошибка при получении детали {part_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/parts/{part_id}", response_model=PartResponse, tags=["Parts"])
+async def update_part(part_id: int, part_update: PartUpdate, db: Session = Depends(get_db_session)):
+    """Обновить деталь по ID."""
+    try:
+        part = db.query(PartDB).filter(PartDB.id == part_id).first()
+        if not part:
+            raise HTTPException(status_code=404, detail=f"Деталь с ID {part_id} не найдена")
+        
+        # Обновляем только переданные поля
+        update_data = part_update.model_dump(exclude_unset=True)
+        
+        # Проверяем уникальность drawing_number если меняется
+        if 'drawing_number' in update_data and update_data['drawing_number'] != part.drawing_number:
+            existing = db.query(PartDB).filter(
+                PartDB.drawing_number == update_data['drawing_number'],
+                PartDB.id != part_id
+            ).first()
+            if existing:
+                raise HTTPException(status_code=409, detail=f"Деталь с номером чертежа '{update_data['drawing_number']}' уже существует")
+        
+        for field, value in update_data.items():
+            setattr(part, field, value)
+        
+        db.commit()
+        db.refresh(part)
+        logger.info(f"Деталь {part_id} обновлена: {update_data}")
+        return part
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Ошибка при обновлении детали {part_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/parts/{part_id}", tags=["Parts"])
+async def delete_part(part_id: int, db: Session = Depends(get_db_session)):
+    """Удалить деталь по ID."""
+    try:
+        part = db.query(PartDB).filter(PartDB.id == part_id).first()
+        if not part:
+            raise HTTPException(status_code=404, detail=f"Деталь с ID {part_id} не найдена")
+        
+        # Проверяем, есть ли связанные лоты
+        lots_count = db.query(LotDB).filter(LotDB.part_id == part_id).count()
+        if lots_count > 0:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Невозможно удалить деталь: есть {lots_count} связанных лотов"
+            )
+        
+        db.delete(part)
+        db.commit()
+        logger.info(f"Деталь {part_id} удалена")
+        return {"message": f"Деталь {part_id} успешно удалена"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Ошибка при удалении детали {part_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/")
 async def root():
