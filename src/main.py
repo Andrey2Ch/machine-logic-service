@@ -48,15 +48,28 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Machine Logic Service", debug=True)
 
 # Возвращаем универсальное разрешение CORS
-# ВАЖНО: allow_credentials=True несовместим с allow_origins=["*"]
-# Поэтому используем allow_credentials=False или конкретные origins
+# Указываем конкретные origins для production и development
+import os
+allowed_origins = [
+    "https://isramat-dashboard-production.up.railway.app",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    # Добавляем все возможные origins для надёжности
+    "*"  # Fallback для development и других случаев
+]
+
+# Если есть переменная окружения с origins, используем её
+env_origins = os.getenv("CORS_ORIGINS")
+if env_origins:
+    allowed_origins = env_origins.split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Разрешаем все источники
-    allow_credentials=False,  # Изменено с True на False для совместимости с allow_origins=["*"]
+    allow_origins=allowed_origins,
+    allow_credentials=False,  # False для совместимости с allow_origins=["*"]
     allow_methods=["*"], 
     allow_headers=["*"], 
-    expose_headers=["X-Total-Count"]  # <--- ДОБАВЛЕНО ЗДЕСЬ
+    expose_headers=["X-Total-Count"]
 )
 
 # Подключение роутеров будет в конце файла после всех эндпоинтов
