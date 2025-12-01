@@ -144,27 +144,36 @@ async def update_lot(
 async def search_new_lots(
     drawing_number: str = Query(..., description="Номер чертежа"),
     limit: int = Query(5, ge=1, le=20, description="Максимум лотов в ответе"),
+    include_production: bool = Query(False, description="Включить лоты в производстве"),
     db: Session = Depends(get_db_session)
 ):
     """
-    Поиск предсозданных лотов для чертежа (status='new' или 'assigned').
-    assigned - это частный случай "Новый", лоты назначены на станок, но наладка еще не создана.
-    Возвращает: id, lot_number, initial_planned_quantity, due_date, order_manager_name
+    Поиск лотов для чертежа.
+    По умолчанию: status='new' или 'assigned'.
+    С include_production=true: также включает 'in_production'.
+    Возвращает: id, lot_number, initial_planned_quantity, due_date, order_manager_name, status
     """
     try:
         from ..models.models import PartDB, EmployeeDB
+        
+        # Определяем допустимые статусы
+        allowed_statuses = ['new', 'assigned']
+        if include_production:
+            allowed_statuses.append('in_production')
+        
         rows = (
             db.query(
                 LotDB.id,
                 LotDB.lot_number,
                 LotDB.initial_planned_quantity,
                 LotDB.due_date,
+                LotDB.status,
                 EmployeeDB.full_name.label("order_manager_name")
             )
             .join(PartDB, PartDB.id == LotDB.part_id)
             .outerjoin(EmployeeDB, EmployeeDB.id == LotDB.order_manager_id)
             .filter(PartDB.drawing_number == drawing_number)
-            .filter(LotDB.status.in_(['new', 'assigned']))  # Включаем и new, и assigned
+            .filter(LotDB.status.in_(allowed_statuses))
             .order_by(LotDB.created_at.desc())
             .limit(limit)
             .all()
@@ -176,6 +185,7 @@ async def search_new_lots(
                 "initial_planned_quantity": r.initial_planned_quantity,
                 "due_date": r.due_date.isoformat() if r.due_date else None,
                 "order_manager_name": r.order_manager_name,
+                "status": r.status,
             }
             for r in rows
         ]

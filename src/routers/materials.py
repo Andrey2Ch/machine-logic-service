@@ -164,16 +164,15 @@ def issue_material_to_machine(
         ).first()
         
         if existing:
-            # Добавляем к существующей записи
+            # Добавляем к существующей записи (used_bars вычисляется автоматически в PostgreSQL)
             existing.issued_bars = (existing.issued_bars or 0) + request.quantity_bars
-            existing.used_bars = (existing.issued_bars or 0) - (existing.returned_bars or 0)
             if request.notes:
                 existing.notes = f"{existing.notes or ''}\n{request.notes}".strip()
             
             lot_material = existing
             operation_type = "add"
         else:
-            # Создаём новую запись
+            # Создаём новую запись (НЕ включаем used_bars - это generated column в PostgreSQL!)
             lot_material = LotMaterialDB(
                 lot_id=request.lot_id,
                 machine_id=request.machine_id,
@@ -181,7 +180,6 @@ def issue_material_to_machine(
                 diameter=request.diameter,
                 issued_bars=request.quantity_bars,
                 returned_bars=0,
-                used_bars=request.quantity_bars,
                 issued_at=datetime.now(timezone.utc),
                 status="issued",
                 notes=request.notes
@@ -250,9 +248,8 @@ def add_bars_to_material(
         if request.quantity_bars <= 0:
             raise HTTPException(status_code=400, detail="Количество прутков должно быть положительным")
         
-        # Обновляем количество
+        # Обновляем количество (used_bars вычисляется автоматически в PostgreSQL)
         lot_material.issued_bars = (lot_material.issued_bars or 0) + request.quantity_bars
-        lot_material.used_bars = (lot_material.issued_bars or 0) - (lot_material.returned_bars or 0)
         
         # Записываем операцию
         operation = MaterialOperationDB(
@@ -322,14 +319,14 @@ def return_bars(
                 detail=f"Нельзя вернуть {request.quantity_bars} прутков. Максимум: {max_returnable}"
             )
         
-        # Обновляем количество
+        # Обновляем количество (used_bars вычисляется автоматически в PostgreSQL)
         lot_material.returned_bars = (lot_material.returned_bars or 0) + request.quantity_bars
         lot_material.returned_at = datetime.now(timezone.utc)
         lot_material.returned_by = request.performed_by
-        lot_material.used_bars = (lot_material.issued_bars or 0) - (lot_material.returned_bars or 0)
         
-        # Обновляем статус
-        if lot_material.used_bars == 0:
+        # Обновляем статус (вычисляем used_bars для проверки)
+        calculated_used = (lot_material.issued_bars or 0) - (lot_material.returned_bars or 0)
+        if calculated_used == 0:
             lot_material.status = "returned"
         elif lot_material.returned_bars > 0:
             lot_material.status = "partially_returned"

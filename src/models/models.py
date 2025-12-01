@@ -245,7 +245,8 @@ class LotMaterialDB(Base):
     returned_weight_kg = Column(Float, nullable=True)
     returned_at = Column(DateTime, nullable=True)
     returned_by = Column(Integer, ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
-    used_bars = Column(Integer, default=0)  # будет computed column в БД
+    # used_bars — это generated column в PostgreSQL, не добавлять в INSERT!
+    # Вычисляется автоматически: issued_bars - returned_bars
     status = Column(String(20), default="pending")
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
