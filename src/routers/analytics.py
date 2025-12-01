@@ -55,9 +55,18 @@ async def get_lot_analytics(lot_id: int, db: Session = Depends(get_db_session)):
         
         total_produced_quantity = last_reading_result.last_reading if last_reading_result else 0
         
-        # Подсчет пересчитанного количества на складе (ТОЛЬКО батчи, которые были на складе)
+        # 🔧 ИСПРАВЛЕНО 2025-12-01: "Принято" = сумма годных + брак (после QC проверки)
+        # Старая формула считала recounted_quantity для archived батчей,
+        # что приводило к двойному подсчёту (archived + good/defect)
+        # Новая формула: sum(current_quantity) где current_location IN ('good', 'defect')
+        total_warehouse_quantity = sum(
+            batch.current_quantity or 0 
+            for batch in batches 
+            if batch.current_location in ('good', 'defect')
+        )
+        
+        # Оставляем warehouse_batches для расчёта declared_quantity_at_warehouse_recount
         warehouse_batches = [batch for batch in batches if batch.warehouse_received_at is not None]
-        total_warehouse_quantity = sum(batch.recounted_quantity or 0 for batch in warehouse_batches)
         
         # Определение заявленного количества на момент пересчета склада
         declared_quantity_at_warehouse_recount = 0
