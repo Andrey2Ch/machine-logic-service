@@ -71,7 +71,16 @@ def get_material_types(db: Session = Depends(get_db_session)):
     """Получить справочник материалов с плотностью"""
     try:
         types = db.query(MaterialTypeDB).order_by(MaterialTypeDB.material_name).all()
-        return types
+        # Явно конвертируем в список словарей для избежания проблем с сериализацией
+        result = []
+        for mt in types:
+            result.append({
+                "id": mt.id,
+                "material_name": mt.material_name,
+                "density_kg_per_m3": mt.density_kg_per_m3,
+                "description": mt.description
+            })
+        return result
     except Exception as e:
         # Логируем ошибку и возвращаем пустой список вместо падения
         logger.error(f"Error fetching material types: {e}", exc_info=True)
