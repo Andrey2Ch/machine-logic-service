@@ -48,10 +48,12 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Machine Logic Service", debug=True)
 
 # Возвращаем универсальное разрешение CORS
+# ВАЖНО: allow_credentials=True несовместим с allow_origins=["*"]
+# Поэтому используем allow_credentials=False или конкретные origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # <-- Снова разрешаем все источники
-    allow_credentials=True,
+    allow_origins=["*"], # Разрешаем все источники
+    allow_credentials=False,  # Изменено с True на False для совместимости с allow_origins=["*"]
     allow_methods=["*"], 
     allow_headers=["*"], 
     expose_headers=["X-Total-Count"]  # <--- ДОБАВЛЕНО ЗДЕСЬ
