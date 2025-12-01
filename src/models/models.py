@@ -33,6 +33,8 @@ class MachineDB(Base):
     cards = relationship("CardDB", back_populates="machine")
     # Связь с area
     area = relationship("AreaDB", back_populates="machines")
+    # Связь с материалами
+    lot_materials = relationship("LotMaterialDB", back_populates="machine")
 
 class EmployeeDB(Base):
     __tablename__ = "employees"
@@ -48,6 +50,10 @@ class EmployeeDB(Base):
     is_active = Column(Boolean, default=True)
     # Default area for UI filtering
     default_area_id = Column(Integer, ForeignKey("areas.id"), nullable=True)
+    
+    # Связи с материалами
+    lot_materials_issued = relationship("LotMaterialDB", foreign_keys="LotMaterialDB.issued_by", back_populates="issued_by_employee")
+    lot_materials_returned = relationship("LotMaterialDB", foreign_keys="LotMaterialDB.returned_by", back_populates="returned_by_employee")
 
 
 class EmployeeAreaRoleDB(Base):
@@ -98,6 +104,8 @@ class LotDB(Base):
     batches = relationship("BatchDB", back_populates="lot")
     # Добавляем связь с PartDB для удобства доступа (если еще нет)
     part = relationship("PartDB") # Без back_populates, если у PartDB нет обратной связи
+    # Связь с материалами
+    lot_materials = relationship("LotMaterialDB", back_populates="lot")
     
     # Временные атрибуты (не в БД, заполняются в endpoint для Kanban)
     machine_name = None  # Название станка (уже используется)
@@ -203,4 +211,48 @@ class CardDB(Base):
         CheckConstraint("status IN ('free', 'in_use', 'lost')", name='check_card_status'),
         Index('idx_cards_machine_status', 'machine_id', 'status'),
         Index('idx_cards_batch_id', 'batch_id'),
+    )
+
+class MaterialTypeDB(Base):
+    __tablename__ = "material_types"
+
+    id = Column(Integer, primary_key=True, index=True)
+    material_name = Column(String(100), unique=True, nullable=False)
+    density_kg_per_m3 = Column(Float, nullable=False)
+    description = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+class LotMaterialDB(Base):
+    __tablename__ = "lot_materials"
+
+    id = Column(Integer, primary_key=True, index=True)
+    lot_id = Column(Integer, ForeignKey("lots.id", ondelete="CASCADE"), nullable=False)
+    machine_id = Column(Integer, ForeignKey("machines.id", ondelete="SET NULL"), nullable=True)
+    material_receipt_id = Column(Integer, nullable=True)  # будет FK позже
+    material_type = Column(String(100), nullable=True)
+    diameter = Column(Float, nullable=True)
+    calculated_bars_needed = Column(Integer, nullable=True)
+    calculated_weight_kg = Column(Float, nullable=True)
+    issued_bars = Column(Integer, default=0)
+    issued_weight_kg = Column(Float, nullable=True)
+    issued_at = Column(DateTime, nullable=True)
+    issued_by = Column(Integer, ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
+    returned_bars = Column(Integer, default=0)
+    returned_weight_kg = Column(Float, nullable=True)
+    returned_at = Column(DateTime, nullable=True)
+    returned_by = Column(Integer, ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
+    used_bars = Column(Integer, default=0)  # будет computed column в БД
+    status = Column(String(20), default="pending")
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    lot = relationship("LotDB", back_populates="lot_materials")
+    machine = relationship("MachineDB", back_populates="lot_materials")
+    issued_by_employee = relationship("EmployeeDB", foreign_keys=[issued_by], back_populates="lot_materials_issued")
+    returned_by_employee = relationship("EmployeeDB", foreign_keys=[returned_by], back_populates="lot_materials_returned")
+
+    __table_args__ = (
+        Index('idx_lot_materials_lot_id', 'lot_id'),
+        Index('idx_lot_materials_machine_id', 'machine_id'),
+        Index('idx_lot_materials_status', 'status'),
     )
