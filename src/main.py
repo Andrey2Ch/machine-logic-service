@@ -589,21 +589,8 @@ async def save_reading(reading_input: ReadingInput, db: Session = Depends(get_db
         logger.error(f"Error in save_reading: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error while saving reading")
 
-@app.get("/machines")
-async def get_machines(db: Session = Depends(get_db_session)):
-    """
-    Получить список всех станков
-    """
-    machines = db.query(MachineDB).all()
-    return {
-        "machines": [
-            {
-                "id": m.id,
-                "name": m.name,
-                "type": m.type
-            } for m in machines
-        ]
-    }
+# УДАЛЁН дубликат /machines - используем catalog_router.router с полной версией MachineOut
+# который включает is_active, location_id, display_order и другие поля
 
 @app.get("/readings")
 async def get_readings(db: Session = Depends(get_db_session)):
