@@ -32,7 +32,15 @@ def initialize_database():
     global engine, SessionLocal
     if engine is None:
         # Используем атрибут из нашего объекта настроек
-        engine = create_engine(db_settings.DATABASE_URL)
+        # Увеличиваем размер пула соединений для предотвращения timeout ошибок
+        engine = create_engine(
+            db_settings.DATABASE_URL,
+            pool_size=10,  # Размер пула (было 5 по умолчанию)
+            max_overflow=20,  # Максимальное переполнение (было 10 по умолчанию)
+            pool_timeout=30,  # Таймаут ожидания соединения
+            pool_recycle=3600,  # Переиспользование соединений через час
+            pool_pre_ping=True,  # Проверка соединения перед использованием
+        )
         SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
         # Важно: НЕ вызываем create_all здесь. Миграции должны управляться отдельно.
         # Base.metadata.create_all(bind=engine) 
