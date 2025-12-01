@@ -3,11 +3,12 @@
 @description: Роутер для обработки API-запросов, связанных с управлением материалами (сырьём).
 @dependencies: fastapi, sqlalchemy, pydantic
 @created: 2025-11-30
+@updated: 2025-12-01 - Добавлены endpoints для управления материалом (add-bars, return, history)
 """
 import logging
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.orm import Session
-from sqlalchemy import and_
+from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import and_, or_
 from src.database import get_db_session
 from typing import List, Optional
 from pydantic import BaseModel
@@ -17,7 +18,8 @@ from src.models.models import (
     LotDB, 
     MachineDB, 
     EmployeeDB,
-    PartDB
+    PartDB,
+    MaterialOperationDB
 )
 from datetime import datetime, timezone
 
@@ -41,28 +43,62 @@ class MaterialTypeOut(BaseModel):
         from_attributes = True
 
 class IssueToMachineRequest(BaseModel):
-    machine_id: Optional[int] = None
+    machine_id: int  # Теперь обязательный!
     lot_id: int
     drawing_number: Optional[str] = None  # מס' שרטוט
-    material_type: str  # סוג חומר
+    material_type: Optional[str] = None  # סוג חומר - теперь необязательный
     diameter: float  # диаметр
     quantity_bars: int  # כמות במוטות
     material_receipt_id: Optional[int] = None
     notes: Optional[str] = None
 
-class LotMaterialOut(BaseModel):
-    id: int
-    lot_id: int
-    machine_id: Optional[int] = None
-    material_type: Optional[str] = None
-    diameter: Optional[float] = None
-    issued_bars: int
-    issued_at: Optional[datetime] = None
-    status: str
+class AddBarsRequest(BaseModel):
+    quantity_bars: int
+    performed_by: Optional[int] = None
     notes: Optional[str] = None
+
+class ReturnBarsRequest(BaseModel):
+    quantity_bars: int
+    performed_by: Optional[int] = None
+    notes: Optional[str] = None
+
+class MaterialOperationOut(BaseModel):
+    id: int
+    lot_material_id: int
+    operation_type: str
+    quantity_bars: int
+    diameter: Optional[float] = None
+    performed_by: Optional[int] = None
+    performer_name: Optional[str] = None
+    performed_at: Optional[datetime] = None
+    notes: Optional[str] = None
+    created_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
+
+class LotMaterialOut(BaseModel):
+    id: int
+    lot_id: int
+    lot_number: Optional[str] = None
+    machine_id: Optional[int] = None
+    machine_name: Optional[str] = None
+    drawing_number: Optional[str] = None
+    material_type: Optional[str] = None
+    diameter: Optional[float] = None
+    issued_bars: int
+    returned_bars: int
+    used_bars: int  # issued - returned
+    issued_at: Optional[datetime] = None
+    status: str
+    notes: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+class LotMaterialDetailOut(LotMaterialOut):
+    operations: List[MaterialOperationOut] = []
 
 # ========== Endpoints ==========
 
@@ -71,7 +107,6 @@ def get_material_types(db: Session = Depends(get_db_session)):
     """Получить справочник материалов с плотностью"""
     try:
         types = db.query(MaterialTypeDB).order_by(MaterialTypeDB.material_name).all()
-        # Явно конвертируем в список словарей для избежания проблем с сериализацией
         result = []
         for mt in types:
             result.append({
@@ -82,10 +117,9 @@ def get_material_types(db: Session = Depends(get_db_session)):
             })
         return result
     except Exception as e:
-        # Логируем ошибку и возвращаем пустой список вместо падения
         logger.error(f"Error fetching material types: {e}", exc_info=True)
-        # Возвращаем пустой список, чтобы не ломать фронтенд
         return []
+
 
 @router.post("/issue-to-machine", response_model=LotMaterialOut)
 def issue_material_to_machine(
@@ -95,8 +129,12 @@ def issue_material_to_machine(
     """
     Выдать материал на станок (по записке-требованию)
     
-    Сценарий: Кладовщик получает записку, находит материал на складе,
-    переносит к станку и фиксирует в системе.
+    Логика:
+    1. Проверяем существование лота и станка
+    2. Ищем существующую запись lot_materials с таким же lot_id + machine_id + diameter
+    3. Если найдена — добавляем к issued_bars
+    4. Если нет — создаём новую запись
+    5. Записываем операцию в material_operations
     """
     try:
         # Проверяем существование лота
@@ -104,39 +142,89 @@ def issue_material_to_machine(
         if not lot:
             raise HTTPException(status_code=404, detail=f"Лот {request.lot_id} не найден")
         
-        # Проверяем станок (если указан)
-        if request.machine_id:
-            machine = db.query(MachineDB).filter(MachineDB.id == request.machine_id).first()
-            if not machine:
-                raise HTTPException(status_code=404, detail=f"Станок {request.machine_id} не найден")
+        # Проверяем станок
+        machine = db.query(MachineDB).filter(MachineDB.id == request.machine_id).first()
+        if not machine:
+            raise HTTPException(status_code=404, detail=f"Станок {request.machine_id} не найден")
         
-        # Проверяем drawing_number (если указан)
-        if request.drawing_number:
-            part = db.query(PartDB).filter(PartDB.drawing_number == request.drawing_number).first()
-            if not part:
-                raise HTTPException(status_code=404, detail=f"Деталь с номером {request.drawing_number} не найдена")
+        # Получаем drawing_number из лота если не передан
+        drawing_number = request.drawing_number
+        if not drawing_number and lot.part_id:
+            part = db.query(PartDB).filter(PartDB.id == lot.part_id).first()
+            if part:
+                drawing_number = part.drawing_number
         
-        # Создаём запись о выдаче материала
-        lot_material = LotMaterialDB(
-            lot_id=request.lot_id,
-            machine_id=request.machine_id,
-            material_type=request.material_type,
-            diameter=request.diameter,
-            issued_bars=request.quantity_bars,
-            issued_at=datetime.now(timezone.utc),
-            status="issued",
-            notes=request.notes
-        )
+        # Ищем существующую запись с таким же lot_id + machine_id + diameter
+        existing = db.query(LotMaterialDB).filter(
+            and_(
+                LotMaterialDB.lot_id == request.lot_id,
+                LotMaterialDB.machine_id == request.machine_id,
+                LotMaterialDB.diameter == request.diameter
+            )
+        ).first()
         
-        db.add(lot_material)
+        if existing:
+            # Добавляем к существующей записи
+            existing.issued_bars = (existing.issued_bars or 0) + request.quantity_bars
+            existing.used_bars = (existing.issued_bars or 0) - (existing.returned_bars or 0)
+            if request.notes:
+                existing.notes = f"{existing.notes or ''}\n{request.notes}".strip()
+            
+            lot_material = existing
+            operation_type = "add"
+        else:
+            # Создаём новую запись
+            lot_material = LotMaterialDB(
+                lot_id=request.lot_id,
+                machine_id=request.machine_id,
+                material_type=request.material_type,
+                diameter=request.diameter,
+                issued_bars=request.quantity_bars,
+                returned_bars=0,
+                used_bars=request.quantity_bars,
+                issued_at=datetime.now(timezone.utc),
+                status="issued",
+                notes=request.notes
+            )
+            db.add(lot_material)
+            operation_type = "issue"
         
         # Обновляем статус материала в лоте
         lot.material_status = "issued"
         
+        db.flush()  # Получаем ID для lot_material
+        
+        # Записываем операцию в историю
+        operation = MaterialOperationDB(
+            lot_material_id=lot_material.id,
+            operation_type=operation_type,
+            quantity_bars=request.quantity_bars,
+            diameter=request.diameter,
+            notes=request.notes,
+            performed_at=datetime.now(timezone.utc)
+        )
+        db.add(operation)
+        
         db.commit()
         db.refresh(lot_material)
         
-        return lot_material
+        return {
+            "id": lot_material.id,
+            "lot_id": lot_material.lot_id,
+            "lot_number": lot.lot_number,
+            "machine_id": lot_material.machine_id,
+            "machine_name": machine.name,
+            "drawing_number": drawing_number,
+            "material_type": lot_material.material_type,
+            "diameter": lot_material.diameter,
+            "issued_bars": lot_material.issued_bars or 0,
+            "returned_bars": lot_material.returned_bars or 0,
+            "used_bars": lot_material.used_bars or 0,
+            "issued_at": lot_material.issued_at,
+            "status": lot_material.status,
+            "notes": lot_material.notes,
+            "created_at": lot_material.created_at
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -144,11 +232,156 @@ def issue_material_to_machine(
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Ошибка при выдаче материала: {str(e)}")
 
+
+@router.patch("/lot-materials/{id}/add-bars", response_model=LotMaterialOut)
+def add_bars_to_material(
+    id: int,
+    request: AddBarsRequest,
+    db: Session = Depends(get_db_session)
+):
+    """
+    Добавить прутки к существующей выдаче материала
+    """
+    try:
+        lot_material = db.query(LotMaterialDB).filter(LotMaterialDB.id == id).first()
+        if not lot_material:
+            raise HTTPException(status_code=404, detail=f"Запись материала {id} не найдена")
+        
+        if request.quantity_bars <= 0:
+            raise HTTPException(status_code=400, detail="Количество прутков должно быть положительным")
+        
+        # Обновляем количество
+        lot_material.issued_bars = (lot_material.issued_bars or 0) + request.quantity_bars
+        lot_material.used_bars = (lot_material.issued_bars or 0) - (lot_material.returned_bars or 0)
+        
+        # Записываем операцию
+        operation = MaterialOperationDB(
+            lot_material_id=id,
+            operation_type="add",
+            quantity_bars=request.quantity_bars,
+            diameter=lot_material.diameter,
+            performed_by=request.performed_by,
+            notes=request.notes,
+            performed_at=datetime.now(timezone.utc)
+        )
+        db.add(operation)
+        
+        db.commit()
+        db.refresh(lot_material)
+        
+        # Получаем связанные данные
+        lot = db.query(LotDB).filter(LotDB.id == lot_material.lot_id).first()
+        machine = db.query(MachineDB).filter(MachineDB.id == lot_material.machine_id).first() if lot_material.machine_id else None
+        
+        return {
+            "id": lot_material.id,
+            "lot_id": lot_material.lot_id,
+            "lot_number": lot.lot_number if lot else None,
+            "machine_id": lot_material.machine_id,
+            "machine_name": machine.name if machine else None,
+            "material_type": lot_material.material_type,
+            "diameter": lot_material.diameter,
+            "issued_bars": lot_material.issued_bars or 0,
+            "returned_bars": lot_material.returned_bars or 0,
+            "used_bars": lot_material.used_bars or 0,
+            "issued_at": lot_material.issued_at,
+            "status": lot_material.status,
+            "notes": lot_material.notes,
+            "created_at": lot_material.created_at
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error adding bars: {e}", exc_info=True)
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Ошибка при добавлении прутков: {str(e)}")
+
+
+@router.post("/lot-materials/{id}/return", response_model=LotMaterialOut)
+def return_bars(
+    id: int,
+    request: ReturnBarsRequest,
+    db: Session = Depends(get_db_session)
+):
+    """
+    Вернуть прутки на склад
+    """
+    try:
+        lot_material = db.query(LotMaterialDB).filter(LotMaterialDB.id == id).first()
+        if not lot_material:
+            raise HTTPException(status_code=404, detail=f"Запись материала {id} не найдена")
+        
+        if request.quantity_bars <= 0:
+            raise HTTPException(status_code=400, detail="Количество прутков должно быть положительным")
+        
+        # Проверяем, что не возвращаем больше чем есть
+        max_returnable = (lot_material.issued_bars or 0) - (lot_material.returned_bars or 0)
+        if request.quantity_bars > max_returnable:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Нельзя вернуть {request.quantity_bars} прутков. Максимум: {max_returnable}"
+            )
+        
+        # Обновляем количество
+        lot_material.returned_bars = (lot_material.returned_bars or 0) + request.quantity_bars
+        lot_material.returned_at = datetime.now(timezone.utc)
+        lot_material.returned_by = request.performed_by
+        lot_material.used_bars = (lot_material.issued_bars or 0) - (lot_material.returned_bars or 0)
+        
+        # Обновляем статус
+        if lot_material.used_bars == 0:
+            lot_material.status = "returned"
+        elif lot_material.returned_bars > 0:
+            lot_material.status = "partially_returned"
+        
+        # Записываем операцию (отрицательное количество для возврата)
+        operation = MaterialOperationDB(
+            lot_material_id=id,
+            operation_type="return",
+            quantity_bars=-request.quantity_bars,  # Отрицательное для возврата
+            diameter=lot_material.diameter,
+            performed_by=request.performed_by,
+            notes=request.notes,
+            performed_at=datetime.now(timezone.utc)
+        )
+        db.add(operation)
+        
+        db.commit()
+        db.refresh(lot_material)
+        
+        # Получаем связанные данные
+        lot = db.query(LotDB).filter(LotDB.id == lot_material.lot_id).first()
+        machine = db.query(MachineDB).filter(MachineDB.id == lot_material.machine_id).first() if lot_material.machine_id else None
+        
+        return {
+            "id": lot_material.id,
+            "lot_id": lot_material.lot_id,
+            "lot_number": lot.lot_number if lot else None,
+            "machine_id": lot_material.machine_id,
+            "machine_name": machine.name if machine else None,
+            "material_type": lot_material.material_type,
+            "diameter": lot_material.diameter,
+            "issued_bars": lot_material.issued_bars or 0,
+            "returned_bars": lot_material.returned_bars or 0,
+            "used_bars": lot_material.used_bars or 0,
+            "issued_at": lot_material.issued_at,
+            "status": lot_material.status,
+            "notes": lot_material.notes,
+            "created_at": lot_material.created_at
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error returning bars: {e}", exc_info=True)
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Ошибка при возврате прутков: {str(e)}")
+
+
 @router.get("/lot-materials", response_model=List[LotMaterialOut])
 def get_lot_materials(
     lot_id: Optional[int] = Query(None, description="ID лота"),
     machine_id: Optional[int] = Query(None, description="ID станка"),
-    status: Optional[str] = Query(None, description="Статус (pending/issued/completed)"),
+    status: Optional[str] = Query(None, description="Статус (pending/issued/partially_returned/completed/returned)"),
     db: Session = Depends(get_db_session)
 ):
     """Получить материалы по лоту, станку или статусу"""
@@ -163,9 +396,148 @@ def get_lot_materials(
             query = query.filter(LotMaterialDB.status == status)
         
         materials = query.order_by(LotMaterialDB.created_at.desc()).all()
-        return materials
+        
+        result = []
+        for m in materials:
+            lot = db.query(LotDB).filter(LotDB.id == m.lot_id).first()
+            machine = db.query(MachineDB).filter(MachineDB.id == m.machine_id).first() if m.machine_id else None
+            
+            # Получаем drawing_number
+            drawing_number = None
+            if lot and lot.part_id:
+                part = db.query(PartDB).filter(PartDB.id == lot.part_id).first()
+                if part:
+                    drawing_number = part.drawing_number
+            
+            result.append({
+                "id": m.id,
+                "lot_id": m.lot_id,
+                "lot_number": lot.lot_number if lot else None,
+                "machine_id": m.machine_id,
+                "machine_name": machine.name if machine else None,
+                "drawing_number": drawing_number,
+                "material_type": m.material_type,
+                "diameter": m.diameter,
+                "issued_bars": m.issued_bars or 0,
+                "returned_bars": m.returned_bars or 0,
+                "used_bars": (m.issued_bars or 0) - (m.returned_bars or 0),
+                "issued_at": m.issued_at,
+                "status": m.status,
+                "notes": m.notes,
+                "created_at": m.created_at
+            })
+        
+        return result
     except Exception as e:
         logger.error(f"Error fetching lot materials: {e}", exc_info=True)
-        # Возвращаем пустой список вместо падения
         return []
 
+
+@router.get("/lot-materials/{id}", response_model=LotMaterialDetailOut)
+def get_lot_material_detail(
+    id: int,
+    db: Session = Depends(get_db_session)
+):
+    """Получить детальную информацию о выдаче материала с историей операций"""
+    try:
+        lot_material = db.query(LotMaterialDB).filter(LotMaterialDB.id == id).first()
+        if not lot_material:
+            raise HTTPException(status_code=404, detail=f"Запись материала {id} не найдена")
+        
+        lot = db.query(LotDB).filter(LotDB.id == lot_material.lot_id).first()
+        machine = db.query(MachineDB).filter(MachineDB.id == lot_material.machine_id).first() if lot_material.machine_id else None
+        
+        # Получаем drawing_number
+        drawing_number = None
+        if lot and lot.part_id:
+            part = db.query(PartDB).filter(PartDB.id == lot.part_id).first()
+            if part:
+                drawing_number = part.drawing_number
+        
+        # Получаем историю операций
+        operations = db.query(MaterialOperationDB).filter(
+            MaterialOperationDB.lot_material_id == id
+        ).order_by(MaterialOperationDB.performed_at.desc()).all()
+        
+        operations_out = []
+        for op in operations:
+            performer = db.query(EmployeeDB).filter(EmployeeDB.id == op.performed_by).first() if op.performed_by else None
+            operations_out.append({
+                "id": op.id,
+                "lot_material_id": op.lot_material_id,
+                "operation_type": op.operation_type,
+                "quantity_bars": op.quantity_bars,
+                "diameter": op.diameter,
+                "performed_by": op.performed_by,
+                "performer_name": performer.full_name if performer else None,
+                "performed_at": op.performed_at,
+                "notes": op.notes,
+                "created_at": op.created_at
+            })
+        
+        return {
+            "id": lot_material.id,
+            "lot_id": lot_material.lot_id,
+            "lot_number": lot.lot_number if lot else None,
+            "machine_id": lot_material.machine_id,
+            "machine_name": machine.name if machine else None,
+            "drawing_number": drawing_number,
+            "material_type": lot_material.material_type,
+            "diameter": lot_material.diameter,
+            "issued_bars": lot_material.issued_bars or 0,
+            "returned_bars": lot_material.returned_bars or 0,
+            "used_bars": (lot_material.issued_bars or 0) - (lot_material.returned_bars or 0),
+            "issued_at": lot_material.issued_at,
+            "status": lot_material.status,
+            "notes": lot_material.notes,
+            "created_at": lot_material.created_at,
+            "operations": operations_out
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching lot material detail: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ошибка: {str(e)}")
+
+
+@router.get("/history", response_model=List[MaterialOperationOut])
+def get_material_history(
+    lot_id: Optional[int] = Query(None, description="ID лота"),
+    machine_id: Optional[int] = Query(None, description="ID станка"),
+    operation_type: Optional[str] = Query(None, description="Тип операции (issue/add/return/correction)"),
+    limit: int = Query(100, description="Лимит записей"),
+    db: Session = Depends(get_db_session)
+):
+    """Получить историю операций с материалом"""
+    try:
+        query = db.query(MaterialOperationDB).join(LotMaterialDB)
+        
+        if lot_id:
+            query = query.filter(LotMaterialDB.lot_id == lot_id)
+        if machine_id:
+            query = query.filter(LotMaterialDB.machine_id == machine_id)
+        if operation_type:
+            query = query.filter(MaterialOperationDB.operation_type == operation_type)
+        
+        operations = query.order_by(MaterialOperationDB.performed_at.desc()).limit(limit).all()
+        
+        result = []
+        for op in operations:
+            performer = db.query(EmployeeDB).filter(EmployeeDB.id == op.performed_by).first() if op.performed_by else None
+            result.append({
+                "id": op.id,
+                "lot_material_id": op.lot_material_id,
+                "operation_type": op.operation_type,
+                "quantity_bars": op.quantity_bars,
+                "diameter": op.diameter,
+                "performed_by": op.performed_by,
+                "performer_name": performer.full_name if performer else None,
+                "performed_at": op.performed_at,
+                "notes": op.notes,
+                "created_at": op.created_at
+            })
+        
+        return result
+    except Exception as e:
+        logger.error(f"Error fetching material history: {e}", exc_info=True)
+        return []

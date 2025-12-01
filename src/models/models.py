@@ -260,3 +260,31 @@ class LotMaterialDB(Base):
         Index('idx_lot_materials_machine_id', 'machine_id'),
         Index('idx_lot_materials_status', 'status'),
     )
+    
+    # Связь с операциями
+    operations = relationship("MaterialOperationDB", back_populates="lot_material", cascade="all, delete-orphan")
+
+
+class MaterialOperationDB(Base):
+    """История операций с материалом (выдача, добавление, возврат)"""
+    __tablename__ = "material_operations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    lot_material_id = Column(Integer, ForeignKey("lot_materials.id", ondelete="CASCADE"), nullable=False)
+    operation_type = Column(String(20), nullable=False)  # issue, add, return, correction
+    quantity_bars = Column(Integer, nullable=False)  # положительное = выдача, отрицательное = возврат
+    diameter = Column(Float, nullable=True)  # диаметр (для справки)
+    performed_by = Column(Integer, ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
+    performed_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    # Отношения
+    lot_material = relationship("LotMaterialDB", back_populates="operations")
+    performer = relationship("EmployeeDB", foreign_keys=[performed_by])
+
+    __table_args__ = (
+        Index('idx_material_operations_lot_material_id', 'lot_material_id'),
+        Index('idx_material_operations_performed_at', 'performed_at'),
+        CheckConstraint("operation_type IN ('issue', 'add', 'return', 'correction')", name='check_operation_type'),
+    )
