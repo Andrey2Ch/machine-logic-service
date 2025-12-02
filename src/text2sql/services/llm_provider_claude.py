@@ -8,8 +8,13 @@ ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 
 
 class ClaudeText2SQL:
-    def __init__(self, model: str = "claude-sonnet-4-20250514", max_tokens: int = 1000, temperature: float = 0.0):
+    def __init__(self, model: str = None, max_tokens: int = 1000, temperature: float = 0.0):
         self.api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        
+        # Читаем модель из переменной окружения, если не передана явно
+        if model is None:
+            model = os.environ.get("TEXT2SQL_MODEL", "claude-sonnet-4-20250514")
+        
         # Поддержка псевдонимов для автоматического использования последней версии
         if model == "opus":
             self.model = "claude-opus-4-1-20250805"

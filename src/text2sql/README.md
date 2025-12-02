@@ -75,14 +75,16 @@ print(result['sql'])  # SELECT COUNT(*) as open_batches FROM batches WHERE statu
 
 ```bash
 # Использовать Sonnet (по умолчанию, быстрее и дешевле)
-export ANTHROPIC_MODEL="sonnet"
+export TEXT2SQL_MODEL="sonnet"
 
 # Использовать Opus (самая мощная)
-export ANTHROPIC_MODEL="opus"
+export TEXT2SQL_MODEL="opus"
 
 # Использовать конкретную версию
-export ANTHROPIC_MODEL="claude-sonnet-4-20250514"
+export TEXT2SQL_MODEL="claude-sonnet-4-20250514"
 ```
+
+**Для Railway:** Добавь переменную окружения `TEXT2SQL_MODEL` в настройках проекта.
 
 ## Статус
 
