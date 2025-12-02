@@ -69,9 +69,16 @@ async def upload_drawing(
 @router.get("/{drawing_number}")
 async def get_drawing(drawing_number: str):
     """
-    Получить чертеж по номеру
+    Получить чертеж по номеру с умным поиском
     
-    - drawing_number: номер чертежа (например "1000-03")
+    - drawing_number: номер чертежа (например "1002-75-1")
+    
+    Логика поиска:
+    1. Точное совпадение: 1002-75-1.pdf
+    2. Fallback - базовый чертеж: 1002-75.pdf (убираем последний -X)
+    
+    Формат номера: КЛИЕНТ-ДЕТАЛЬ-ВАРИАНТ
+    Например: 1002-75-1 = клиент 1002, деталь 75, вариант 1
     
     Возвращает PDF файл для просмотра в браузере
     """
@@ -80,8 +87,24 @@ async def get_drawing(drawing_number: str):
         if drawing_number.endswith('.pdf'):
             drawing_number = drawing_number[:-4]
         
+        # 1. Попытка точного совпадения
         file_path = DRAWINGS_DIR / f"{drawing_number}.pdf"
         
+        # 2. Если нет - пробуем базовый чертеж (убираем последний -X)
+        if not file_path.exists():
+            # Проверяем есть ли вариант (последний сегмент после тире)
+            parts = drawing_number.rsplit('-', 1)
+            if len(parts) == 2 and parts[1].isdigit():
+                # Есть вариант - пробуем базовый чертеж
+                base_drawing = parts[0]
+                base_file_path = DRAWINGS_DIR / f"{base_drawing}.pdf"
+                
+                if base_file_path.exists():
+                    logger.info(f"📋 Fallback: {drawing_number} → {base_drawing}")
+                    file_path = base_file_path
+                    drawing_number = base_drawing
+        
+        # 3. Если все еще не найден - ошибка
         if not file_path.exists():
             raise HTTPException(status_code=404, detail=f"Чертеж {drawing_number} не найден")
         
