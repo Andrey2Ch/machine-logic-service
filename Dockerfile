@@ -61,10 +61,11 @@ RUN dos2unix entrypoint.sh && chmod +x entrypoint.sh
 # Change ownership
 RUN chown -R appuser:appgroup /app
 
-# Create drawings directory with correct permissions for Volume mount
-RUN mkdir -p /app/drawings && chown -R appuser:appgroup /app/drawings && chmod 755 /app/drawings
+# Create drawings directory
+RUN mkdir -p /app/drawings && chmod 777 /app/drawings
 
-USER appuser
+# Run as root to allow writing to Volume
+# USER appuser
 
 EXPOSE 8000
 
