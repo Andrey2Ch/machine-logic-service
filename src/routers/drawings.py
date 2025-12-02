@@ -189,3 +189,4 @@ async def list_drawings(limit: int = 100, offset: int = 0):
         logger.error(f"❌ Ошибка получения списка чертежей: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
