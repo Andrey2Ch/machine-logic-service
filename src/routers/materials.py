@@ -381,10 +381,22 @@ def get_lot_materials(
     status: Optional[str] = Query(None, description="Статус (pending/issued/partially_returned/completed/returned)"),
     db: Session = Depends(get_db_session)
 ):
-    """Получить материалы по лоту, станку или статусу"""
+    """Получить материалы по лоту, станку или статусу (ОПТИМИЗИРОВАНО с JOIN)"""
     try:
-        query = db.query(LotMaterialDB)
+        # ОПТИМИЗАЦИЯ: Один запрос с JOIN вместо N+1 queries
+        query = (
+            db.query(
+                LotMaterialDB,
+                LotDB.lot_number,
+                MachineDB.name.label('machine_name'),
+                PartDB.drawing_number
+            )
+            .outerjoin(LotDB, LotMaterialDB.lot_id == LotDB.id)
+            .outerjoin(MachineDB, LotMaterialDB.machine_id == MachineDB.id)
+            .outerjoin(PartDB, LotDB.part_id == PartDB.id)
+        )
         
+        # Применяем фильтры
         if lot_id:
             query = query.filter(LotMaterialDB.lot_id == lot_id)
         if machine_id:
@@ -392,26 +404,17 @@ def get_lot_materials(
         if status:
             query = query.filter(LotMaterialDB.status == status)
         
-        materials = query.order_by(LotMaterialDB.created_at.desc()).all()
+        # Выполняем запрос (ОДИН запрос вместо N+1!)
+        results = query.order_by(LotMaterialDB.created_at.desc()).all()
         
-        result = []
-        for m in materials:
-            lot = db.query(LotDB).filter(LotDB.id == m.lot_id).first()
-            machine = db.query(MachineDB).filter(MachineDB.id == m.machine_id).first() if m.machine_id else None
-            
-            # Получаем drawing_number
-            drawing_number = None
-            if lot and lot.part_id:
-                part = db.query(PartDB).filter(PartDB.id == lot.part_id).first()
-                if part:
-                    drawing_number = part.drawing_number
-            
-            result.append({
+        # Формируем результат (данные уже загружены из JOIN)
+        return [
+            {
                 "id": m.id,
                 "lot_id": m.lot_id,
-                "lot_number": lot.lot_number if lot else None,
+                "lot_number": lot_number,
                 "machine_id": m.machine_id,
-                "machine_name": machine.name if machine else None,
+                "machine_name": machine_name,
                 "drawing_number": drawing_number,
                 "material_type": m.material_type,
                 "diameter": m.diameter,
@@ -422,9 +425,9 @@ def get_lot_materials(
                 "status": m.status,
                 "notes": m.notes,
                 "created_at": m.created_at
-            })
-        
-        return result
+            }
+            for m, lot_number, machine_name, drawing_number in results
+        ]
     except Exception as e:
         logger.error(f"Error fetching lot materials: {e}", exc_info=True)
         return []
