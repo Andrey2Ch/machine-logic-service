@@ -338,7 +338,7 @@ async def get_deadlines(
         JOIN setup_jobs sj ON sj.lot_id = l.id
         LEFT JOIN machines m ON m.id = sj.machine_id
         WHERE l.due_date IS NOT NULL
-          AND l.due_date::date = :target_date::date
+          AND DATE(l.due_date) = DATE(:target_date)
           AND l.status NOT IN ('completed', 'cancelled', 'closed')
         ORDER BY l.due_date ASC;
         """)
