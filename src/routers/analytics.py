@@ -55,13 +55,15 @@ async def get_lot_analytics(lot_id: int, db: Session = Depends(get_db_session)):
         
         total_produced_quantity = last_reading_result.last_reading if last_reading_result else 0
         
-        # 🔧 ИСПРАВЛЕНО 2025-12-03: "Принято" = всё что принял склад
-        # Считаем все батчи где warehouse_received_at IS NOT NULL
-        # (независимо от текущей локации: good, defect, rework, archived и т.д.)
+        # 🔧 ИСПРАВЛЕНО 2025-12-03: "Принято" = всё принятое складом, КРОМЕ архивных
+        # Архивные батчи (archived) - это исходные батчи которые были заменены
+        # новыми батчами после проверки ОТК (good/defect/rework)
+        # Учитываем их привело бы к двойному подсчету
         total_warehouse_quantity = sum(
             batch.current_quantity or 0 
             for batch in batches 
             if batch.warehouse_received_at is not None
+            and batch.current_location != 'archived'
         )
         
         # Оставляем warehouse_batches для расчёта declared_quantity_at_warehouse_recount
