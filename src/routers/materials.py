@@ -20,7 +20,7 @@ from src.models.models import (
     EmployeeDB,
     PartDB,
     MaterialOperationDB,
-    SetupJobDB
+    SetupDB
 )
 from datetime import datetime, timezone, timedelta
 
@@ -435,10 +435,10 @@ def close_material(
         setup_status = None
         if lot_material.lot_id and lot_material.machine_id:
             last_setup = (
-                db.query(SetupJobDB.status)
-                .filter(SetupJobDB.lot_id == lot_material.lot_id)
-                .filter(SetupJobDB.machine_id == lot_material.machine_id)
-                .order_by(SetupJobDB.created_at.desc())
+                db.query(SetupDB.status)
+                .filter(SetupDB.lot_id == lot_material.lot_id)
+                .filter(SetupDB.machine_id == lot_material.machine_id)
+                .order_by(SetupDB.created_at.desc())
                 .first()
             )
             if last_setup:
@@ -496,17 +496,17 @@ def check_pending_materials(
         # Подзапрос для получения последней наладки по каждому лоту
         latest_setup_subq = (
             db.query(
-                SetupJobDB.lot_id,
-                SetupJobDB.machine_id,
-                SetupJobDB.status.label('setup_status'),
-                SetupJobDB.end_time,
+                SetupDB.lot_id,
+                SetupDB.machine_id,
+                SetupDB.status.label('setup_status'),
+                SetupDB.end_time,
                 func.row_number().over(
-                    partition_by=[SetupJobDB.lot_id, SetupJobDB.machine_id],
-                    order_by=SetupJobDB.created_at.desc()
+                    partition_by=[SetupDB.lot_id, SetupDB.machine_id],
+                    order_by=SetupDB.created_at.desc()
                 ).label('rn')
             )
-            .filter(SetupJobDB.status == 'completed')
-            .filter(SetupJobDB.end_time >= datetime.now(timezone.utc) - timedelta(days=7))
+            .filter(SetupDB.status == 'completed')
+            .filter(SetupDB.end_time >= datetime.now(timezone.utc) - timedelta(days=7))
             .subquery()
         )
         
@@ -590,12 +590,12 @@ def get_lot_materials(
         # Подзапрос для получения статуса последней наладки для лота
         latest_setup_subq = (
             db.query(
-                SetupJobDB.lot_id,
-                SetupJobDB.status.label('setup_status')
+                SetupDB.lot_id,
+                SetupDB.status.label('setup_status')
             )
-            .filter(SetupJobDB.machine_id == LotMaterialDB.machine_id)
-            .filter(SetupJobDB.lot_id == LotMaterialDB.lot_id)
-            .order_by(SetupJobDB.created_at.desc())
+            .filter(SetupDB.machine_id == LotMaterialDB.machine_id)
+            .filter(SetupDB.lot_id == LotMaterialDB.lot_id)
+            .order_by(SetupDB.created_at.desc())
             .limit(1)
             .correlate(LotMaterialDB)
             .subquery()
@@ -632,10 +632,10 @@ def get_lot_materials(
             setup_status = None
             if m.lot_id and m.machine_id:
                 last_setup = (
-                    db.query(SetupJobDB.status)
-                    .filter(SetupJobDB.lot_id == m.lot_id)
-                    .filter(SetupJobDB.machine_id == m.machine_id)
-                    .order_by(SetupJobDB.created_at.desc())
+                    db.query(SetupDB.status)
+                    .filter(SetupDB.lot_id == m.lot_id)
+                    .filter(SetupDB.machine_id == m.machine_id)
+                    .order_by(SetupDB.created_at.desc())
                     .first()
                 )
                 if last_setup:
