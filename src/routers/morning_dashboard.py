@@ -112,7 +112,6 @@ def calculate_status(discrepancy_abs: int, discrepancy_percent: float, threshold
 
 @router.get("/morning/acceptance-discrepancies", response_model=List[AcceptanceDiscrepancy])
 async def get_acceptance_discrepancies(
-    days: int = Query(7, ge=1, le=30, description="Период в днях"),
     db: Session = Depends(get_db_session)
 ):
     """
@@ -157,9 +156,24 @@ async def get_acceptance_discrepancies(
             FROM lots l
             JOIN setup_jobs sj ON sj.lot_id = l.id
             LEFT JOIN machines m ON m.id = sj.machine_id
-            WHERE l.created_at >= NOW() - INTERVAL '1 day' * :days
-              AND l.status NOT IN ('cancelled', 'closed')
-              AND sj.machine_id IS NOT NULL
+            WHERE (
+                l.status = 'in_production'  -- Все в производстве
+                
+                OR
+                
+                (l.status = 'post_production' AND l.id = (
+                    SELECT l2.id 
+                    FROM lots l2
+                    WHERE l2.status = 'post_production'
+                    ORDER BY (
+                        SELECT MAX(sj2.end_time)
+                        FROM setup_jobs sj2
+                        WHERE sj2.lot_id = l2.id AND sj2.status = 'completed'
+                    ) DESC NULLS LAST
+                    LIMIT 1
+                ))
+            )
+            AND sj.machine_id IS NOT NULL
         )
         SELECT 
             machine_name,
@@ -179,7 +193,7 @@ async def get_acceptance_discrepancies(
         ORDER BY ABS(SUM(declared - accepted)) DESC;
         """)
         
-        result = db.execute(query, {"days": days}).fetchall()
+        result = db.execute(query).fetchall()
         
         thresholds = DEFAULT_THRESHOLDS['acceptance_discrepancy']
         
@@ -206,7 +220,6 @@ async def get_acceptance_discrepancies(
 
 @router.get("/morning/defect-rates", response_model=List[DefectRate])
 async def get_defect_rates(
-    days: int = Query(7, ge=1, le=30, description="Период в днях"),
     db: Session = Depends(get_db_session)
 ):
     """
@@ -248,9 +261,24 @@ async def get_defect_rates(
             FROM lots l
             JOIN setup_jobs sj ON sj.lot_id = l.id
             LEFT JOIN machines m ON m.id = sj.machine_id
-            WHERE l.created_at >= NOW() - INTERVAL '1 day' * :days
-              AND l.status NOT IN ('cancelled')
-              AND sj.machine_id IS NOT NULL
+            WHERE (
+                l.status = 'in_production'  -- Все в производстве
+                
+                OR
+                
+                (l.status = 'post_production' AND l.id = (
+                    SELECT l2.id 
+                    FROM lots l2
+                    WHERE l2.status = 'post_production'
+                    ORDER BY (
+                        SELECT MAX(sj2.end_time)
+                        FROM setup_jobs sj2
+                        WHERE sj2.lot_id = l2.id AND sj2.status = 'completed'
+                    ) DESC NULLS LAST
+                    LIMIT 1
+                ))
+            )
+            AND sj.machine_id IS NOT NULL
         )
         SELECT 
             machine_name,
@@ -270,7 +298,7 @@ async def get_defect_rates(
         ORDER BY defect_percent DESC;
         """)
         
-        result = db.execute(query, {"days": days}).fetchall()
+        result = db.execute(query).fetchall()
         
         thresholds = DEFAULT_THRESHOLDS['defect_rate']
         
@@ -386,16 +414,15 @@ async def get_deadlines(
 
 @router.get("/morning/summary")
 async def get_morning_summary(
-    period_days: int = Query(7, ge=1, le=30, description="Период для расхождений и брака"),
     db: Session = Depends(get_db_session)
 ):
     """
-    Полная утренняя сводка - все ключевые метрики
+    Полная утренняя сводка - все ключевые метрики для активных лотов
     """
     try:
         # Получаем все данные параллельно
-        discrepancies = await get_acceptance_discrepancies(period_days, db)
-        defect_rates = await get_defect_rates(period_days, db)
+        discrepancies = await get_acceptance_discrepancies(db)
+        defect_rates = await get_defect_rates(db)
         deadlines_today = await get_deadlines(0, db)
         deadlines_tomorrow = await get_deadlines(1, db)
         
