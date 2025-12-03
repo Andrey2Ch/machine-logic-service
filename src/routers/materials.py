@@ -8,7 +8,7 @@
 import logging
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, or_, func
 from src.database import get_db_session
 from typing import List, Optional
 from pydantic import BaseModel
@@ -19,9 +19,10 @@ from src.models.models import (
     MachineDB, 
     EmployeeDB,
     PartDB,
-    MaterialOperationDB
+    MaterialOperationDB,
+    SetupJobDB
 )
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,11 @@ class ReturnBarsRequest(BaseModel):
     performed_by: Optional[int] = None
     notes: Optional[str] = None
 
+class CloseMaterialRequest(BaseModel):
+    defect_bars: int = 0
+    notes: Optional[str] = None
+    closed_by: Optional[int] = None
+
 class MaterialOperationOut(BaseModel):
     id: int
     lot_material_id: int
@@ -88,11 +94,17 @@ class LotMaterialOut(BaseModel):
     diameter: Optional[float] = None
     issued_bars: int
     returned_bars: int
-    used_bars: int  # issued - returned
+    defect_bars: int = 0
+    used_bars: int  # issued - returned - defect
     issued_at: Optional[datetime] = None
     status: str
     notes: Optional[str] = None
+    closed_at: Optional[datetime] = None
+    closed_by: Optional[int] = None
     created_at: Optional[datetime] = None
+    # Дополнительная информация для определения состояния
+    lot_status: Optional[str] = None
+    setup_status: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -374,6 +386,195 @@ def return_bars(
         raise HTTPException(status_code=500, detail=f"Ошибка при возврате прутков: {str(e)}")
 
 
+@router.patch("/lot-materials/{id}/close", response_model=LotMaterialOut)
+def close_material(
+    id: int,
+    request: CloseMaterialRequest,
+    db: Session = Depends(get_db_session)
+):
+    """
+    Закрыть выдачу материала после проверки кладовщиком
+    
+    Используется когда наладка завершена и кладовщик проверил:
+    - Весь материал использован
+    - Или часть возвращена + брак учтен
+    """
+    try:
+        # Получаем запись материала
+        lot_material = db.query(LotMaterialDB).filter(LotMaterialDB.id == id).first()
+        if not lot_material:
+            raise HTTPException(status_code=404, detail="Материал не найден")
+        
+        # Проверка: уже закрыт?
+        if lot_material.closed_at:
+            raise HTTPException(status_code=400, detail="Материал уже закрыт")
+        
+        # Обновляем данные
+        lot_material.defect_bars = request.defect_bars
+        if request.notes:
+            lot_material.notes = (lot_material.notes or "") + f"\n[Закрытие] {request.notes}"
+        lot_material.closed_at = datetime.now(timezone.utc)
+        lot_material.closed_by = request.closed_by
+        
+        db.commit()
+        db.refresh(lot_material)
+        
+        # Получаем связанные данные для ответа
+        lot = db.query(LotDB).filter(LotDB.id == lot_material.lot_id).first()
+        machine = db.query(MachineDB).filter(MachineDB.id == lot_material.machine_id).first() if lot_material.machine_id else None
+        drawing_number = None
+        lot_status = None
+        if lot:
+            lot_status = lot.status
+            if lot.part_id:
+                part = db.query(PartDB).filter(PartDB.id == lot.part_id).first()
+                if part:
+                    drawing_number = part.drawing_number
+        
+        # Получаем статус последней наладки
+        setup_status = None
+        if lot_material.lot_id and lot_material.machine_id:
+            last_setup = (
+                db.query(SetupJobDB.status)
+                .filter(SetupJobDB.lot_id == lot_material.lot_id)
+                .filter(SetupJobDB.machine_id == lot_material.machine_id)
+                .order_by(SetupJobDB.created_at.desc())
+                .first()
+            )
+            if last_setup:
+                setup_status = last_setup[0]
+        
+        return {
+            "id": lot_material.id,
+            "lot_id": lot_material.lot_id,
+            "lot_number": lot.lot_number if lot else None,
+            "machine_id": lot_material.machine_id,
+            "machine_name": machine.name if machine else None,
+            "drawing_number": drawing_number,
+            "material_type": lot_material.material_type,
+            "diameter": lot_material.diameter,
+            "issued_bars": lot_material.issued_bars or 0,
+            "returned_bars": lot_material.returned_bars or 0,
+            "defect_bars": lot_material.defect_bars or 0,
+            "used_bars": (lot_material.issued_bars or 0) - (lot_material.returned_bars or 0) - (lot_material.defect_bars or 0),
+            "issued_at": lot_material.issued_at,
+            "status": lot_material.status,
+            "notes": lot_material.notes,
+            "closed_at": lot_material.closed_at,
+            "closed_by": lot_material.closed_by,
+            "created_at": lot_material.created_at,
+            "lot_status": lot_status,
+            "setup_status": setup_status
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error closing material: {e}", exc_info=True)
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Ошибка при закрытии материала: {str(e)}")
+
+
+@router.get("/check-pending/{machine_id}", response_model=List[LotMaterialOut])
+def check_pending_materials(
+    machine_id: int,
+    show_all: bool = Query(False, description="Для админа: показать все незакрытые (не только последнюю)"),
+    db: Session = Depends(get_db_session)
+):
+    """
+    Проверить незакрытые материалы на станке для предупреждения
+    
+    Возвращает материалы где:
+    - setup.status = 'completed' (наладка завершена)
+    - lot.status IN ('in_production', 'post_production') (лот активен)
+    - closed_at IS NULL (материал не закрыт)
+    - Свежие (за последние 7 дней)
+    
+    По умолчанию: только последняя
+    Для админа (show_all=true): все незакрытые
+    """
+    try:
+        # Подзапрос для получения последней наладки по каждому лоту
+        latest_setup_subq = (
+            db.query(
+                SetupJobDB.lot_id,
+                SetupJobDB.machine_id,
+                SetupJobDB.status.label('setup_status'),
+                SetupJobDB.end_time,
+                func.row_number().over(
+                    partition_by=[SetupJobDB.lot_id, SetupJobDB.machine_id],
+                    order_by=SetupJobDB.created_at.desc()
+                ).label('rn')
+            )
+            .filter(SetupJobDB.status == 'completed')
+            .filter(SetupJobDB.end_time >= datetime.now(timezone.utc) - timedelta(days=7))
+            .subquery()
+        )
+        
+        query = (
+            db.query(
+                LotMaterialDB,
+                LotDB.lot_number,
+                LotDB.status.label('lot_status'),
+                MachineDB.name.label('machine_name'),
+                PartDB.drawing_number,
+                latest_setup_subq.c.setup_status,
+                latest_setup_subq.c.end_time
+            )
+            .outerjoin(LotDB, LotMaterialDB.lot_id == LotDB.id)
+            .outerjoin(MachineDB, LotMaterialDB.machine_id == MachineDB.id)
+            .outerjoin(PartDB, LotDB.part_id == PartDB.id)
+            .outerjoin(
+                latest_setup_subq,
+                and_(
+                    LotMaterialDB.lot_id == latest_setup_subq.c.lot_id,
+                    LotMaterialDB.machine_id == latest_setup_subq.c.machine_id,
+                    latest_setup_subq.c.rn == 1
+                )
+            )
+            .filter(LotMaterialDB.machine_id == machine_id)
+            .filter(LotMaterialDB.closed_at == None)
+            .filter(latest_setup_subq.c.setup_status == 'completed')
+            .filter(LotDB.status.in_(['in_production', 'post_production']))
+            .order_by(latest_setup_subq.c.end_time.desc())
+        )
+        
+        # Для админа показываем все, иначе только последнюю
+        if not show_all:
+            query = query.limit(1)
+        
+        results = query.all()
+        
+        # Формируем результат
+        return [
+            {
+                "id": m.id,
+                "lot_id": m.lot_id,
+                "lot_number": lot_number,
+                "machine_id": m.machine_id,
+                "machine_name": machine_name,
+                "drawing_number": drawing_number,
+                "material_type": m.material_type,
+                "diameter": m.diameter,
+                "issued_bars": m.issued_bars or 0,
+                "returned_bars": m.returned_bars or 0,
+                "defect_bars": m.defect_bars or 0,
+                "used_bars": (m.issued_bars or 0) - (m.returned_bars or 0) - (m.defect_bars or 0),
+                "issued_at": m.issued_at,
+                "status": m.status,
+                "notes": m.notes,
+                "closed_at": m.closed_at,
+                "closed_by": m.closed_by,
+                "created_at": m.created_at,
+                "lot_status": lot_status,
+                "setup_status": setup_status
+            }
+            for m, lot_number, lot_status, machine_name, drawing_number, setup_status, end_time in results
+        ]
+    except Exception as e:
+        logger.error(f"Error checking pending materials: {e}", exc_info=True)
+        return []
+
+
 @router.get("/lot-materials", response_model=List[LotMaterialOut])
 def get_lot_materials(
     lot_id: Optional[int] = Query(None, description="ID лота"),
@@ -381,13 +582,30 @@ def get_lot_materials(
     status: Optional[str] = Query(None, description="Статус (pending/issued/partially_returned/completed/returned)"),
     db: Session = Depends(get_db_session)
 ):
-    """Получить материалы по лоту, станку или статусу (ОПТИМИЗИРОВАНО с JOIN)"""
+    """Получить материалы по лоту, станку или статусу (ОПТИМИЗИРОВАНО с JOIN + статусы)"""
     try:
         # ОПТИМИЗАЦИЯ: Один запрос с JOIN вместо N+1 queries
+        # Добавляем информацию о статусах лота и наладки для фронтенда
+        
+        # Подзапрос для получения статуса последней наладки для лота
+        latest_setup_subq = (
+            db.query(
+                SetupJobDB.lot_id,
+                SetupJobDB.status.label('setup_status')
+            )
+            .filter(SetupJobDB.machine_id == LotMaterialDB.machine_id)
+            .filter(SetupJobDB.lot_id == LotMaterialDB.lot_id)
+            .order_by(SetupJobDB.created_at.desc())
+            .limit(1)
+            .correlate(LotMaterialDB)
+            .subquery()
+        )
+        
         query = (
             db.query(
                 LotMaterialDB,
                 LotDB.lot_number,
+                LotDB.status.label('lot_status'),
                 MachineDB.name.label('machine_name'),
                 PartDB.drawing_number
             )
@@ -404,12 +622,26 @@ def get_lot_materials(
         if status:
             query = query.filter(LotMaterialDB.status == status)
         
-        # Выполняем запрос (ОДИН запрос вместо N+1!)
+        # Выполняем запрос
         results = query.order_by(LotMaterialDB.created_at.desc()).all()
         
-        # Формируем результат (данные уже загружены из JOIN)
-        return [
-            {
+        # Формируем результат с дополнительной информацией о статусах
+        output = []
+        for m, lot_number, lot_status, machine_name, drawing_number in results:
+            # Получаем статус последней наладки для этого материала
+            setup_status = None
+            if m.lot_id and m.machine_id:
+                last_setup = (
+                    db.query(SetupJobDB.status)
+                    .filter(SetupJobDB.lot_id == m.lot_id)
+                    .filter(SetupJobDB.machine_id == m.machine_id)
+                    .order_by(SetupJobDB.created_at.desc())
+                    .first()
+                )
+                if last_setup:
+                    setup_status = last_setup[0]
+            
+            output.append({
                 "id": m.id,
                 "lot_id": m.lot_id,
                 "lot_number": lot_number,
@@ -420,14 +652,19 @@ def get_lot_materials(
                 "diameter": m.diameter,
                 "issued_bars": m.issued_bars or 0,
                 "returned_bars": m.returned_bars or 0,
-                "used_bars": (m.issued_bars or 0) - (m.returned_bars or 0),
+                "defect_bars": m.defect_bars or 0,
+                "used_bars": (m.issued_bars or 0) - (m.returned_bars or 0) - (m.defect_bars or 0),
                 "issued_at": m.issued_at,
                 "status": m.status,
                 "notes": m.notes,
-                "created_at": m.created_at
-            }
-            for m, lot_number, machine_name, drawing_number in results
-        ]
+                "closed_at": m.closed_at,
+                "closed_by": m.closed_by,
+                "created_at": m.created_at,
+                "lot_status": lot_status,
+                "setup_status": setup_status
+            })
+        
+        return output
     except Exception as e:
         logger.error(f"Error fetching lot materials: {e}", exc_info=True)
         return []

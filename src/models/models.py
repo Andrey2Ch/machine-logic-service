@@ -54,6 +54,7 @@ class EmployeeDB(Base):
     # Связи с материалами
     lot_materials_issued = relationship("LotMaterialDB", foreign_keys="LotMaterialDB.issued_by", back_populates="issued_by_employee")
     lot_materials_returned = relationship("LotMaterialDB", foreign_keys="LotMaterialDB.returned_by", back_populates="returned_by_employee")
+    lot_materials_closed = relationship("LotMaterialDB", foreign_keys="LotMaterialDB.closed_by", back_populates="closed_by_employee")
 
 
 class EmployeeAreaRoleDB(Base):
@@ -245,16 +246,20 @@ class LotMaterialDB(Base):
     returned_weight_kg = Column(Float, nullable=True)
     returned_at = Column(DateTime, nullable=True)
     returned_by = Column(Integer, ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
+    defect_bars = Column(Integer, default=0)  # Бракованные/погнутые прутки
     # used_bars — это generated column в PostgreSQL, не добавлять в INSERT!
-    # Вычисляется автоматически: issued_bars - returned_bars
+    # Вычисляется автоматически: issued_bars - returned_bars - defect_bars
     status = Column(String(20), default="pending")
     notes = Column(Text, nullable=True)
+    closed_at = Column(DateTime, nullable=True)  # Дата закрытия записи кладовщиком
+    closed_by = Column(Integer, ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)  # Кто закрыл
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     lot = relationship("LotDB", back_populates="lot_materials")
     machine = relationship("MachineDB", back_populates="lot_materials")
     issued_by_employee = relationship("EmployeeDB", foreign_keys=[issued_by], back_populates="lot_materials_issued")
     returned_by_employee = relationship("EmployeeDB", foreign_keys=[returned_by], back_populates="lot_materials_returned")
+    closed_by_employee = relationship("EmployeeDB", foreign_keys=[closed_by], back_populates="lot_materials_closed")
 
     __table_args__ = (
         Index('idx_lot_materials_lot_id', 'lot_id'),
