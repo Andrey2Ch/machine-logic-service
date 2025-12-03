@@ -2611,6 +2611,58 @@ async def update_part_cycle_time(
         raise HTTPException(status_code=500, detail=f"Ошибка при обновлении cycle_time: {str(e)}")
 
 
+@app.patch("/parts/{part_id}/part-length", tags=["Parts"])
+async def update_part_length(
+    part_id: int, 
+    part_length: float = Body(..., embed=True, description="Длина детали в мм"),
+    db: Session = Depends(get_db_session)
+):
+    """
+    Установить/обновить длину детали (для расчета материала)
+    
+    Args:
+        part_id: ID детали
+        part_length: Длина детали в мм (должна быть > 0)
+        
+    Returns:
+        {
+            "success": bool,
+            "part_length": float,
+            "message": str
+        }
+    """
+    try:
+        if part_length <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="part_length должна быть положительным числом"
+            )
+        
+        # Проверяем существование детали
+        part = db.query(PartDB).filter(PartDB.id == part_id).first()
+        if not part:
+            raise HTTPException(status_code=404, detail=f"Деталь с ID {part_id} не найдена")
+        
+        # Обновляем длину детали
+        part.part_length = part_length
+        db.commit()
+        
+        logger.info(f"Установлена part_length={part_length} мм для детали {part_id} (drawing: {part.drawing_number})")
+        
+        return {
+            "success": True,
+            "part_length": part_length,
+            "message": f"Длина детали успешно установлена: {part_length} мм"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Ошибка при обновлении part_length для детали {part_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ошибка при обновлении part_length: {str(e)}")
+
+
 # <<< КОНЕЦ НОВЫХ ЭНДПОИНТОВ ДЛЯ ЛОТОВ >>>
 
 # === ЭНДПОИНТЫ ДЛЯ НАЛАДОК (SETUPS) ===
