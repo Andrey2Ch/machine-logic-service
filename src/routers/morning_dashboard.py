@@ -4,9 +4,11 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import text, func
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta, timezone
 from pydantic import BaseModel
+import os
+import httpx
 
 from ..database import get_db_session
 from ..models.models import LotDB, BatchDB, SetupDB, MachineDB
@@ -15,6 +17,9 @@ import logging
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Morning Dashboard"])
+
+# URL израматского дашборда для вызова API morning-report
+ISRAMAT_DASHBOARD_URL = os.getenv("ISRAMAT_DASHBOARD_URL", "http://localhost:3000")
 
 
 # ==================== MODELS ====================
@@ -71,6 +76,24 @@ class MorningSummary(BaseModel):
     deadlines_today: List[Deadline]
     deadlines_tomorrow: List[Deadline]
     summary_stats: dict
+
+class MachineInfo(BaseModel):
+    """Информация о станке для плана работы"""
+    machine_name: str
+    lot_number: str
+    drawing_number: str
+    status: str
+    progress: str  # "180/200"
+    hours_remaining: float
+    estimated_completion: str
+    priority: str  # Приоритет наладки
+
+class MachinePlan(BaseModel):
+    """План работы станков на день"""
+    setup_now: List[MachineInfo]  # Требуют наладки СЕЙЧАС
+    setup_today: List[MachineInfo]  # Закончат сегодня (< 9ч)
+    setup_next_shift: List[MachineInfo]  # Следующая смена
+    setup_tomorrow: List[MachineInfo]  # Завтра
 
 
 # ==================== НАСТРОЙКИ ПОРОГОВ ====================
@@ -409,6 +432,83 @@ async def get_deadlines(
         
     except Exception as e:
         logger.error(f"Error getting deadlines: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/morning/machine-plan", response_model=MachinePlan)
+async def get_machine_plan():
+    """
+    План работы станков на день - группировка по приоритетам наладки
+    
+    Переиспользует данные из /api/morning-report (израмат-дашборд),
+    фильтрует и группирует по приоритетам наладки:
+    - SETUP NOW: требуют наладки СЕЙЧАС
+    - SETUP: закончат в эту смену (< 9ч)
+    - SETUP next shift: следующая смена
+    - SETUP tomorrow: завтра
+    """
+    try:
+        # Вызываем существующий API morning-report
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(f"{ISRAMAT_DASHBOARD_URL}/api/morning-report")
+            response.raise_for_status()
+            data = response.json()
+        
+        machines = data.get('data', [])
+        
+        # Группируем по приоритетам наладки
+        def create_machine_info(m: Dict[str, Any]) -> MachineInfo:
+            """Конвертируем данные из morning-report в MachineInfo"""
+            # Прогресс
+            current = m.get("Текущее количество", 0)
+            planned = m.get("План", 0)
+            additional = m.get("Доп. кол.", 0)
+            total_plan = planned + additional
+            
+            return MachineInfo(
+                machine_name=m.get("Станок", ""),
+                lot_number=m.get("Номер лота", ""),
+                drawing_number=m.get("Чертёж", ""),
+                status=m.get("Статус", ""),
+                progress=f"{current}/{total_plan}" if total_plan > 0 else "-",
+                hours_remaining=float(m.get("Осталось часов", 0)),
+                estimated_completion=m.get("Дата и время окончания", ""),
+                priority=m.get("Приоритет наладки", "")
+            )
+        
+        # Фильтруем по приоритетам
+        setup_now = [
+            create_machine_info(m) for m in machines 
+            if m.get("Приоритет наладки") == "SETUP NOW"
+        ]
+        
+        setup_today = [
+            create_machine_info(m) for m in machines 
+            if m.get("Приоритет наладки") == "SETUP"
+        ]
+        
+        setup_next_shift = [
+            create_machine_info(m) for m in machines 
+            if m.get("Приоритет наладки") == "SETUP next shift"
+        ]
+        
+        setup_tomorrow = [
+            create_machine_info(m) for m in machines 
+            if m.get("Приоритет наладки") == "SETUP tomorrow"
+        ]
+        
+        return MachinePlan(
+            setup_now=setup_now,
+            setup_today=setup_today,
+            setup_next_shift=setup_next_shift,
+            setup_tomorrow=setup_tomorrow
+        )
+        
+    except httpx.HTTPError as e:
+        logger.error(f"Error calling morning-report API: {e}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Ошибка вызова morning-report API: {str(e)}")
+    except Exception as e:
+        logger.error(f"Error getting machine plan: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
