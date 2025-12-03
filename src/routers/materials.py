@@ -202,6 +202,13 @@ def issue_material_to_machine(
         # Обновляем статус материала в лоте
         lot.material_status = "issued"
         
+        # 🎯 ВАЖНО: Записываем фактический диаметр из материала в лот!
+        # Кладовщик измеряет реальный диаметр при выдаче - это приоритетнее теоретического
+        # Обновляем ВСЕГДА (даже если был заполнен при создании лота)
+        if request.diameter:
+            lot.actual_diameter = request.diameter
+            logger.info(f"Updated lot {lot.id} actual_diameter to {request.diameter} from warehouse issue")
+        
         db.flush()  # Получаем ID для lot_material
         
         # Записываем операцию в историю
@@ -229,11 +236,16 @@ def issue_material_to_machine(
             "diameter": lot_material.diameter,
             "issued_bars": lot_material.issued_bars or 0,
             "returned_bars": lot_material.returned_bars or 0,
-            "used_bars": (lot_material.issued_bars or 0) - (lot_material.returned_bars or 0),
+            "defect_bars": lot_material.defect_bars or 0,
+            "used_bars": (lot_material.issued_bars or 0) - (lot_material.returned_bars or 0) - (lot_material.defect_bars or 0),
             "issued_at": lot_material.issued_at,
             "status": lot_material.status,
             "notes": lot_material.notes,
-            "created_at": lot_material.created_at
+            "closed_at": lot_material.closed_at,
+            "closed_by": lot_material.closed_by,
+            "created_at": lot_material.created_at,
+            "lot_status": lot.status,
+            "setup_status": None  # Для нового материала еще нет setup
         }
     except HTTPException:
         raise
