@@ -24,6 +24,7 @@ from .routers import cards as cards_router
 from .routers import time_tracking as time_tracking_router
 from .routers import materials as materials_router
 from .routers import drawings as drawings_router
+from .routers import morning_dashboard as morning_dashboard_router
 from src.models.setup import SetupStatus, BatchLabelInfo
 from src.models.reports import LotSummaryReport, ProductionPerformanceReport, QualityReport
 from typing import Optional, Dict, List, Union
@@ -4406,6 +4407,7 @@ app.include_router(cards_router.router)
 app.include_router(time_tracking_router.router)
 app.include_router(materials_router.router)
 app.include_router(drawings_router.router)
+app.include_router(morning_dashboard_router.router)
 from .text2sql.routers import router as text2sql_router, admin_router as text2sql_admin_router, examples_router as text2sql_examples_router
 app.include_router(text2sql_router)
 app.include_router(text2sql_admin_router)
