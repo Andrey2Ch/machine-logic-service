@@ -157,7 +157,7 @@ async def get_acceptance_discrepancies(
             FROM lots l
             JOIN setup_jobs sj ON sj.lot_id = l.id
             LEFT JOIN machines m ON m.id = sj.machine_id
-            WHERE l.created_at >= NOW() - INTERVAL ':days days'
+            WHERE l.created_at >= NOW() - INTERVAL '1 day' * :days
               AND l.status NOT IN ('cancelled', 'closed')
               AND sj.machine_id IS NOT NULL
         )
@@ -176,7 +176,7 @@ async def get_acceptance_discrepancies(
         WHERE machine_name IS NOT NULL
           AND declared > 0  -- Только где был пересчет склада
         GROUP BY machine_name
-        ORDER BY ABS(discrepancy_abs) DESC;
+        ORDER BY ABS(SUM(declared - accepted)) DESC;
         """)
         
         result = db.execute(query, {"days": days}).fetchall()
@@ -248,7 +248,7 @@ async def get_defect_rates(
             FROM lots l
             JOIN setup_jobs sj ON sj.lot_id = l.id
             LEFT JOIN machines m ON m.id = sj.machine_id
-            WHERE l.created_at >= NOW() - INTERVAL ':days days'
+            WHERE l.created_at >= NOW() - INTERVAL '1 day' * :days
               AND l.status NOT IN ('cancelled')
               AND sj.machine_id IS NOT NULL
         )
