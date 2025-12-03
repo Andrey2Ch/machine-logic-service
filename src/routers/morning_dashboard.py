@@ -180,10 +180,10 @@ async def get_acceptance_discrepancies(
             COUNT(DISTINCT lot_id) as lot_count,
             SUM(declared) as total_declared,
             SUM(accepted) as total_accepted,
-            SUM(declared - accepted) as discrepancy_abs,
+            SUM(accepted - declared) as discrepancy_abs,
             CASE 
                 WHEN SUM(declared) > 0 
-                THEN ROUND(((SUM(declared) - SUM(accepted))::numeric / SUM(declared)) * 100, 2)
+                THEN ROUND(((SUM(accepted) - SUM(declared))::numeric / SUM(declared)) * 100, 2)
                 ELSE 0 
             END as discrepancy_percent
         FROM lot_stats
