@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import text, func
 from typing import List, Optional, Dict, Any
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date
 from pydantic import BaseModel
 import os
 import httpx
@@ -515,21 +515,148 @@ async def get_machine_plan():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
+    """
+    Статистика батчей на переборку от операторов за дату
+    
+    Returns:
+        {
+            'total_batches': int,
+            'total_parts': int,
+            'by_machine': [{'machine': str, 'batches': int, 'parts': int, 'percent': float}],
+            'by_operator': [{'operator': str, 'batches': int, 'parts': int}]
+        }
+    """
+    try:
+        # Батчи на переборку от операторов за дату
+        query = text("""
+        WITH operator_rework AS (
+            SELECT 
+                b.id,
+                b.initial_quantity,
+                m.name as machine_name,
+                e.full_name as operator_name
+            FROM batches b
+            JOIN setup_jobs sj ON b.setup_job_id = sj.id
+            JOIN machines m ON sj.machine_id = m.id
+            JOIN employees e ON b.operator_id = e.id
+            WHERE b.parent_batch_id IS NULL
+              AND b.original_location IN ('sorting', 'pending_rework')
+              AND DATE(b.batch_time) = :target_date
+        )
+        SELECT 
+            COUNT(*) as total_batches,
+            COALESCE(SUM(initial_quantity), 0) as total_parts
+        FROM operator_rework
+        """)
+        
+        result = db.execute(query, {'target_date': target_date}).fetchone()
+        total_batches = result.total_batches
+        total_parts = result.total_parts
+        
+        # По станкам
+        by_machine_query = text("""
+        SELECT 
+            m.name as machine_name,
+            COUNT(b.id) as batch_count,
+            COALESCE(SUM(b.initial_quantity), 0) as parts_count
+        FROM batches b
+        JOIN setup_jobs sj ON b.setup_job_id = sj.id
+        JOIN machines m ON sj.machine_id = m.id
+        WHERE b.parent_batch_id IS NULL
+          AND b.original_location IN ('sorting', 'pending_rework')
+          AND DATE(b.batch_time) = :target_date
+        GROUP BY m.name
+        ORDER BY parts_count DESC
+        """)
+        
+        by_machine = db.execute(by_machine_query, {'target_date': target_date}).fetchall()
+        
+        # По операторам
+        by_operator_query = text("""
+        SELECT 
+            e.full_name as operator_name,
+            COUNT(b.id) as batch_count,
+            COALESCE(SUM(b.initial_quantity), 0) as parts_count
+        FROM batches b
+        JOIN employees e ON b.operator_id = e.id
+        WHERE b.parent_batch_id IS NULL
+          AND b.original_location IN ('sorting', 'pending_rework')
+          AND DATE(b.batch_time) = :target_date
+        GROUP BY e.full_name
+        ORDER BY parts_count DESC
+        """)
+        
+        by_operator = db.execute(by_operator_query, {'target_date': target_date}).fetchall()
+        
+        return {
+            'total_batches': total_batches,
+            'total_parts': total_parts,
+            'by_machine': [
+                {
+                    'machine': row.machine_name,
+                    'batches': row.batch_count,
+                    'parts': row.parts_count,
+                    'percent': round((row.parts_count / total_parts * 100) if total_parts > 0 else 0, 1)
+                }
+                for row in by_machine
+            ],
+            'by_operator': [
+                {
+                    'operator': row.operator_name,
+                    'batches': row.batch_count,
+                    'parts': row.parts_count
+                }
+                for row in by_operator
+            ]
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting operator rework stats: {e}", exc_info=True)
+        return {'total_batches': 0, 'total_parts': 0, 'by_machine': [], 'by_operator': []}
+
+
+def get_next_workday(from_date: date) -> date:
+    """
+    Возвращает следующий рабочий день с учетом израильских выходных (пятница, суббота)
+    """
+    next_day = from_date + timedelta(days=1)
+    # Пятница (4) → воскресенье (+2 дня)
+    if next_day.weekday() == 4:  # Friday
+        return next_day + timedelta(days=2)
+    # Суббота (5) → воскресенье (+1 день)
+    elif next_day.weekday() == 5:  # Saturday
+        return next_day + timedelta(days=1)
+    return next_day
+
+
 @router.get("/morning/summary")
 async def get_morning_summary(
+    target_date: str = None,  # Формат: YYYY-MM-DD
     db: Session = Depends(get_db_session)
 ):
     """
-    Полная утренняя сводка - все ключевые метрики для активных лотов
+    Полная утренняя сводка - все ключевые метрики
+    
+    Параметры:
+    - target_date: дата для отчета (по умолчанию: сегодня)
     """
     try:
-        # Получаем все данные параллельно
+        # Определяем целевую дату
+        if target_date:
+            report_date = datetime.strptime(target_date, '%Y-%m-%d').date()
+        else:
+            report_date = date.today()
+        
+        # Следующий рабочий день с учетом израильских выходных
+        next_workday = get_next_workday(report_date)
+        
+        # Получаем все данные
         discrepancies = await get_acceptance_discrepancies(db)
         defect_rates = await get_defect_rates(db)
-        deadlines_today = await get_deadlines(0, db)
-        deadlines_tomorrow = await get_deadlines(1, db)
+        operator_rework = await get_operator_rework_stats(report_date, db)
         
-        # TODO: Добавить отпуска из calendar API
+        # TODO: Добавить отпуска из calendar API (с учетом выходных)
         
         # Сводная статистика
         total_discrepancy = sum(d.discrepancy_absolute for d in discrepancies)
@@ -538,18 +665,19 @@ async def get_morning_summary(
         
         return {
             "timestamp": datetime.now(timezone.utc),
+            "report_date": report_date.isoformat(),
+            "next_workday": next_workday.isoformat(),
             "acceptance_discrepancies": discrepancies,
             "defect_rates": defect_rates,
+            "operator_rework_stats": operator_rework,
             "absences_today": [],  # TODO: Интеграция с calendar
-            "absences_tomorrow": [],  # TODO: Интеграция с calendar
-            "deadlines_today": deadlines_today,
-            "deadlines_tomorrow": deadlines_tomorrow,
+            "absences_tomorrow": [],  # TODO: Интеграция с calendar (next_workday)
             "summary_stats": {
                 "total_discrepancy_parts": total_discrepancy,
                 "critical_discrepancies_count": critical_count,
                 "average_defect_rate": round(avg_defect_rate, 2),
-                "deadlines_today_count": len(deadlines_today),
-                "deadlines_tomorrow_count": len(deadlines_tomorrow)
+                "operator_rework_batches": operator_rework['total_batches'],
+                "operator_rework_parts": operator_rework['total_parts']
             }
         }
         
