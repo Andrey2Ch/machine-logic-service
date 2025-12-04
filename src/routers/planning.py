@@ -114,8 +114,8 @@ async def recommend_machines(
             l.assigned_machine_id as machine_id,
             SUM(
                 CASE 
-                    WHEN p.avg_cycle_time_sec IS NOT NULL AND l.total_planned_quantity IS NOT NULL
-                    THEN (p.avg_cycle_time_sec * l.total_planned_quantity) / 3600.0
+                    WHEN p.cycle_time IS NOT NULL AND l.total_planned_quantity IS NOT NULL
+                    THEN (p.cycle_time * l.total_planned_quantity) / 3600.0
                     ELSE 0
                 END
             ) as queue_hours
