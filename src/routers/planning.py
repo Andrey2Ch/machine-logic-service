@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from typing import Optional, List
 from pydantic import BaseModel
-from src.database import get_db
+from ..database import get_db_session
 import logging
 
 logger = logging.getLogger(__name__)
@@ -60,7 +60,7 @@ async def recommend_machines(
     part_length: Optional[float] = Query(None, description="Длина детали (мм)"),
     part_id: Optional[int] = Query(None, description="ID детали"),
     drawing_number: Optional[str] = Query(None, description="Номер чертежа"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db_session)
 ):
     """
     Рекомендует лучшие станки для детали с объяснением.
