@@ -156,6 +156,7 @@ class BatchDB(Base):
     current_quantity = Column(Integer, nullable=False) # Актуальное кол-во ПОСЛЕ приемки/инспекции
     
     current_location = Column(String, nullable=False, default='production')
+    original_location = Column(String, nullable=True) # Исходный статус ДО архивирования (для статистики)
 
     operator_id = Column(Integer, ForeignKey("employees.id"), nullable=True)
     warehouse_employee_id = Column(Integer, ForeignKey("employees.id"), nullable=True)

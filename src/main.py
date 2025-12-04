@@ -510,6 +510,7 @@ async def save_reading(reading_input: ReadingInput, db: Session = Depends(get_db
                         initial_quantity=0, 
                         current_quantity=reading_input.value, # Текущее кол-во = показаниям
                         current_location='production',
+                        original_location='production',  # Сохраняем исходный статус
                         batch_time=reading_db.created_at,
                         operator_id=reading_input.operator_id,
                         created_at=reading_db.created_at # Используем время показаний
@@ -542,6 +543,7 @@ async def save_reading(reading_input: ReadingInput, db: Session = Depends(get_db
                         initial_quantity=prev_reading, # Начальное кол-во = предыдущие показания
                         current_quantity=quantity_in_batch, # Текущее кол-во = разница
                         current_location='production',
+                        original_location='production',  # Сохраняем исходный статус
                         batch_time=reading_db.created_at,
                         operator_id=reading_input.operator_id,
                         created_at=reading_db.created_at # Используем время показаний
@@ -1394,7 +1396,9 @@ async def inspect_batch(batch_id: int, payload: InspectBatchPayload, db: Session
         if total_requested > batch.current_quantity:
             raise HTTPException(status_code=400, detail="Sum of quantities exceeds batch size")
 
-        # Архивируем исходный батч
+        # Архивируем исходный батч (СОХРАНЯЕМ original_location!)
+        if batch.original_location is None:
+            batch.original_location = batch.current_location  # Сохраняем исходный статус
         batch.current_location = 'archived'
 
         created_batches = []
@@ -1408,6 +1412,7 @@ async def inspect_batch(batch_id: int, payload: InspectBatchPayload, db: Session
                 current_quantity=qty,
                 recounted_quantity=None,
                 current_location=location,
+                original_location=location,  # Сохраняем исходный статус дочернего батча
                 operator_id=payload.inspector_id,
                 parent_batch_id=batch.id,
                 batch_time=datetime.now(),
