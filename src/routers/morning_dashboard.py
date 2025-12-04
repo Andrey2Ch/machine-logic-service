@@ -19,7 +19,12 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Morning Dashboard"])
 
 # URL израматского дашборда для вызова API morning-report
-ISRAMAT_DASHBOARD_URL = os.getenv("ISRAMAT_DASHBOARD_URL", "http://localhost:3000")
+_dashboard_url = os.getenv("ISRAMAT_DASHBOARD_URL", "http://localhost:3000")
+# Автоматически добавляем https:// если отсутствует протокол
+if not _dashboard_url.startswith(('http://', 'https://')):
+    ISRAMAT_DASHBOARD_URL = f"https://{_dashboard_url}"
+else:
+    ISRAMAT_DASHBOARD_URL = _dashboard_url
 
 
 # ==================== MODELS ====================
