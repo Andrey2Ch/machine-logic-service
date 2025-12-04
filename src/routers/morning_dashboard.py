@@ -650,14 +650,15 @@ async def get_absences_for_date(target_date: date, db: Session) -> list:
         # Прямой SQL запрос к таблице calendar_requests
         query = text("""
             SELECT 
+                cr.id,
                 e.full_name as employee_name,
-                COALESCE(r.name, 'Сотрудник') as role_name,
+                'Сотрудник' as role_name,
                 crt.name as request_type_name,
                 cr.start_date,
-                cr.end_date
+                cr.end_date,
+                cr.status
             FROM calendar_requests cr
             JOIN employees e ON e.id = cr.employee_id
-            LEFT JOIN roles r ON r.id = e.role_id
             JOIN calendar_request_types crt ON crt.id = cr.request_type_id
             WHERE cr.status = 'approved'
               AND cr.start_date <= :target_date
