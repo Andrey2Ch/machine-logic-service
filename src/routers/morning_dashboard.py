@@ -630,6 +630,66 @@ def get_next_workday(from_date: date) -> date:
     return next_day
 
 
+async def get_absences_for_date(target_date: date, db: Session) -> list:
+    """
+    Получает отпуска и отсутствия на указанную дату НАПРЯМУЮ из БД
+    
+    Returns:
+        [
+            {
+                'employee_name': str,
+                'role': str,
+                'reason': str,
+                'start_date': str,
+                'end_date': str,
+                'days_remaining': int
+            }
+        ]
+    """
+    try:
+        # Прямой SQL запрос к таблице calendar_requests
+        query = text("""
+            SELECT 
+                e.full_name as employee_name,
+                COALESCE(r.name, 'Сотрудник') as role_name,
+                crt.name as request_type_name,
+                cr.start_date,
+                cr.end_date
+            FROM calendar_requests cr
+            JOIN employees e ON e.id = cr.employee_id
+            LEFT JOIN roles r ON r.id = e.role_id
+            JOIN calendar_request_types crt ON crt.id = cr.request_type_id
+            WHERE cr.status = 'approved'
+              AND cr.start_date <= :target_date
+              AND cr.end_date >= :target_date
+              AND e.is_active = true
+            ORDER BY e.full_name
+        """)
+        
+        result = db.execute(query, {'target_date': target_date}).fetchall()
+        
+        absences = []
+        for row in result:
+            # Вычисляем оставшиеся дни
+            end_date = row.end_date
+            days_remaining = (end_date - target_date).days
+            
+            absences.append({
+                'employee_name': row.employee_name,
+                'role': row.role_name,
+                'reason': row.request_type_name,
+                'start_date': row.start_date.isoformat(),
+                'end_date': row.end_date.isoformat(),
+                'days_remaining': max(0, days_remaining)
+            })
+        
+        return absences
+        
+    except Exception as e:
+        logger.error(f"Error getting absences from DB: {e}", exc_info=True)
+        return []
+
+
 @router.get("/morning/summary")
 async def get_morning_summary(
     target_date: str = None,  # Формат: YYYY-MM-DD
@@ -656,7 +716,9 @@ async def get_morning_summary(
         defect_rates = await get_defect_rates(db)
         operator_rework = await get_operator_rework_stats(report_date, db)
         
-        # TODO: Добавить отпуска из calendar API (с учетом выходных)
+        # Получаем отпуска и отсутствия НАПРЯМУЮ из БД
+        absences_today = await get_absences_for_date(report_date, db)
+        absences_tomorrow = await get_absences_for_date(next_workday, db)
         
         # Сводная статистика
         total_discrepancy = sum(d.discrepancy_absolute for d in discrepancies)
@@ -670,8 +732,8 @@ async def get_morning_summary(
             "acceptance_discrepancies": discrepancies,
             "defect_rates": defect_rates,
             "operator_rework_stats": operator_rework,
-            "absences_today": [],  # TODO: Интеграция с calendar
-            "absences_tomorrow": [],  # TODO: Интеграция с calendar (next_workday)
+            "absences_today": absences_today,
+            "absences_tomorrow": absences_tomorrow,
             "summary_stats": {
                 "total_discrepancy_parts": total_discrepancy,
                 "critical_discrepancies_count": critical_count,
