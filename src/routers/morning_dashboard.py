@@ -105,10 +105,8 @@ class MachinePlan(BaseModel):
 
 DEFAULT_THRESHOLDS = {
     "acceptance_discrepancy": {
-        "critical_percent": 5.0,
-        "critical_absolute": 200,
-        "warning_percent": 2.0,
-        "warning_absolute": 50
+        "critical_percent": 5.0,  # Только % (убрали абсолютные значения)
+        "warning_percent": 2.0
     },
     "defect_rate": {
         "critical_percent": 5.0,
@@ -120,17 +118,17 @@ DEFAULT_THRESHOLDS = {
 # ==================== HELPER FUNCTIONS ====================
 
 def calculate_status(discrepancy_abs: int, discrepancy_percent: float, thresholds: dict) -> str:
-    """Определяет статус на основе порогов"""
+    """Определяет статус ТОЛЬКО на основе процентов (без абсолютных значений)"""
     # Только недостачи считаем проблемой (отрицательные значения)
     if discrepancy_abs >= 0:
         return 'ok'  # Излишек - не проблема
     
-    abs_value = abs(discrepancy_abs)
     abs_percent = abs(discrepancy_percent)
     
-    if abs_percent >= thresholds['critical_percent'] or abs_value >= thresholds['critical_absolute']:
+    # Только проценты! Убрали критерии по абсолютным значениям
+    if abs_percent >= thresholds['critical_percent']:
         return 'critical'
-    elif abs_percent >= thresholds['warning_percent'] or abs_value >= thresholds['warning_absolute']:
+    elif abs_percent >= thresholds['warning_percent']:
         return 'warning'
     else:
         return 'ok'
