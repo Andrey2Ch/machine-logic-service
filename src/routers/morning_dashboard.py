@@ -32,7 +32,7 @@ else:
 class AcceptanceDiscrepancy(BaseModel):
     """Расхождение при приемке для одного станка"""
     machine_name: str
-    lot_count: int  # Количество активных лотов
+    drawing_numbers: str  # Номера чертежей (через запятую если несколько)
     declared_quantity: int  # Заявлено операторами (на момент пересчета склада)
     accepted_quantity: int  # Фактически принял склад
     discrepancy_absolute: int  # Разница (может быть отрицательной)
@@ -152,6 +152,7 @@ async def get_acceptance_discrepancies(
                 l.id as lot_id,
                 sj.machine_id,
                 m.name as machine_name,
+                p.drawing_number,
                 
                 -- Заявлено на момент пересчета склада (declared_quantity_at_warehouse_recount)
                 COALESCE((
@@ -181,6 +182,7 @@ async def get_acceptance_discrepancies(
                 
             FROM lots l
             JOIN setup_jobs sj ON sj.lot_id = l.id
+            JOIN parts p ON p.id = l.part_id
             LEFT JOIN machines m ON m.id = sj.machine_id
             WHERE (
                 l.status = 'in_production'  -- Все в производстве
@@ -203,7 +205,7 @@ async def get_acceptance_discrepancies(
         )
         SELECT 
             machine_name,
-            COUNT(DISTINCT lot_id) as lot_count,
+            STRING_AGG(DISTINCT drawing_number, ', ' ORDER BY drawing_number) as drawing_numbers,
             SUM(declared) as total_declared,
             SUM(accepted) as total_accepted,
             SUM(accepted - declared) as discrepancy_abs,
@@ -229,7 +231,7 @@ async def get_acceptance_discrepancies(
             
             discrepancies.append(AcceptanceDiscrepancy(
                 machine_name=row.machine_name,
-                lot_count=row.lot_count,
+                drawing_numbers=row.drawing_numbers or '-',
                 declared_quantity=int(row.total_declared),
                 accepted_quantity=int(row.total_accepted),
                 discrepancy_absolute=int(row.discrepancy_abs),
