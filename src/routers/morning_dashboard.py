@@ -532,9 +532,9 @@ async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
         {
             'total_batches': int,
             'total_parts': int,
-            'by_machine': [...],
-            'by_operator': [...],
-            'shift_date': date  # Дата смены
+            'by_machine': [{'machine': str, 'batches': [...], ...}],
+            'by_operator': [{'operator': str, 'batches': [...], ...}],
+            'shift_date': date
         }
     """
     try:
@@ -545,96 +545,101 @@ async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
         shift_start = datetime.combine(shift_date, datetime.min.time().replace(hour=6))
         shift_end = shift_start + timedelta(days=1)
         
-        # Батчи на переборку за эту смену
-        query = text("""
-        WITH operator_rework AS (
-            SELECT 
-                b.id,
-                b.current_quantity,
-                m.name as machine_name,
-                e.full_name as operator_name
-            FROM batches b
-            JOIN setup_jobs sj ON b.setup_job_id = sj.id
-            JOIN machines m ON sj.machine_id = m.id
-            JOIN employees e ON b.operator_id = e.id
-            WHERE b.parent_batch_id IS NULL
-              AND b.current_location IN ('sorting', 'sorting_warehouse')
-              AND b.batch_time >= :shift_start
-              AND b.batch_time < :shift_end
-        )
+        # Все батчи на переборку за эту смену (детальный список)
+        all_batches_query = text("""
         SELECT 
-            COUNT(*) as total_batches,
-            COALESCE(SUM(current_quantity), 0) as total_parts
-        FROM operator_rework
-        """)
-        
-        result = db.execute(query, {'shift_start': shift_start, 'shift_end': shift_end}).fetchone()
-        total_batches = result.total_batches
-        total_parts = result.total_parts
-        
-        # По станкам
-        by_machine_query = text("""
-        SELECT 
+            b.id,
+            b.batch_time,
+            b.current_quantity,
+            b.current_location,
             m.name as machine_name,
-            COUNT(b.id) as batch_count,
-            COALESCE(SUM(b.current_quantity), 0) as parts_count,
-            STRING_AGG(DISTINCT p.drawing_number, ', ' ORDER BY p.drawing_number) as drawing_numbers,
-            STRING_AGG(DISTINCT l.lot_number, ', ' ORDER BY l.lot_number) as lot_numbers
+            e.full_name as operator_name,
+            p.drawing_number,
+            l.lot_number
         FROM batches b
         JOIN setup_jobs sj ON b.setup_job_id = sj.id
         JOIN machines m ON sj.machine_id = m.id
+        JOIN employees e ON b.operator_id = e.id
         LEFT JOIN lots l ON b.lot_id = l.id
         LEFT JOIN parts p ON l.part_id = p.id
         WHERE b.parent_batch_id IS NULL
           AND b.current_location IN ('sorting', 'sorting_warehouse')
           AND b.batch_time >= :shift_start
           AND b.batch_time < :shift_end
-        GROUP BY m.name
-        ORDER BY parts_count DESC
+        ORDER BY b.batch_time
         """)
         
-        by_machine = db.execute(by_machine_query, {'shift_start': shift_start, 'shift_end': shift_end}).fetchall()
+        all_batches = db.execute(all_batches_query, {'shift_start': shift_start, 'shift_end': shift_end}).fetchall()
         
-        # По операторам
-        by_operator_query = text("""
-        SELECT 
-            e.full_name as operator_name,
-            COUNT(b.id) as batch_count,
-            COALESCE(SUM(b.current_quantity), 0) as parts_count
-        FROM batches b
-        JOIN employees e ON b.operator_id = e.id
-        WHERE b.parent_batch_id IS NULL
-          AND b.current_location IN ('sorting', 'sorting_warehouse')
-          AND b.batch_time >= :shift_start
-          AND b.batch_time < :shift_end
-        GROUP BY e.full_name
-        ORDER BY parts_count DESC
-        """)
+        total_batches = len(all_batches)
+        total_parts = sum(b.current_quantity for b in all_batches)
         
-        by_operator = db.execute(by_operator_query, {'shift_start': shift_start, 'shift_end': shift_end}).fetchall()
+        # Группируем по станкам
+        by_machine_dict = {}
+        for b in all_batches:
+            if b.machine_name not in by_machine_dict:
+                by_machine_dict[b.machine_name] = {
+                    'machine': b.machine_name,
+                    'batches_list': [],
+                    'total_parts': 0
+                }
+            by_machine_dict[b.machine_name]['batches_list'].append({
+                'id': b.id,
+                'batch_time': b.batch_time.isoformat() if b.batch_time else None,
+                'quantity': b.current_quantity,
+                'location': b.current_location,
+                'operator': b.operator_name,
+                'drawing_number': b.drawing_number or '-',
+                'lot_number': b.lot_number or '-'
+            })
+            by_machine_dict[b.machine_name]['total_parts'] += b.current_quantity
+        
+        by_machine = [
+            {
+                'machine': data['machine'],
+                'batches_count': len(data['batches_list']),
+                'parts': data['total_parts'],
+                'percent': round((data['total_parts'] / total_parts * 100) if total_parts > 0 else 0, 1),
+                'batches': data['batches_list']
+            }
+            for data in sorted(by_machine_dict.values(), key=lambda x: x['total_parts'], reverse=True)
+        ]
+        
+        # Группируем по операторам
+        by_operator_dict = {}
+        for b in all_batches:
+            if b.operator_name not in by_operator_dict:
+                by_operator_dict[b.operator_name] = {
+                    'operator': b.operator_name,
+                    'batches_list': [],
+                    'total_parts': 0
+                }
+            by_operator_dict[b.operator_name]['batches_list'].append({
+                'id': b.id,
+                'batch_time': b.batch_time.isoformat() if b.batch_time else None,
+                'quantity': b.current_quantity,
+                'location': b.current_location,
+                'machine': b.machine_name,
+                'drawing_number': b.drawing_number or '-',
+                'lot_number': b.lot_number or '-'
+            })
+            by_operator_dict[b.operator_name]['total_parts'] += b.current_quantity
+        
+        by_operator = [
+            {
+                'operator': data['operator'],
+                'batches_count': len(data['batches_list']),
+                'parts': data['total_parts'],
+                'batches': data['batches_list']
+            }
+            for data in sorted(by_operator_dict.values(), key=lambda x: x['total_parts'], reverse=True)
+        ]
         
         return {
             'total_batches': total_batches,
             'total_parts': total_parts,
-            'by_machine': [
-                {
-                    'machine': row.machine_name,
-                    'batches': row.batch_count,
-                    'parts': row.parts_count,
-                    'percent': round((row.parts_count / total_parts * 100) if total_parts > 0 else 0, 1),
-                    'drawing_numbers': row.drawing_numbers or '-',
-                    'lot_numbers': row.lot_numbers or '-'
-                }
-                for row in by_machine
-            ],
-            'by_operator': [
-                {
-                    'operator': row.operator_name,
-                    'batches': row.batch_count,
-                    'parts': row.parts_count
-                }
-                for row in by_operator
-            ],
+            'by_machine': by_machine,
+            'by_operator': by_operator,
             'shift_date': shift_date.isoformat()
         }
         

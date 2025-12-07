@@ -914,8 +914,8 @@ async def recommend_with_queue_analysis(
                     slack_after=lot.slack_days  # slack не изменится если очередь короче
                 ))
     
-    # Сортируем по score
-    recommendations.sort(key=lambda x: x.score, reverse=True)
+    # Сортируем по score (desc), потом по queue_hours (asc) при равном score
+    recommendations.sort(key=lambda x: (-x.score, x.queue_hours))
     
     return SmartRecommendationsResponse(
         new_lot={
