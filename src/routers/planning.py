@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from datetime import datetime, timedelta, timezone
 from ..database import get_db_session
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/planning", tags=["Planning"])
@@ -252,13 +253,23 @@ async def recommend_machines(
     
     # 5. Ищем родственные чертежи в очередях (для группировки похожих деталей)
     # Родственный чертёж = тот же базовый номер (например 1409-04-1 и 1409-04-2 → база 1409-04)
+    # ВАЖНО: суффикс только ОДНА цифра! 577-42 это база, не 577!
     related_in_queue = {}  # machine_id -> {lot_number, drawing, position}
     if drawing_number:
-        # Извлекаем базу чертежа: "1409-04-1" → "1409-04"
-        parts_of_drawing = drawing_number.rsplit('-', 1)
-        if len(parts_of_drawing) == 2 and parts_of_drawing[1].isdigit():
-            base_drawing = parts_of_drawing[0]
-            
+        # Извлекаем базу чертежа: "1409-04-1" → "1409-04", но "577-42" остаётся "577-42"
+        # Суффикс только если заканчивается на -N где N = одна цифра (1-9)
+        suffix_match = re.match(r'^(.+)-(\d)$', drawing_number)
+        if suffix_match:
+            # Есть суффикс: 1409-04-1 → база = 1409-04
+            base_drawing = suffix_match.group(1)
+        else:
+            # Нет суффикса: 577-42 сам является базой
+            base_drawing = drawing_number
+        
+        if base_drawing:
+            # Ищем родственные: саму базу ИЛИ с суффиксом -N (одна цифра)
+            # Например для 577-42-1: ищем 577-42 или 577-42-2, 577-42-3...
+            # Для 577-42: ищем 577-42-1, 577-42-2...
             related_query = text("""
                 SELECT 
                     l.assigned_machine_id as machine_id,
@@ -270,13 +281,20 @@ async def recommend_machines(
                 JOIN parts p ON l.part_id = p.id
                 WHERE l.status = 'assigned'
                   AND l.assigned_machine_id IS NOT NULL
-                  AND p.drawing_number LIKE :base_pattern
                   AND p.drawing_number != :exact_drawing
+                  AND (
+                      p.drawing_number = :base_drawing
+                      OR p.drawing_number ~ :base_regex
+                  )
                 ORDER BY l.assigned_machine_id, l.assigned_order DESC
             """)
             
+            # Regex для базы + одна цифра: ^577-42-\d$
+            base_regex = f"^{re.escape(base_drawing)}-\\d$"
+            
             related_result = db.execute(related_query, {
-                "base_pattern": base_drawing + "-%",
+                "base_drawing": base_drawing,
+                "base_regex": base_regex,
                 "exact_drawing": drawing_number
             }).fetchall()
             
@@ -617,11 +635,13 @@ async def recommend_with_queue_analysis(
         })
     
     # Вспомогательная функция для определения базы чертежа
+    # ВАЖНО: суффикс только ОДНА цифра! 577-42 это база, не 577!
     def get_drawing_base(d):
         if not d:
             return ""
-        parts = d.rsplit('-', 1)
-        return parts[0] if len(parts) == 2 and parts[1].isdigit() else d
+        # Суффикс только если заканчивается на -N где N = одна цифра (1-9)
+        suffix_match = re.match(r'^(.+)-(\d)$', d)
+        return suffix_match.group(1) if suffix_match else d
     
     # 4. Анализируем каждый станок
     recommendations = []

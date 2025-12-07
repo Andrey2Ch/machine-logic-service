@@ -587,7 +587,7 @@ async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
         total_parts = result.total_parts
         
         # По станкам
-        # Связь: batches -> setup_jobs -> lots -> parts
+        # Связь: batches -> lots -> parts (batches имеет прямое поле lot_id)
         by_machine_query = text("""
         SELECT 
             m.name as machine_name,
@@ -598,7 +598,7 @@ async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
         FROM batches b
         JOIN setup_jobs sj ON b.setup_job_id = sj.id
         JOIN machines m ON sj.machine_id = m.id
-        LEFT JOIN lots l ON sj.lot_id = l.id
+        LEFT JOIN lots l ON b.lot_id = l.id
         LEFT JOIN parts p ON l.part_id = p.id
         WHERE b.parent_batch_id IS NULL
           AND b.current_location IN ('sorting', 'sorting_warehouse')
