@@ -519,32 +519,22 @@ async def get_machine_plan():
 
 async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
     """
-    Статистика батчей на переборку от операторов за последний рабочий день
+    Статистика батчей, ожидающих проверки ОТК
     
-    Берет батчи с current_location IN ('sorting', 'sorting_warehouse'),
-    созданные за последний рабочий день (пропуская выходные - пятницу и субботу):
+    Берет ВСЕ батчи с current_location IN ('sorting', 'sorting_warehouse') БЕЗ фильтра по дате:
     - 'sorting' - батчи от операторов, еще не принятые на складе
     - 'sorting_warehouse' - батчи на переборку, принятые на складе, но еще не взятые ОТК
-    
-    Если сегодня воскресенье - показывает батчи за четверг (последний рабочий день)
-    Если сегодня понедельник - показывает батчи за четверг (пятница и суббота - выходные)
     
     Returns:
         {
             'total_batches': int,
             'total_parts': int,
             'by_machine': [{'machine': str, 'batches': int, 'parts': int, 'percent': float, 'drawing_numbers': str, 'lot_numbers': str}],
-            'by_operator': [{'operator': str, 'batches': int, 'parts': int}],
-            'report_date': date  # Дата, за которую показывается отчет
+            'by_operator': [{'operator': str, 'batches': int, 'parts': int}]
         }
     """
     try:
-        # Получаем последний рабочий день (пропускаем пятницу и субботу)
-        report_date = get_previous_workday(target_date)
-        
-        # Батчи на переборку от операторов: current_location IN ('sorting', 'sorting_warehouse')
-        # 'sorting' - еще не приняты на складе
-        # 'sorting_warehouse' - приняты на складе, но еще не взяты ОТК
+        # Берем ВСЕ батчи в статусе sorting или sorting_warehouse (без фильтра по дате)
         query = text("""
         WITH operator_rework AS (
             SELECT 
@@ -558,7 +548,6 @@ async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
             JOIN employees e ON b.operator_id = e.id
             WHERE b.parent_batch_id IS NULL
               AND b.current_location IN ('sorting', 'sorting_warehouse')
-              AND DATE(b.batch_time) = :report_date
         )
         SELECT 
             COUNT(*) as total_batches,
@@ -566,12 +555,11 @@ async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
         FROM operator_rework
         """)
         
-        result = db.execute(query, {'report_date': report_date}).fetchone()
+        result = db.execute(query).fetchone()
         total_batches = result.total_batches
         total_parts = result.total_parts
         
         # По станкам
-        # Связь: batches -> lots -> parts (batches имеет прямое поле lot_id)
         by_machine_query = text("""
         SELECT 
             m.name as machine_name,
@@ -586,12 +574,11 @@ async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
         LEFT JOIN parts p ON l.part_id = p.id
         WHERE b.parent_batch_id IS NULL
           AND b.current_location IN ('sorting', 'sorting_warehouse')
-          AND DATE(b.batch_time) = :report_date
         GROUP BY m.name
         ORDER BY parts_count DESC
         """)
         
-        by_machine = db.execute(by_machine_query, {'report_date': report_date}).fetchall()
+        by_machine = db.execute(by_machine_query).fetchall()
         
         # По операторам
         by_operator_query = text("""
@@ -603,12 +590,11 @@ async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
         JOIN employees e ON b.operator_id = e.id
         WHERE b.parent_batch_id IS NULL
           AND b.current_location IN ('sorting', 'sorting_warehouse')
-          AND DATE(b.batch_time) = :report_date
         GROUP BY e.full_name
         ORDER BY parts_count DESC
         """)
         
-        by_operator = db.execute(by_operator_query, {'report_date': report_date}).fetchall()
+        by_operator = db.execute(by_operator_query).fetchall()
         
         return {
             'total_batches': total_batches,
@@ -631,8 +617,7 @@ async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
                     'parts': row.parts_count
                 }
                 for row in by_operator
-            ],
-            'report_date': report_date.isoformat()
+            ]
         }
         
     except Exception as e:

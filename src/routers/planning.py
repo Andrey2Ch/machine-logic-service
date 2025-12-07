@@ -472,6 +472,7 @@ class MachineQueueAnalysis(BaseModel):
     machine_id: int
     machine_name: str
     score: int
+    reasons: List[str]  # подробные объяснения
     current_diameter: Optional[float]
     queue_hours: float
     lots_in_queue: List[QueueLot]
@@ -764,24 +765,60 @@ async def recommend_with_queue_analysis(
                     
                     break
         
-        # Считаем score станка
+        # Считаем score станка и собираем reasons
         score = 50
+        reasons = []
         total_queue_hours = sum(l.work_hours for l in queue_lots)
         
+        # Диаметр
+        reasons.append(f"✅ Диаметр {diameter}мм подходит ({m.min_diameter or '?'}-{m.max_diameter or '?'})")
+        
+        # Очередь
         if total_queue_hours == 0:
             score += 25
+            reasons.append("✅ Очередь свободна")
         elif total_queue_hours < 24:
             score += 17
+            reasons.append(f"✅ Короткая очередь: {total_queue_hours:.0f}ч")
         elif total_queue_hours < 72:
             score += 8
+            reasons.append(f"⚠️ Средняя очередь: {total_queue_hours:.0f}ч")
+        elif total_queue_hours < 200:
+            score -= 10
+            reasons.append(f"⚠️ Большая очередь: {total_queue_hours:.0f}ч (-10)")
+        else:
+            score -= 20
+            reasons.append(f"🔴 Огромная очередь: {total_queue_hours:.0f}ч (-20)")
         
+        # Переналадка
         if not needs_setup:
             score += 25
+            if current_d:
+                reasons.append(f"✅ Без переналадки (сейчас {current_d}мм)")
+            else:
+                reasons.append("✅ Без переналадки")
+        else:
+            if current_d:
+                reasons.append(f"⚠️ Переналадка {current_d}мм → {diameter}мм")
+            else:
+                reasons.append("⚠️ Нужна переналадка")
+        
+        # Родственный чертёж
+        if drawing_number:
+            new_base = get_drawing_base(drawing_number)
+            for qlot in queue_lots:
+                if qlot.drawing_number:
+                    lot_base = get_drawing_base(qlot.drawing_number)
+                    if lot_base == new_base and qlot.drawing_number != drawing_number:
+                        score += 20
+                        reasons.append(f"🔗 Родственный чертёж: после {qlot.drawing_number}")
+                        break
         
         recommendations.append(MachineQueueAnalysis(
             machine_id=m.id,
             machine_name=m.name,
             score=min(score, 100),
+            reasons=reasons,
             current_diameter=current_d,
             queue_hours=round(total_queue_hours, 1),
             lots_in_queue=queue_lots,
