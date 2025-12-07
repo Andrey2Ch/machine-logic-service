@@ -683,7 +683,20 @@ async def recommend_with_queue_analysis(
         queue = machine_queues.get(m.id, [])
         queue.sort(key=lambda x: x["position"])
         
-        current_d = current_setups.get(m.id)
+        # Диаметр для проверки переналадки:
+        # 1. Сначала смотрим ПОСЛЕДНИЙ лот в очереди (новый лот идёт В КОНЕЦ!)
+        # 2. Если очередь пустая — смотрим текущий лот в работе
+        # 3. Если и то пустое — переналадка неизвестна
+        queue = machine_queues.get(m.id, [])
+        last_lot_diameter = None
+        if queue:
+            # Берём диаметр последнего лота в очереди
+            sorted_queue = sorted(queue, key=lambda x: x["position"])
+            last_lot = sorted_queue[-1]
+            last_lot_diameter = last_lot.get("diameter")
+        
+        # Если в очереди нет диаметра — берём из текущего setup
+        current_d = last_lot_diameter or current_setups.get(m.id)
         needs_setup = current_d is not None and abs(current_d - diameter) >= 0.5
         
         # Рассчитываем ETA и slack для каждого лота в очереди
@@ -801,38 +814,42 @@ async def recommend_with_queue_analysis(
         reasons = []
         total_queue_hours = sum(l.work_hours for l in queue_lots)
         
+        # Добавляем время переналадки к очереди если нужна
+        effective_queue = total_queue_hours
+        if needs_setup:
+            effective_queue += SETUP_TIME_NORMAL
+        
         # Диаметр
         reasons.append(f"✅ Диаметр {diameter}мм подходит ({m.min_diameter or '?'}-{m.max_diameter or '?'})")
         
-        # Очередь
-        if total_queue_hours == 0:
+        # Очередь (используем effective_queue с учётом переналадки)
+        if effective_queue == 0:
             score += 25
             reasons.append("✅ Очередь свободна")
-        elif total_queue_hours < 24:
+        elif effective_queue < 24:
             score += 17
-            reasons.append(f"✅ Короткая очередь: {total_queue_hours:.0f}ч")
-        elif total_queue_hours < 72:
+            reasons.append(f"✅ Короткая очередь: {effective_queue:.0f}ч")
+        elif effective_queue < 72:
             score += 8
-            reasons.append(f"⚠️ Средняя очередь: {total_queue_hours:.0f}ч")
-        elif total_queue_hours < 200:
+            reasons.append(f"⚠️ Средняя очередь: {effective_queue:.0f}ч")
+        elif effective_queue < 200:
             score -= 10
-            reasons.append(f"⚠️ Большая очередь: {total_queue_hours:.0f}ч (-10)")
+            reasons.append(f"⚠️ Большая очередь: {effective_queue:.0f}ч (-10)")
         else:
             score -= 20
-            reasons.append(f"🔴 Огромная очередь: {total_queue_hours:.0f}ч (-20)")
+            reasons.append(f"🔴 Огромная очередь: {effective_queue:.0f}ч (-20)")
         
-        # Переналадка
-        if not needs_setup:
-            score += 25
+        # Переналадка (информационно, не влияет на score - уже учтено в очереди)
+        if needs_setup:
+            if current_d:
+                reasons.append(f"⚠️ Переналадка {current_d}мм → {diameter}мм (+{SETUP_TIME_NORMAL:.0f}ч)")
+            else:
+                reasons.append(f"⚠️ Нужна переналадка (+{SETUP_TIME_NORMAL:.0f}ч)")
+        else:
             if current_d:
                 reasons.append(f"✅ Без переналадки (сейчас {current_d}мм)")
             else:
                 reasons.append("✅ Без переналадки")
-        else:
-            if current_d:
-                reasons.append(f"⚠️ Переналадка {current_d}мм → {diameter}мм")
-            else:
-                reasons.append("⚠️ Нужна переналадка")
         
         # Родственный чертёж
         if drawing_number:
@@ -851,7 +868,7 @@ async def recommend_with_queue_analysis(
             score=min(score, 100),
             reasons=reasons,
             current_diameter=current_d,
-            queue_hours=round(total_queue_hours, 1),
+            queue_hours=round(effective_queue, 1),  # С учётом переналадки
             lots_in_queue=queue_lots,
             recommended_position=recommended_pos,
             needs_setup_change=needs_setup,
