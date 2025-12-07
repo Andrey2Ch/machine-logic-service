@@ -109,13 +109,15 @@ async def recommend_machines(
                       for row in db.execute(current_setup_query).fetchall()}
     
     # 3. Получаем загрузку станков (часы в очереди)
+    # ВАЖНО: используем COALESCE т.к. total_planned_quantity может быть NULL
     queue_query = text("""
         SELECT 
             l.assigned_machine_id as machine_id,
             SUM(
                 CASE 
-                    WHEN p.avg_cycle_time IS NOT NULL AND l.total_planned_quantity IS NOT NULL
-                    THEN (p.avg_cycle_time * l.total_planned_quantity) / 3600.0
+                    WHEN p.avg_cycle_time IS NOT NULL 
+                         AND COALESCE(l.total_planned_quantity, l.initial_planned_quantity) IS NOT NULL
+                    THEN (p.avg_cycle_time * COALESCE(l.total_planned_quantity, l.initial_planned_quantity)) / 3600.0
                     ELSE 0
                 END
             ) as queue_hours
