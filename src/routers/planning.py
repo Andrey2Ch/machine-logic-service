@@ -914,6 +914,11 @@ async def recommend_with_queue_analysis(
                     slack_after=lot.slack_days  # slack не изменится если очередь короче
                 ))
     
+    # DEBUG: логируем все рекомендации до сортировки
+    logger.info(f"Total recommendations before sort: {len(recommendations)}")
+    for r in recommendations:
+        logger.info(f"  {r.machine_name}: score={r.score}, queue={r.queue_hours}")
+    
     # Сортируем по score (desc), потом по queue_hours (asc) при равном score
     recommendations.sort(key=lambda x: (-x.score, x.queue_hours))
     
@@ -928,7 +933,7 @@ async def recommend_with_queue_analysis(
             "part_id": part_id,
             "drawing_number": drawing_number
         },
-        recommendations=recommendations[:5],
+        recommendations=recommendations,  # TODO: вернуть [:5] после debug
         warnings=warnings
     )
 
