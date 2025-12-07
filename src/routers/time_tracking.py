@@ -6,11 +6,13 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import func, desc
 from typing import List, Optional
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
+from zoneinfo import ZoneInfo
 from src.database import get_db_session
 from src.models.time_tracking import TimeEntryDB, WorkShiftDB, TerminalDB, FaceEmbeddingDB
 from src.models.models import EmployeeDB
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +26,7 @@ class TimeEntryCreate(BaseModel):
     employee_id: Optional[int] = None
     telegram_id: Optional[int] = None  # альтернатива employee_id
     entry_type: str = Field(..., pattern="^(check_in|check_out)$")
-    method: str = Field(..., pattern="^(telegram|terminal|web|manual)$")
+    method: str = Field(..., pattern="^(telegram|terminal|web|manual|auto)$")
     
     # Геолокация (для Telegram)
     latitude: Optional[float] = None
@@ -71,6 +73,13 @@ class WorkShiftResponse(BaseModel):
 FACTORY_LAT = 32.016388  # Реальные координаты завода
 FACTORY_LON = 34.802740
 MAX_DISTANCE_METERS = 100  # максимальное расстояние от завода
+
+# Timezone для локального времени
+TIMEZONE_NAME = os.getenv("TIMEZONE") or os.getenv("BOT_TIMEZONE") or "Asia/Jerusalem"
+try:
+    LOCAL_TZ = ZoneInfo(TIMEZONE_NAME)
+except Exception:
+    LOCAL_TZ = ZoneInfo("UTC")
 
 
 # ==================== Вспомогательные функции ====================
@@ -166,6 +175,165 @@ async def update_work_shift(employee_id: int, shift_date: date, db: Session):
         db.add(shift)
     
     db.commit()
+
+
+async def check_and_create_auto_checkout(employee_id: int, db: Session):
+    """
+    Проверить и создать автоматический выход для незакрытых смен
+    
+    Логика (как в Next.js API):
+    - Дневная смена (вход до 17:00) → автоматический выход в 18:00, если сейчас после 19:00
+    - Ночная смена (вход после/в 17:00) → автоматический выход в 6:00 следующего дня, если сейчас после 7:00
+    """
+    # Получить все записи сотрудника, отсортированные по времени
+    all_entries = db.query(TimeEntryDB).filter(
+        TimeEntryDB.employee_id == employee_id
+    ).order_by(TimeEntryDB.entry_time).all()
+    
+    if not all_entries:
+        return None
+    
+    # Найти последний незакрытый вход
+    last_check_in = None
+    for entry in reversed(all_entries):
+        if entry.entry_type == 'check_in':
+            # Проверяем, есть ли выход после этого входа
+            has_checkout = any(
+                e.entry_type == 'check_out' and e.entry_time > entry.entry_time
+                for e in all_entries
+            )
+            if not has_checkout:
+                last_check_in = entry
+                break
+    
+    if not last_check_in:
+        return None
+    
+    # Текущее время в локальном timezone
+    now_utc = datetime.now(timezone.utc)
+    now_local = now_utc.astimezone(LOCAL_TZ)
+    
+    # Время входа в локальном timezone
+    check_in_utc = last_check_in.entry_time
+    if check_in_utc.tzinfo is None:
+        check_in_utc = check_in_utc.replace(tzinfo=timezone.utc)
+    check_in_local = check_in_utc.astimezone(LOCAL_TZ)
+    check_in_hour = check_in_local.hour
+    check_in_date = check_in_local.date()
+    
+    # Определяем смену: дневная (до 17:00) или ночная (после/в 17:00)
+    is_day_shift = check_in_hour < 17
+    
+    auto_checkout_created = None
+    
+    if is_day_shift:
+        # Дневная смена: автоматический выход в 18:00, если сейчас после 19:00
+        if now_local.hour >= 19:
+            # Проверяем, что выход ещё не создан
+            checkout_date = check_in_date
+            checkout_time_local_naive = datetime.combine(checkout_date, datetime.min.time().replace(hour=18, minute=0))
+            checkout_time_local_tz = checkout_time_local_naive.replace(tzinfo=LOCAL_TZ)
+            checkout_time_utc = checkout_time_local_tz.astimezone(timezone.utc).replace(tzinfo=None)
+            
+            # Проверяем существование автоматического выхода (в пределах 1 минуты)
+            existing_checkout = db.query(TimeEntryDB).filter(
+                TimeEntryDB.employee_id == employee_id,
+                TimeEntryDB.entry_type == 'check_out',
+                TimeEntryDB.method == 'auto',
+                TimeEntryDB.entry_time >= checkout_time_utc - timedelta(minutes=1),
+                TimeEntryDB.entry_time <= checkout_time_utc + timedelta(minutes=1)
+            ).first()
+            
+            if not existing_checkout:
+                # Создаём автоматический выход
+                auto_entry = TimeEntryDB(
+                    employee_id=employee_id,
+                    entry_type='check_out',
+                    entry_time=checkout_time_utc,
+                    method='auto',
+                    is_location_valid=None,
+                    latitude=None,
+                    longitude=None
+                )
+                db.add(auto_entry)
+                db.commit()
+                db.refresh(auto_entry)
+                auto_checkout_created = auto_entry
+                
+                # Обновляем смену
+                await update_work_shift(employee_id, checkout_date, db)
+                
+                logger.info(f"Создан автоматический выход в 18:00 для сотрудника {employee_id}")
+    
+    else:
+        # Ночная смена: автоматический выход в 6:00 следующего дня, если сейчас после 7:00
+        next_day = check_in_date + timedelta(days=1)
+        cutoff_time_local_naive = datetime.combine(next_day, datetime.min.time().replace(hour=7, minute=0))
+        cutoff_time_local_tz = cutoff_time_local_naive.replace(tzinfo=LOCAL_TZ)
+        
+        if now_local >= cutoff_time_local_tz:
+            # Проверяем, что выход ещё не создан
+            checkout_time_local_naive = datetime.combine(next_day, datetime.min.time().replace(hour=6, minute=0))
+            checkout_time_local_tz = checkout_time_local_naive.replace(tzinfo=LOCAL_TZ)
+            checkout_time_utc = checkout_time_local_tz.astimezone(timezone.utc).replace(tzinfo=None)
+            
+            # Проверяем существование автоматического выхода (в пределах 1 минуты)
+            existing_checkout = db.query(TimeEntryDB).filter(
+                TimeEntryDB.employee_id == employee_id,
+                TimeEntryDB.entry_type == 'check_out',
+                TimeEntryDB.method == 'auto',
+                TimeEntryDB.entry_time >= checkout_time_utc - timedelta(minutes=1),
+                TimeEntryDB.entry_time <= checkout_time_utc + timedelta(minutes=1)
+            ).first()
+            
+            if not existing_checkout:
+                # Создаём автоматический выход
+                auto_entry = TimeEntryDB(
+                    employee_id=employee_id,
+                    entry_type='check_out',
+                    entry_time=checkout_time_utc,
+                    method='auto',
+                    is_location_valid=None,
+                    latitude=None,
+                    longitude=None
+                )
+                db.add(auto_entry)
+                db.commit()
+                db.refresh(auto_entry)
+                auto_checkout_created = auto_entry
+                
+                # Обновляем смену
+                await update_work_shift(employee_id, next_day, db)
+                
+                logger.info(f"Создан автоматический выход в 6:00 для сотрудника {employee_id}")
+    
+    return auto_checkout_created
+
+
+async def check_all_employees_auto_checkout(db: Session):
+    """
+    Проверить и создать автоматические выходы для всех активных сотрудников с незакрытыми сменами
+    
+    Вызывается по расписанию (19:00 и 07:00 каждый день)
+    """
+    # Получить всех активных сотрудников
+    employees = db.query(EmployeeDB).filter(
+        EmployeeDB.is_active == True
+    ).all()
+    
+    created_count = 0
+    
+    for employee in employees:
+        try:
+            result = await check_and_create_auto_checkout(employee.id, db)
+            if result:
+                created_count += 1
+                logger.info(f"Автоматический выход создан для сотрудника {employee.id} ({employee.full_name})")
+        except Exception as e:
+            logger.error(f"Ошибка при проверке сотрудника {employee.id} ({employee.full_name}): {str(e)}", exc_info=True)
+    
+    logger.info(f"Автоматические выходы: проверено {len(employees)} сотрудников, создано {created_count} выходов")
+    return created_count
 
 
 # ==================== Endpoints ====================
@@ -268,6 +436,9 @@ async def get_employee_status(telegram_id: int, db: Session = Depends(get_db_ses
     - last_entry_type: "check_in" | "check_out" | null
     - can_check_in: bool
     - can_check_out: bool
+    
+    Примечание: Автоматические выходы создаются по расписанию (19:00 и 07:00),
+    а не при каждом запросе статуса для снижения нагрузки.
     """
     employee = db.query(EmployeeDB).filter(EmployeeDB.telegram_id == telegram_id).first()
     if not employee:

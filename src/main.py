@@ -45,10 +45,24 @@ from sqlalchemy import func, desc, case, text, or_, and_
 from sqlalchemy.exc import IntegrityError
 from src.services.metrics import install_sql_capture
 from sqlalchemy import text as sa_text
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+from zoneinfo import ZoneInfo
+from src.routers.time_tracking import check_all_employees_auto_checkout
 
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Machine Logic Service", debug=True)
+
+# Создаем планировщик для фоновых задач
+scheduler = AsyncIOScheduler()
+
+# Определяем timezone для расписания
+TIMEZONE_NAME = os.getenv("TIMEZONE") or os.getenv("BOT_TIMEZONE") or "Asia/Jerusalem"
+try:
+    SCHEDULER_TZ = ZoneInfo(TIMEZONE_NAME)
+except Exception:
+    SCHEDULER_TZ = ZoneInfo("UTC")
 
 # Возвращаем универсальное разрешение CORS
 # Указываем конкретные origins для production и development
@@ -83,7 +97,49 @@ app.add_middleware(
 async def startup_event():
     initialize_database()
     install_sql_capture()  # включит runtime-capture при TEXT2SQL_CAPTURE=1
-    # Здесь можно добавить другие действия при старте, если нужно
+    
+    # Настройка планировщика для автоматических выходов
+    async def run_auto_checkout_task():
+        """Задача для проверки и создания автоматических выходов"""
+        from src.database import SessionLocal
+        db = SessionLocal()
+        try:
+            await check_all_employees_auto_checkout(db)
+        except Exception as e:
+            logger.error(f"Ошибка при выполнении задачи автоматических выходов: {str(e)}", exc_info=True)
+        finally:
+            db.close()
+    
+    # Задача в 19:00 каждый день (для дневных смен - создание автовыхода в 18:00)
+    scheduler.add_job(
+        run_auto_checkout_task,
+        trigger=CronTrigger(hour=19, minute=0, timezone=SCHEDULER_TZ),
+        id="auto_checkout_evening",
+        name="Автоматический выход для дневных смен (19:00)",
+        replace_existing=True
+    )
+    
+    # Задача в 07:00 каждый день (для ночных смен - создание автовыхода в 06:00)
+    scheduler.add_job(
+        run_auto_checkout_task,
+        trigger=CronTrigger(hour=7, minute=0, timezone=SCHEDULER_TZ),
+        id="auto_checkout_morning",
+        name="Автоматический выход для ночных смен (07:00)",
+        replace_existing=True
+    )
+    
+    # Запускаем планировщик
+    scheduler.start()
+    logger.info("Планировщик задач запущен: автоматические выходы в 19:00 и 07:00")
+
+
+# Событие shutdown для остановки планировщика
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Остановка планировщика при завершении приложения"""
+    if scheduler.running:
+        scheduler.shutdown()
+        logger.info("Планировщик задач остановлен")
 
 # Pydantic модели для Деталей (Parts)
 class PartBase(BaseModel):

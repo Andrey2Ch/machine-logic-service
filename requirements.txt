@@ -29,4 +29,7 @@ aiogram>=3.0.0
 # Face Recognition (для time tracking)
 face-recognition==1.3.0
 numpy==1.24.3
-Pillow==10.1.0 
+Pillow==10.1.0
+
+# Task Scheduling
+apscheduler==3.10.4 
