@@ -458,6 +458,7 @@ class QueueReorgAction(BaseModel):
     action: str  # "move_up", "move_down", "suggest_transfer"
     lot_id: int
     lot_number: str
+    drawing_number: Optional[str]
     from_position: Optional[int]
     to_position: Optional[int]
     from_machine: Optional[str]
@@ -747,6 +748,7 @@ async def recommend_with_queue_analysis(
                             action="move_down",
                             lot_id=moved_lot.lot_id,
                             lot_number=moved_lot.lot_number,
+                            drawing_number=moved_lot.drawing_number,
                             from_position=moved_lot.position,
                             to_position=moved_lot.position + 1,
                             from_machine=None,
@@ -834,6 +836,7 @@ async def recommend_with_queue_analysis(
                     action="suggest_transfer",
                     lot_id=lot.lot_id,
                     lot_number=lot.lot_number,
+                    drawing_number=lot.drawing_number,
                     from_position=lot.position,
                     to_position=len(best_alt.lots_in_queue) + 1,
                     from_machine=rec.machine_name,
