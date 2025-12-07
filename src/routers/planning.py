@@ -118,16 +118,23 @@ async def recommend_machines(
     # ВАЖНО: 
     # - Используем COALESCE для total_planned_quantity
     # - Для in_production берём machine_id из setup_jobs
-    # - Учитываем actual_produced (остаток)
+    # - actual_produced берётся из machine_readings (последний reading)
     queue_query = text("""
-        WITH lot_machines AS (
-            -- assigned лоты: машина из lots.assigned_machine_id
+        WITH latest_readings AS (
+            -- Последний reading для каждого setup_job
+            SELECT DISTINCT ON (setup_job_id)
+                setup_job_id,
+                reading as actual_produced
+            FROM machine_readings
+            ORDER BY setup_job_id, id DESC
+        ),
+        lot_machines AS (
+            -- assigned лоты: машина из lots.assigned_machine_id, produced = 0
             SELECT 
                 l.id as lot_id,
                 l.assigned_machine_id as machine_id,
                 COALESCE(l.total_planned_quantity, l.initial_planned_quantity) as quantity,
-                COALESCE(l.actual_produced, 0) as produced,
-                l.status,
+                0 as produced,
                 p.avg_cycle_time
             FROM lots l
             JOIN parts p ON l.part_id = p.id
@@ -136,17 +143,17 @@ async def recommend_machines(
             
             UNION ALL
             
-            -- in_production лоты: машина из активного setup_jobs
+            -- in_production лоты: машина из setup_jobs, produced из readings
             SELECT 
                 l.id as lot_id,
                 sj.machine_id,
                 COALESCE(l.total_planned_quantity, l.initial_planned_quantity) as quantity,
-                COALESCE(l.actual_produced, 0) as produced,
-                l.status,
+                COALESCE(lr.actual_produced, 0) as produced,
                 p.avg_cycle_time
             FROM lots l
             JOIN parts p ON l.part_id = p.id
             JOIN setup_jobs sj ON sj.lot_id = l.id
+            LEFT JOIN latest_readings lr ON lr.setup_job_id = sj.id
             WHERE l.status = 'in_production'
               AND sj.status IN ('started', 'completed')
               AND sj.end_time IS NULL
@@ -413,8 +420,16 @@ async def recommend_with_queue_analysis(
                       for row in db.execute(current_setup_query).fetchall()}
     
     # 3. Получаем очереди всех станков с детальной информацией
-    # ВАЖНО: для in_production машина берётся из setup_jobs, учитываем actual_produced
+    # ВАЖНО: для in_production машина берётся из setup_jobs
+    # actual_produced берётся из machine_readings (последний reading)
     queue_query = text("""
+        WITH latest_readings AS (
+            SELECT DISTINCT ON (setup_job_id)
+                setup_job_id,
+                reading as actual_produced
+            FROM machine_readings
+            ORDER BY setup_job_id, id DESC
+        )
         -- assigned лоты
         SELECT 
             l.id as lot_id,
@@ -425,7 +440,7 @@ async def recommend_with_queue_analysis(
             l.status,
             l.actual_diameter,
             COALESCE(l.total_planned_quantity, l.initial_planned_quantity) as quantity,
-            COALESCE(l.actual_produced, 0) as actual_produced,
+            0 as actual_produced,
             p.drawing_number,
             p.avg_cycle_time,
             p.recommended_diameter
@@ -436,7 +451,7 @@ async def recommend_with_queue_analysis(
         
         UNION ALL
         
-        -- in_production лоты (машина из setup_jobs)
+        -- in_production лоты (машина из setup_jobs, produced из readings)
         SELECT 
             l.id as lot_id,
             l.lot_number,
@@ -446,13 +461,14 @@ async def recommend_with_queue_analysis(
             l.status,
             l.actual_diameter,
             COALESCE(l.total_planned_quantity, l.initial_planned_quantity) as quantity,
-            COALESCE(l.actual_produced, 0) as actual_produced,
+            COALESCE(lr.actual_produced, 0) as actual_produced,
             p.drawing_number,
             p.avg_cycle_time,
             p.recommended_diameter
         FROM lots l
         JOIN parts p ON l.part_id = p.id
         JOIN setup_jobs sj ON sj.lot_id = l.id
+        LEFT JOIN latest_readings lr ON lr.setup_job_id = sj.id
         WHERE l.status = 'in_production'
           AND sj.status IN ('started', 'completed')
           AND sj.end_time IS NULL
