@@ -54,7 +54,7 @@ class RecommendationsResponse(BaseModel):
 # ============ КОНСТАНТЫ ВЕСОВ ============
 
 W_HISTORY = 30           # Бонус за историю (делали раньше)
-W_SAME_DIAMETER = 15     # Бонус за тот же диаметр (без переналадки)
+W_SAME_DIAMETER = 10     # Бонус за тот же диаметр (без переналадки)
 W_FREE_QUEUE = 25        # Бонус за свободную очередь
 W_CAPABILITIES = 20      # Бонус за специальные возможности (JBS, etc)
 W_RELATED_DRAWING = 20   # Бонус за родственный чертёж в очереди
@@ -684,19 +684,26 @@ async def recommend_with_queue_analysis(
         queue.sort(key=lambda x: x["position"])
         
         # Диаметр для проверки переналадки:
-        # 1. Сначала смотрим ПОСЛЕДНИЙ лот в очереди (новый лот идёт В КОНЕЦ!)
-        # 2. Если очередь пустая — смотрим текущий лот в работе
-        # 3. Если и то пустое — переналадка неизвестна
+        # Новый лот идёт В КОНЕЦ очереди!
+        # 1. Если есть assigned лоты → берём диаметр последнего assigned
+        # 2. Если assigned нет, но есть in_production → берём его диаметр
+        # 3. Если очередь пустая — переналадка неизвестна (станок свободен)
         queue = machine_queues.get(m.id, [])
-        last_lot_diameter = None
-        if queue:
-            # Берём диаметр последнего лота в очереди
-            sorted_queue = sorted(queue, key=lambda x: x["position"])
-            last_lot = sorted_queue[-1]
-            last_lot_diameter = last_lot.get("diameter")
+        current_d = None
         
-        # Если в очереди нет диаметра — берём из текущего setup
-        current_d = last_lot_diameter or current_setups.get(m.id)
+        # Разделяем на assigned и in_production
+        assigned_lots = [l for l in queue if l.get("status") == "assigned"]
+        in_production_lots = [l for l in queue if l.get("status") == "in_production"]
+        
+        if assigned_lots:
+            # Есть assigned → берём последний по position
+            sorted_assigned = sorted(assigned_lots, key=lambda x: x["position"])
+            current_d = sorted_assigned[-1].get("diameter")
+        elif in_production_lots:
+            # Только in_production → берём его диаметр
+            current_d = in_production_lots[0].get("diameter")
+        # Если очередь пустая — current_d остаётся None (станок свободен)
+        
         needs_setup = current_d is not None and abs(current_d - diameter) >= 0.5
         
         # Рассчитываем ETA и slack для каждого лота в очереди
