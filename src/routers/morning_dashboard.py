@@ -543,7 +543,7 @@ async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
         WITH operator_rework AS (
             SELECT 
                 b.id,
-                b.initial_quantity,
+                b.current_quantity,
                 m.name as machine_name,
                 e.full_name as operator_name
             FROM batches b
@@ -555,7 +555,7 @@ async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
         )
         SELECT 
             COUNT(*) as total_batches,
-            COALESCE(SUM(initial_quantity), 0) as total_parts
+            COALESCE(SUM(current_quantity), 0) as total_parts
         FROM operator_rework
         """)
         
@@ -568,10 +568,14 @@ async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
         SELECT 
             m.name as machine_name,
             COUNT(b.id) as batch_count,
-            COALESCE(SUM(b.initial_quantity), 0) as parts_count
+            COALESCE(SUM(b.current_quantity), 0) as parts_count,
+            STRING_AGG(DISTINCT p.drawing_number, ', ' ORDER BY p.drawing_number) as drawing_numbers,
+            STRING_AGG(DISTINCT l.lot_number, ', ' ORDER BY l.lot_number) as lot_numbers
         FROM batches b
         JOIN setup_jobs sj ON b.setup_job_id = sj.id
         JOIN machines m ON sj.machine_id = m.id
+        LEFT JOIN lots l ON b.lot_id = l.id
+        LEFT JOIN parts p ON l.part_id = p.id
         WHERE b.parent_batch_id IS NULL
           AND b.current_location IN ('sorting', 'sorting_warehouse')
         GROUP BY m.name
@@ -585,7 +589,7 @@ async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
         SELECT 
             e.full_name as operator_name,
             COUNT(b.id) as batch_count,
-            COALESCE(SUM(b.initial_quantity), 0) as parts_count
+            COALESCE(SUM(b.current_quantity), 0) as parts_count
         FROM batches b
         JOIN employees e ON b.operator_id = e.id
         WHERE b.parent_batch_id IS NULL
@@ -604,7 +608,9 @@ async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
                     'machine': row.machine_name,
                     'batches': row.batch_count,
                     'parts': row.parts_count,
-                    'percent': round((row.parts_count / total_parts * 100) if total_parts > 0 else 0, 1)
+                    'percent': round((row.parts_count / total_parts * 100) if total_parts > 0 else 0, 1),
+                    'drawing_numbers': row.drawing_numbers or '-',
+                    'lot_numbers': row.lot_numbers or '-'
                 }
                 for row in by_machine
             ],

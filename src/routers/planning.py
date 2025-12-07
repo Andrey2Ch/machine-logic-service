@@ -361,14 +361,14 @@ async def recommend_machines(
                     reasons.append(f"✅ Без переналадки (сейчас {current_d}мм, но очередь!)")
                 else:
                     reasons.append(f"✅ Без переналадки (сейчас {current_d}мм)")
+            else:
+                reasons.append(f"⚠️ Переналадка {current_d}мм → {diameter}мм")
         
         # Родственный чертёж в очереди (группировка похожих деталей)
         related = related_in_queue.get(m.id)
         if related:
             score += W_RELATED_DRAWING
             reasons.append(f"🔗 Родственный чертёж: после лота {related['lot_number']} ({related['drawing']}, поз.{related['position']})")
-            else:
-                reasons.append(f"⚠️ Переналадка {current_d}мм → {diameter}мм")
         
         # Специальные возможности (JBS)
         if m.is_jbs:
