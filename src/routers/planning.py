@@ -16,7 +16,10 @@ router = APIRouter(prefix="/planning", tags=["Planning"])
 # Константы для умных рекомендаций
 SLACK_THRESHOLD_DAYS = 3  # Порог запаса: если slack > 3 дней, лот можно сдвинуть
 MIN_QTY_FOR_TRANSFER = 100  # Минимальное количество для переноса на другой станок
-SETUP_TIME_HOURS = 1.0  # Среднее время переналадки в часах
+
+# Время переналадки
+SETUP_TIME_NORMAL = 12.0   # Переналадка на другую деталь (часы)
+SETUP_TIME_RELATED = 6.0   # Переналадка на родственную деталь (часы)
 
 
 # ============ МОДЕЛИ ОТВЕТА ============
@@ -49,10 +52,11 @@ class RecommendationsResponse(BaseModel):
 
 # ============ КОНСТАНТЫ ВЕСОВ ============
 
-W_HISTORY = 30      # Бонус за историю (делали раньше)
-W_SAME_DIAMETER = 25  # Бонус за тот же диаметр
-W_FREE_QUEUE = 25    # Бонус за свободную очередь
-W_CAPABILITIES = 20   # Бонус за специальные возможности (JBS, etc)
+W_HISTORY = 30           # Бонус за историю (делали раньше)
+W_SAME_DIAMETER = 15     # Бонус за тот же диаметр (без переналадки)
+W_FREE_QUEUE = 25        # Бонус за свободную очередь
+W_CAPABILITIES = 20      # Бонус за специальные возможности (JBS, etc)
+W_RELATED_DRAWING = 20   # Бонус за родственный чертёж в очереди
 
 
 # ============ ENDPOINT ============
@@ -172,8 +176,54 @@ async def recommend_machines(
         GROUP BY machine_id
     """)
     
-    queue_hours = {row.machine_id: float(row.queue_hours or 0) 
-                   for row in db.execute(queue_query).fetchall()}
+    queue_work_hours = {row.machine_id: float(row.queue_hours or 0) 
+                        for row in db.execute(queue_query).fetchall()}
+    
+    # 3b. Считаем время переналадок между лотами в очередях
+    setup_time_query = text("""
+        WITH queue_lots AS (
+            -- assigned лоты с чертежами
+            SELECT 
+                l.assigned_machine_id as machine_id,
+                l.assigned_order as position,
+                p.drawing_number
+            FROM lots l
+            JOIN parts p ON l.part_id = p.id
+            WHERE l.status = 'assigned'
+              AND l.assigned_machine_id IS NOT NULL
+            ORDER BY l.assigned_machine_id, l.assigned_order
+        )
+        SELECT machine_id, array_agg(drawing_number ORDER BY position) as drawings
+        FROM queue_lots
+        GROUP BY machine_id
+    """)
+    
+    setup_times = {}  # machine_id -> setup_hours
+    for row in db.execute(setup_time_query).fetchall():
+        drawings = row.drawings or []
+        setup_hours = 0.0
+        
+        for i in range(1, len(drawings)):
+            prev_drawing = drawings[i-1] or ""
+            curr_drawing = drawings[i] or ""
+            
+            # Определяем родственные чертежи (одинаковая база)
+            def get_base(d):
+                parts = d.rsplit('-', 1)
+                return parts[0] if len(parts) == 2 and parts[1].isdigit() else d
+            
+            if get_base(prev_drawing) == get_base(curr_drawing) and get_base(prev_drawing):
+                setup_hours += SETUP_TIME_RELATED  # Родственная переналадка
+            else:
+                setup_hours += SETUP_TIME_NORMAL   # Обычная переналадка
+        
+        setup_times[row.machine_id] = setup_hours
+    
+    # Итоговая загрузка = работа + переналадки
+    queue_hours = {
+        mid: queue_work_hours.get(mid, 0) + setup_times.get(mid, 0)
+        for mid in set(queue_work_hours.keys()) | set(setup_times.keys())
+    }
     
     # 4. Получаем историю: на каких станках делали эту деталь
     history = {}
@@ -200,7 +250,47 @@ async def recommend_machines(
         
         history = {row.machine_id: row.times_made for row in history_result}
     
-    # 5. Оцениваем каждый станок
+    # 5. Ищем родственные чертежи в очередях (для группировки похожих деталей)
+    # Родственный чертёж = тот же базовый номер (например 1409-04-1 и 1409-04-2 → база 1409-04)
+    related_in_queue = {}  # machine_id -> {lot_number, drawing, position}
+    if drawing_number:
+        # Извлекаем базу чертежа: "1409-04-1" → "1409-04"
+        parts_of_drawing = drawing_number.rsplit('-', 1)
+        if len(parts_of_drawing) == 2 and parts_of_drawing[1].isdigit():
+            base_drawing = parts_of_drawing[0]
+            
+            related_query = text("""
+                SELECT 
+                    l.assigned_machine_id as machine_id,
+                    l.lot_number,
+                    p.drawing_number,
+                    l.assigned_order as position,
+                    l.actual_diameter
+                FROM lots l
+                JOIN parts p ON l.part_id = p.id
+                WHERE l.status = 'assigned'
+                  AND l.assigned_machine_id IS NOT NULL
+                  AND p.drawing_number LIKE :base_pattern
+                  AND p.drawing_number != :exact_drawing
+                ORDER BY l.assigned_machine_id, l.assigned_order DESC
+            """)
+            
+            related_result = db.execute(related_query, {
+                "base_pattern": base_drawing + "-%",
+                "exact_drawing": drawing_number
+            }).fetchall()
+            
+            # Берём последний (по позиции) родственный лот на каждом станке
+            for row in related_result:
+                if row.machine_id not in related_in_queue:
+                    related_in_queue[row.machine_id] = {
+                        "lot_number": row.lot_number,
+                        "drawing": row.drawing_number,
+                        "position": row.position,
+                        "diameter": row.actual_diameter
+                    }
+    
+    # 6. Оцениваем каждый станок
     recommendations = []
     
     for m in machines_result:
@@ -236,17 +326,9 @@ async def recommend_machines(
         else:
             reasons.append("🆕 Раньше не делали")
         
-        # Тот же диаметр (без переналадки)
-        current_d = current_setups.get(m.id)
-        if current_d:
-            if abs(current_d - diameter) < 0.5:  # тот же диаметр (±0.5мм)
-                score += W_SAME_DIAMETER
-                reasons.append(f"✅ Без переналадки (сейчас {current_d}мм)")
-            else:
-                reasons.append(f"⚠️ Переналадка {current_d}мм → {diameter}мм")
-        
-        # Загрузка очереди
+        # Загрузка очереди (ОЦЕНИВАЕМ ПЕРВОЙ, т.к. влияет на бонус за переналадку)
         hours = queue_hours.get(m.id, 0)
+        queue_penalty = 0
         if hours == 0:
             score += W_FREE_QUEUE
             reasons.append("✅ Свободен")
@@ -256,8 +338,37 @@ async def recommend_machines(
         elif hours < 72:
             score += int(W_FREE_QUEUE * 0.3)
             reasons.append(f"⏳ Очередь: {hours:.0f}ч")
+        elif hours < 200:
+            # Большая очередь (3-8 дней) - небольшой штраф
+            queue_penalty = 10
+            score -= queue_penalty
+            reasons.append(f"⚠️ Большая очередь: {hours:.0f}ч (-{queue_penalty})")
         else:
-            reasons.append(f"⚠️ Большая очередь: {hours:.0f}ч")
+            # Очень большая очередь (>8 дней) - серьёзный штраф
+            queue_penalty = 20
+            score -= queue_penalty
+            reasons.append(f"🔴 Огромная очередь: {hours:.0f}ч (-{queue_penalty})")
+        
+        # Тот же диаметр (без переналадки)
+        # Бонус уменьшается при большой очереди!
+        current_d = current_setups.get(m.id)
+        if current_d:
+            if abs(current_d - diameter) < 0.5:  # тот же диаметр (±0.5мм)
+                # При очереди >200ч бонус за переналадку уменьшается вдвое
+                same_d_bonus = W_SAME_DIAMETER if hours < 200 else W_SAME_DIAMETER // 2
+                score += same_d_bonus
+                if hours >= 200:
+                    reasons.append(f"✅ Без переналадки (сейчас {current_d}мм, но очередь!)")
+                else:
+                    reasons.append(f"✅ Без переналадки (сейчас {current_d}мм)")
+        
+        # Родственный чертёж в очереди (группировка похожих деталей)
+        related = related_in_queue.get(m.id)
+        if related:
+            score += W_RELATED_DRAWING
+            reasons.append(f"🔗 Родственный чертёж: после лота {related['lot_number']} ({related['drawing']}, поз.{related['position']})")
+            else:
+                reasons.append(f"⚠️ Переналадка {current_d}мм → {diameter}мм")
         
         # Специальные возможности (JBS)
         if m.is_jbs:
@@ -505,6 +616,13 @@ async def recommend_with_queue_analysis(
             "status": row.status
         })
     
+    # Вспомогательная функция для определения базы чертежа
+    def get_drawing_base(d):
+        if not d:
+            return ""
+        parts = d.rsplit('-', 1)
+        return parts[0] if len(parts) == 2 and parts[1].isdigit() else d
+    
     # 4. Анализируем каждый станок
     recommendations = []
     
@@ -516,10 +634,24 @@ async def recommend_with_queue_analysis(
         needs_setup = current_d is not None and abs(current_d - diameter) >= 0.5
         
         # Рассчитываем ETA и slack для каждого лота в очереди
+        # Учитываем время переналадки между лотами!
         cumulative_hours = 0
         queue_lots = []
+        prev_drawing = None
         
-        for lot in queue:
+        for i, lot in enumerate(queue):
+            # Добавляем время переналадки (кроме первого лота)
+            if i > 0 and prev_drawing:
+                curr_base = get_drawing_base(lot["drawing_number"])
+                prev_base = get_drawing_base(prev_drawing)
+                
+                if curr_base and prev_base and curr_base == prev_base:
+                    cumulative_hours += SETUP_TIME_RELATED  # Родственная
+                else:
+                    cumulative_hours += SETUP_TIME_NORMAL   # Обычная
+            
+            prev_drawing = lot["drawing_number"]
+            
             # ETA = сейчас + накопленные часы + время этого лота
             lot_eta = None
             lot_slack = None
