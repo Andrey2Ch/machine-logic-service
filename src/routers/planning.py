@@ -368,7 +368,7 @@ async def recommend_machines(
         related = related_in_queue.get(m.id)
         if related:
             score += W_RELATED_DRAWING
-            reasons.append(f"🔗 Родственный чертёж: после лота {related['lot_number']} ({related['drawing']}, поз.{related['position']})")
+            reasons.append(f"🔗 Родственный чертёж: после лота {related['lot_number']} ({related['drawing']})")
         
         # Специальные возможности (JBS)
         if m.is_jbs:

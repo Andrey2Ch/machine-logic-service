@@ -519,9 +519,10 @@ async def get_machine_plan():
 
 async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
     """
-    Статистика батчей на переборку от операторов за дату
+    Статистика батчей на переборку от операторов за последние 1-2 дня
     
-    Берет ВСЕ батчи с current_location IN ('sorting', 'sorting_warehouse'):
+    Берет батчи с current_location IN ('sorting', 'sorting_warehouse'),
+    созданные за последние 1-2 дня (чтобы учесть работу с вечера субботы, если сегодня воскресенье):
     - 'sorting' - батчи от операторов, еще не принятые на складе
     - 'sorting_warehouse' - батчи на переборку, принятые на складе, но еще не взятые ОТК
     
@@ -531,11 +532,31 @@ async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
         {
             'total_batches': int,
             'total_parts': int,
-            'by_machine': [{'machine': str, 'batches': int, 'parts': int, 'percent': float}],
-            'by_operator': [{'operator': str, 'batches': int, 'parts': int}]
+            'by_machine': [{'machine': str, 'batches': int, 'parts': int, 'percent': float, 'drawing_numbers': str, 'lot_numbers': str}],
+            'by_operator': [{'operator': str, 'batches': int, 'parts': int}],
+            'report_date_start': date,  # Начало периода
+            'report_date_end': date     # Конец периода
         }
     """
     try:
+        # Определяем период: последние 1-2 дня в зависимости от дня недели
+        # Если сегодня воскресенье (0) - берем последние 2 дня (суббота + воскресенье, чтобы захватить работу с вечера субботы)
+        # Если сегодня понедельник (1) - берем последние 2 дня (воскресенье + понедельник)
+        # В остальных случаях - берем последние 1-2 дня (вчера + сегодня)
+        
+        if target_date.weekday() == 0:  # Воскресенье
+            # Берем субботу и воскресенье (последние 2 дня)
+            start_date = target_date - timedelta(days=1)
+            end_date = target_date
+        elif target_date.weekday() == 1:  # Понедельник
+            # Берем воскресенье и понедельник (последние 2 дня)
+            start_date = target_date - timedelta(days=1)
+            end_date = target_date
+        else:
+            # Для остальных дней берем вчера и сегодня (последние 1-2 дня)
+            start_date = target_date - timedelta(days=1)
+            end_date = target_date
+        
         # Батчи на переборку от операторов: current_location IN ('sorting', 'sorting_warehouse')
         # 'sorting' - еще не приняты на складе
         # 'sorting_warehouse' - приняты на складе, но еще не взяты ОТК
@@ -552,6 +573,8 @@ async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
             JOIN employees e ON b.operator_id = e.id
             WHERE b.parent_batch_id IS NULL
               AND b.current_location IN ('sorting', 'sorting_warehouse')
+              AND DATE(b.batch_time) >= :start_date
+              AND DATE(b.batch_time) <= :end_date
         )
         SELECT 
             COUNT(*) as total_batches,
@@ -559,11 +582,12 @@ async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
         FROM operator_rework
         """)
         
-        result = db.execute(query).fetchone()
+        result = db.execute(query, {'start_date': start_date, 'end_date': end_date}).fetchone()
         total_batches = result.total_batches
         total_parts = result.total_parts
         
         # По станкам
+        # Связь: batches -> setup_jobs -> lots -> parts
         by_machine_query = text("""
         SELECT 
             m.name as machine_name,
@@ -574,15 +598,17 @@ async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
         FROM batches b
         JOIN setup_jobs sj ON b.setup_job_id = sj.id
         JOIN machines m ON sj.machine_id = m.id
-        LEFT JOIN lots l ON b.lot_id = l.id
+        LEFT JOIN lots l ON sj.lot_id = l.id
         LEFT JOIN parts p ON l.part_id = p.id
         WHERE b.parent_batch_id IS NULL
           AND b.current_location IN ('sorting', 'sorting_warehouse')
+          AND DATE(b.batch_time) >= :start_date
+          AND DATE(b.batch_time) <= :end_date
         GROUP BY m.name
         ORDER BY parts_count DESC
         """)
         
-        by_machine = db.execute(by_machine_query).fetchall()
+        by_machine = db.execute(by_machine_query, {'start_date': start_date, 'end_date': end_date}).fetchall()
         
         # По операторам
         by_operator_query = text("""
@@ -594,11 +620,13 @@ async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
         JOIN employees e ON b.operator_id = e.id
         WHERE b.parent_batch_id IS NULL
           AND b.current_location IN ('sorting', 'sorting_warehouse')
+          AND DATE(b.batch_time) >= :start_date
+          AND DATE(b.batch_time) <= :end_date
         GROUP BY e.full_name
         ORDER BY parts_count DESC
         """)
         
-        by_operator = db.execute(by_operator_query).fetchall()
+        by_operator = db.execute(by_operator_query, {'start_date': start_date, 'end_date': end_date}).fetchall()
         
         return {
             'total_batches': total_batches,
@@ -621,12 +649,25 @@ async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
                     'parts': row.parts_count
                 }
                 for row in by_operator
-            ]
+            ],
+            'report_date_start': start_date.isoformat(),
+            'report_date_end': end_date.isoformat()
         }
         
     except Exception as e:
         logger.error(f"Error getting operator rework stats: {e}", exc_info=True)
         return {'total_batches': 0, 'total_parts': 0, 'by_machine': [], 'by_operator': []}
+
+
+def get_previous_workday(from_date: date) -> date:
+    """
+    Возвращает предыдущий рабочий день с учетом израильских выходных (пятница, суббота)
+    """
+    prev_day = from_date - timedelta(days=1)
+    # Если вчера была пятница (4) или суббота (5), идем дальше назад
+    while prev_day.weekday() >= 4:  # Friday (4) or Saturday (5)
+        prev_day = prev_day - timedelta(days=1)
+    return prev_day
 
 
 def get_next_workday(from_date: date) -> date:
