@@ -521,9 +521,9 @@ async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
     """
     Статистика батчей на переборку от операторов за дату
     
-    Берет батчи с current_location = 'sorting' (батчи от операторов, 
-    которые еще не взяты ОТК на проверку), созданные за последние 1-2 смены
-    (с учетом выходных - до 3 дней назад).
+    Берет ВСЕ батчи с current_location = 'sorting' (батчи от операторов, 
+    которые еще не взяты ОТК на проверку), независимо от даты создания.
+    Это батчи из предыдущих смен, которые еще ожидают проверки ОТК.
     
     Returns:
         {
@@ -535,9 +535,8 @@ async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
     """
     try:
         # Батчи на переборку от операторов: current_location = 'sorting'
-        # Учитываем батчи за последние 1-2 смены (до 3 дней назад для учета выходных)
-        start_date = target_date - timedelta(days=3)
-        
+        # Показываем ВСЕ батчи, которые СЕЙЧАС в статусе 'sorting'
+        # (независимо от даты создания - это батчи от операторов, которые еще не взяты ОТК)
         query = text("""
         WITH operator_rework AS (
             SELECT 
@@ -551,8 +550,6 @@ async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
             JOIN employees e ON b.operator_id = e.id
             WHERE b.parent_batch_id IS NULL
               AND b.current_location = 'sorting'
-              AND DATE(b.batch_time) >= :start_date
-              AND DATE(b.batch_time) <= :target_date
         )
         SELECT 
             COUNT(*) as total_batches,
@@ -560,10 +557,7 @@ async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
         FROM operator_rework
         """)
         
-        result = db.execute(query, {
-            'start_date': start_date,
-            'target_date': target_date
-        }).fetchone()
+        result = db.execute(query).fetchone()
         total_batches = result.total_batches
         total_parts = result.total_parts
         
@@ -578,16 +572,11 @@ async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
         JOIN machines m ON sj.machine_id = m.id
         WHERE b.parent_batch_id IS NULL
           AND b.current_location = 'sorting'
-          AND DATE(b.batch_time) >= :start_date
-          AND DATE(b.batch_time) <= :target_date
         GROUP BY m.name
         ORDER BY parts_count DESC
         """)
         
-        by_machine = db.execute(by_machine_query, {
-            'start_date': start_date,
-            'target_date': target_date
-        }).fetchall()
+        by_machine = db.execute(by_machine_query).fetchall()
         
         # По операторам
         by_operator_query = text("""
@@ -599,16 +588,11 @@ async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
         JOIN employees e ON b.operator_id = e.id
         WHERE b.parent_batch_id IS NULL
           AND b.current_location = 'sorting'
-          AND DATE(b.batch_time) >= :start_date
-          AND DATE(b.batch_time) <= :target_date
         GROUP BY e.full_name
         ORDER BY parts_count DESC
         """)
         
-        by_operator = db.execute(by_operator_query, {
-            'start_date': start_date,
-            'target_date': target_date
-        }).fetchall()
+        by_operator = db.execute(by_operator_query).fetchall()
         
         return {
             'total_batches': total_batches,
