@@ -115,23 +115,54 @@ async def recommend_machines(
                       for row in db.execute(current_setup_query).fetchall()}
     
     # 3. Получаем загрузку станков (часы в очереди)
-    # ВАЖНО: используем COALESCE т.к. total_planned_quantity может быть NULL
+    # ВАЖНО: 
+    # - Используем COALESCE для total_planned_quantity
+    # - Для in_production берём machine_id из setup_jobs
+    # - Учитываем actual_produced (остаток)
     queue_query = text("""
+        WITH lot_machines AS (
+            -- assigned лоты: машина из lots.assigned_machine_id
+            SELECT 
+                l.id as lot_id,
+                l.assigned_machine_id as machine_id,
+                COALESCE(l.total_planned_quantity, l.initial_planned_quantity) as quantity,
+                COALESCE(l.actual_produced, 0) as produced,
+                l.status,
+                p.avg_cycle_time
+            FROM lots l
+            JOIN parts p ON l.part_id = p.id
+            WHERE l.status = 'assigned'
+              AND l.assigned_machine_id IS NOT NULL
+            
+            UNION ALL
+            
+            -- in_production лоты: машина из активного setup_jobs
+            SELECT 
+                l.id as lot_id,
+                sj.machine_id,
+                COALESCE(l.total_planned_quantity, l.initial_planned_quantity) as quantity,
+                COALESCE(l.actual_produced, 0) as produced,
+                l.status,
+                p.avg_cycle_time
+            FROM lots l
+            JOIN parts p ON l.part_id = p.id
+            JOIN setup_jobs sj ON sj.lot_id = l.id
+            WHERE l.status = 'in_production'
+              AND sj.status IN ('started', 'completed')
+              AND sj.end_time IS NULL
+        )
         SELECT 
-            l.assigned_machine_id as machine_id,
+            machine_id,
             SUM(
                 CASE 
-                    WHEN p.avg_cycle_time IS NOT NULL 
-                         AND COALESCE(l.total_planned_quantity, l.initial_planned_quantity) IS NOT NULL
-                    THEN (p.avg_cycle_time * COALESCE(l.total_planned_quantity, l.initial_planned_quantity)) / 3600.0
+                    WHEN avg_cycle_time IS NOT NULL AND quantity IS NOT NULL
+                    THEN (avg_cycle_time * GREATEST(quantity - produced, 0)) / 3600.0
                     ELSE 0
                 END
             ) as queue_hours
-        FROM lots l
-        JOIN parts p ON l.part_id = p.id
-        WHERE l.assigned_machine_id IS NOT NULL
-          AND l.status IN ('assigned', 'in_production')
-        GROUP BY l.assigned_machine_id
+        FROM lot_machines
+        WHERE machine_id IS NOT NULL
+        GROUP BY machine_id
     """)
     
     queue_hours = {row.machine_id: float(row.queue_hours or 0) 
@@ -382,7 +413,9 @@ async def recommend_with_queue_analysis(
                       for row in db.execute(current_setup_query).fetchall()}
     
     # 3. Получаем очереди всех станков с детальной информацией
+    # ВАЖНО: для in_production машина берётся из setup_jobs, учитываем actual_produced
     queue_query = text("""
+        -- assigned лоты
         SELECT 
             l.id as lot_id,
             l.lot_number,
@@ -392,14 +425,39 @@ async def recommend_with_queue_analysis(
             l.status,
             l.actual_diameter,
             COALESCE(l.total_planned_quantity, l.initial_planned_quantity) as quantity,
+            COALESCE(l.actual_produced, 0) as actual_produced,
             p.drawing_number,
             p.avg_cycle_time,
             p.recommended_diameter
         FROM lots l
         JOIN parts p ON l.part_id = p.id
-        WHERE l.assigned_machine_id IS NOT NULL
-          AND l.status IN ('assigned', 'in_production')
-        ORDER BY l.assigned_machine_id, l.assigned_order
+        WHERE l.status = 'assigned'
+          AND l.assigned_machine_id IS NOT NULL
+        
+        UNION ALL
+        
+        -- in_production лоты (машина из setup_jobs)
+        SELECT 
+            l.id as lot_id,
+            l.lot_number,
+            sj.machine_id,
+            0 as position,  -- in_production всегда первые
+            l.due_date,
+            l.status,
+            l.actual_diameter,
+            COALESCE(l.total_planned_quantity, l.initial_planned_quantity) as quantity,
+            COALESCE(l.actual_produced, 0) as actual_produced,
+            p.drawing_number,
+            p.avg_cycle_time,
+            p.recommended_diameter
+        FROM lots l
+        JOIN parts p ON l.part_id = p.id
+        JOIN setup_jobs sj ON sj.lot_id = l.id
+        WHERE l.status = 'in_production'
+          AND sj.status IN ('started', 'completed')
+          AND sj.end_time IS NULL
+        
+        ORDER BY machine_id, position
     """)
     
     queue_rows = db.execute(queue_query).fetchall()
@@ -411,9 +469,11 @@ async def recommend_with_queue_analysis(
         if mid not in machine_queues:
             machine_queues[mid] = []
         
+        # Рассчитываем ОСТАТОЧНОЕ время работы (учитываем actual_produced)
         work_hours = 0
         if row.avg_cycle_time and row.quantity:
-            work_hours = (row.avg_cycle_time * row.quantity) / 3600.0
+            remaining_qty = max(0, row.quantity - (row.actual_produced or 0))
+            work_hours = (row.avg_cycle_time * remaining_qty) / 3600.0
         
         machine_queues[mid].append({
             "lot_id": row.lot_id,
@@ -421,6 +481,7 @@ async def recommend_with_queue_analysis(
             "position": row.position or 999,
             "drawing_number": row.drawing_number,
             "quantity": row.quantity or 0,
+            "actual_produced": row.actual_produced or 0,
             "cycle_time_sec": row.avg_cycle_time,
             "work_hours": work_hours,
             "due_date": row.due_date,
