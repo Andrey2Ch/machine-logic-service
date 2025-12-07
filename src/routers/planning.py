@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from typing import Optional, List
 from pydantic import BaseModel
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from ..database import get_db_session
 import logging
 
@@ -342,7 +342,7 @@ async def recommend_with_queue_analysis(
     
     # Парсим дату
     try:
-        target_due_date = datetime.strptime(due_date, "%Y-%m-%d")
+        target_due_date = datetime.strptime(due_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     except ValueError:
         raise HTTPException(status_code=400, detail="Неверный формат даты. Используйте YYYY-MM-DD")
     
@@ -351,7 +351,8 @@ async def recommend_with_queue_analysis(
     if cycle_time_sec and cycle_time_sec > 0:
         new_lot_hours = (cycle_time_sec * quantity) / 3600.0
     
-    due_days = (target_due_date - datetime.now()).days
+    now_utc = datetime.now(timezone.utc)
+    due_days = (target_due_date - now_utc).days
     
     # 1. Получаем подходящие станки
     machines_query = text("""
@@ -438,7 +439,6 @@ async def recommend_with_queue_analysis(
         needs_setup = current_d is not None and abs(current_d - diameter) >= 0.5
         
         # Рассчитываем ETA и slack для каждого лота в очереди
-        now = datetime.now()
         cumulative_hours = 0
         queue_lots = []
         
@@ -448,11 +448,15 @@ async def recommend_with_queue_analysis(
             lot_slack = None
             
             if lot["work_hours"] > 0:
-                eta_datetime = now + timedelta(hours=cumulative_hours + lot["work_hours"])
+                eta_datetime = now_utc + timedelta(hours=cumulative_hours + lot["work_hours"])
                 lot_eta = eta_datetime
                 
                 if lot["due_date"]:
-                    lot_slack = (lot["due_date"] - eta_datetime).total_seconds() / 86400  # в днях
+                    # Приводим due_date к UTC если он timezone-naive
+                    lot_due = lot["due_date"]
+                    if lot_due.tzinfo is None:
+                        lot_due = lot_due.replace(tzinfo=timezone.utc)
+                    lot_slack = (lot_due - eta_datetime).total_seconds() / 86400  # в днях
             
             cumulative_hours += lot["work_hours"]
             
@@ -473,7 +477,7 @@ async def recommend_with_queue_analysis(
         
         # Определяем оптимальную позицию для нового лота
         recommended_pos = len(queue_lots) + 1  # по умолчанию в конец
-        new_lot_eta = now + timedelta(hours=cumulative_hours + new_lot_hours)
+        new_lot_eta = now_utc + timedelta(hours=cumulative_hours + new_lot_hours)
         new_lot_slack = (target_due_date - new_lot_eta).total_seconds() / 86400
         
         reorg_actions = []
