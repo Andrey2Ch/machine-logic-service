@@ -60,6 +60,37 @@ W_CAPABILITIES = 20      # Бонус за специальные возможн
 W_RELATED_DRAWING = 20   # Бонус за родственный чертёж в очереди
 
 
+# ============ DEBUG ENDPOINT ============
+
+@router.get("/debug-machines")
+async def debug_machines(
+    diameter: float = Query(15.875),
+    db: Session = Depends(get_db_session)
+):
+    """Debug: показать все станки и их диаметры"""
+    all_machines = text("""
+        SELECT id, name, min_diameter, max_diameter, is_active
+        FROM machines
+        WHERE is_active = true
+        ORDER BY name
+    """)
+    result = db.execute(all_machines).fetchall()
+    
+    machines = []
+    for m in result:
+        fits = (m.min_diameter is None or m.min_diameter <= diameter) and \
+               (m.max_diameter is None or m.max_diameter >= diameter)
+        machines.append({
+            "id": m.id,
+            "name": m.name,
+            "min_diameter": m.min_diameter,
+            "max_diameter": m.max_diameter,
+            "fits_diameter": fits
+        })
+    
+    return {"diameter": diameter, "machines": machines}
+
+
 # ============ ENDPOINT ============
 
 @router.get("/recommend-machines", response_model=RecommendationsResponse)
