@@ -521,8 +521,10 @@ async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
     """
     Статистика батчей на переборку от операторов за дату
     
-    Берет ВСЕ батчи с current_location = 'sorting' (батчи от операторов, 
-    которые еще не взяты ОТК на проверку), независимо от даты создания.
+    Берет ВСЕ батчи с current_location IN ('sorting', 'sorting_warehouse'):
+    - 'sorting' - батчи от операторов, еще не принятые на складе
+    - 'sorting_warehouse' - батчи на переборку, принятые на складе, но еще не взятые ОТК
+    
     Это батчи из предыдущих смен, которые еще ожидают проверки ОТК.
     
     Returns:
@@ -534,9 +536,9 @@ async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
         }
     """
     try:
-        # Батчи на переборку от операторов: current_location = 'sorting'
-        # Показываем ВСЕ батчи, которые СЕЙЧАС в статусе 'sorting'
-        # (независимо от даты создания - это батчи от операторов, которые еще не взяты ОТК)
+        # Батчи на переборку от операторов: current_location IN ('sorting', 'sorting_warehouse')
+        # 'sorting' - еще не приняты на складе
+        # 'sorting_warehouse' - приняты на складе, но еще не взяты ОТК
         query = text("""
         WITH operator_rework AS (
             SELECT 
@@ -549,7 +551,7 @@ async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
             JOIN machines m ON sj.machine_id = m.id
             JOIN employees e ON b.operator_id = e.id
             WHERE b.parent_batch_id IS NULL
-              AND b.current_location = 'sorting'
+              AND b.current_location IN ('sorting', 'sorting_warehouse')
         )
         SELECT 
             COUNT(*) as total_batches,
@@ -571,7 +573,7 @@ async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
         JOIN setup_jobs sj ON b.setup_job_id = sj.id
         JOIN machines m ON sj.machine_id = m.id
         WHERE b.parent_batch_id IS NULL
-          AND b.current_location = 'sorting'
+          AND b.current_location IN ('sorting', 'sorting_warehouse')
         GROUP BY m.name
         ORDER BY parts_count DESC
         """)
@@ -587,7 +589,7 @@ async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
         FROM batches b
         JOIN employees e ON b.operator_id = e.id
         WHERE b.parent_batch_id IS NULL
-          AND b.current_location = 'sorting'
+          AND b.current_location IN ('sorting', 'sorting_warehouse')
         GROUP BY e.full_name
         ORDER BY parts_count DESC
         """)
