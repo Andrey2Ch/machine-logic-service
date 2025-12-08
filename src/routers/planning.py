@@ -819,7 +819,7 @@ async def recommend_with_queue_analysis(
                                 extra_setup_warning = f"⚠️ Вставка создаст дополнительную переналадку: {prev_lot.diameter}мм → {diameter}мм → {qlot.diameter}мм (+~{SETUP_TIME_NORMAL}ч)"
                                 warnings.append(extra_setup_warning)
                     
-                    recommended_pos = qlot.position
+                    recommended_pos = i + 1  # Индекс в очереди (1-based)
                     
                     # Генерируем рекомендации по сдвигу
                     for j in range(i, len(queue_lots)):
@@ -836,8 +836,8 @@ async def recommend_with_queue_analysis(
                             lot_id=moved_lot.lot_id,
                             lot_number=moved_lot.lot_number,
                             drawing_number=moved_lot.drawing_number,
-                            from_position=moved_lot.position,
-                            to_position=moved_lot.position + 1,
+                            from_position=j + 1,  # Индекс в очереди (1-based)
+                            to_position=j + 2,    # После сдвига
                             from_machine=None,
                             to_machine=None,
                             reason=f"Сдвиг для срочного лота (запас {moved_lot.slack_days:.0f}д → {new_slack:.0f}д)" if new_slack else "Сдвиг для срочного лота",
