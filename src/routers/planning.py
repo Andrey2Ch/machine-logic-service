@@ -523,6 +523,7 @@ async def recommend_with_queue_analysis(
     diameter: float = Query(..., description="Диаметр материала (мм)"),
     quantity: int = Query(..., description="Количество деталей"),
     due_date: str = Query(..., description="Срок поставки (YYYY-MM-DD)"),
+    lot_id: Optional[int] = Query(None, description="ID лота (для автоопределения part_id)"),
     cycle_time_sec: Optional[int] = Query(None, description="Время цикла (сек)"),
     part_id: Optional[int] = Query(None, description="ID детали"),
     drawing_number: Optional[str] = Query(None, description="Номер чертежа"),
@@ -546,6 +547,20 @@ async def recommend_with_queue_analysis(
     except ValueError:
         raise HTTPException(status_code=400, detail="Неверный формат даты. Используйте YYYY-MM-DD")
     
+    # Если передан lot_id, получаем part_id и drawing_number автоматически
+    if lot_id and not part_id:
+        lot_query = text("""
+            SELECT l.part_id, p.drawing_number 
+            FROM lots l 
+            LEFT JOIN parts p ON l.part_id = p.id 
+            WHERE l.id = :lot_id
+        """)
+        lot_result = db.execute(lot_query, {"lot_id": lot_id}).fetchone()
+        if lot_result:
+            part_id = lot_result.part_id
+            if not drawing_number and lot_result.drawing_number:
+                drawing_number = lot_result.drawing_number
+    
     # Расчёт времени работы нового лота
     new_lot_hours = 0
     if cycle_time_sec and cycle_time_sec > 0:
@@ -561,7 +576,7 @@ async def recommend_with_queue_analysis(
         pinned_result = db.execute(pinned_query, {"part_id": part_id}).fetchone()
         if pinned_result and pinned_result.pinned_machine_id:
             pinned_machine_id = pinned_result.pinned_machine_id
-            warnings.append(f"⚠️ Деталь закреплена за станком (ID: {pinned_machine_id})")
+            warnings.append(f"📌 Деталь закреплена за станком (ID: {pinned_machine_id})")
     
     # 1. Получаем подходящие станки
     if pinned_machine_id:
