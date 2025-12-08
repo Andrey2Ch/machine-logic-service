@@ -801,7 +801,7 @@ async def recommend_with_queue_analysis(
                         if i > 0:
                             prev_lot = queue_lots[i-1]
                             if prev_lot.diameter and abs(prev_lot.diameter - qlot.diameter) < 0.5:
-                                extra_setup_warning = f"⚠️ Вставка создаст дополнительную переналадку: {prev_lot.diameter}мм → {diameter}мм → {qlot.diameter}мм (+~{SETUP_TIME_HOURS}ч)"
+                                extra_setup_warning = f"⚠️ Вставка создаст дополнительную переналадку: {prev_lot.diameter}мм → {diameter}мм → {qlot.diameter}мм (+~{SETUP_TIME_NORMAL}ч)"
                                 warnings.append(extra_setup_warning)
                     
                     recommended_pos = qlot.position
