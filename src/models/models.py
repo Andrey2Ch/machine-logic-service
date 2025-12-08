@@ -82,7 +82,11 @@ class PartDB(Base):
     drawing_url = Column(Text, nullable=True)  # URL чертежа (Cloudinary)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     avg_cycle_time = Column(Integer, nullable=True)  # Среднее время цикла в секундах
+    pinned_machine_id = Column(Integer, ForeignKey("machines.id"), nullable=True)  # Закрепление за станком
     # is_active = Column(Boolean, default=True)
+    
+    # Relationship
+    pinned_machine = relationship("MachineDB", foreign_keys=[pinned_machine_id])
 
 class LotDB(Base):
     __tablename__ = "lots"

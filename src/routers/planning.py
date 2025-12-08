@@ -554,19 +554,39 @@ async def recommend_with_queue_analysis(
     now_utc = datetime.now(timezone.utc)
     due_days = (target_due_date - now_utc).days
     
-    # 1. Получаем подходящие станки
-    machines_query = text("""
-        SELECT 
-            m.id, m.name, m.min_diameter, m.max_diameter,
-            m.max_part_length, m.is_jbs
-        FROM machines m
-        WHERE m.is_active = true
-          AND (m.min_diameter IS NULL OR m.min_diameter <= :diameter)
-          AND (m.max_diameter IS NULL OR m.max_diameter >= :diameter)
-        ORDER BY m.name
-    """)
+    # 0. Проверяем закрепление детали за станком
+    pinned_machine_id = None
+    if part_id:
+        pinned_query = text("SELECT pinned_machine_id FROM parts WHERE id = :part_id")
+        pinned_result = db.execute(pinned_query, {"part_id": part_id}).fetchone()
+        if pinned_result and pinned_result.pinned_machine_id:
+            pinned_machine_id = pinned_result.pinned_machine_id
+            warnings.append(f"⚠️ Деталь закреплена за станком (ID: {pinned_machine_id})")
     
-    machines = db.execute(machines_query, {"diameter": diameter}).fetchall()
+    # 1. Получаем подходящие станки
+    if pinned_machine_id:
+        # Только закреплённый станок
+        machines_query = text("""
+            SELECT 
+                m.id, m.name, m.min_diameter, m.max_diameter,
+                m.max_part_length, m.is_jbs
+            FROM machines m
+            WHERE m.id = :pinned_id AND m.is_active = true
+        """)
+        machines = db.execute(machines_query, {"pinned_id": pinned_machine_id}).fetchall()
+    else:
+        # Все подходящие по диаметру
+        machines_query = text("""
+            SELECT 
+                m.id, m.name, m.min_diameter, m.max_diameter,
+                m.max_part_length, m.is_jbs
+            FROM machines m
+            WHERE m.is_active = true
+              AND (m.min_diameter IS NULL OR m.min_diameter <= :diameter)
+              AND (m.max_diameter IS NULL OR m.max_diameter >= :diameter)
+            ORDER BY m.name
+        """)
+        machines = db.execute(machines_query, {"diameter": diameter}).fetchall()
     
     if not machines:
         raise HTTPException(status_code=404, detail="Нет подходящих станков для данного диаметра")

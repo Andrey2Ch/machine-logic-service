@@ -150,6 +150,7 @@ class PartBase(BaseModel):
     part_length: Optional[float] = Field(None, description="Длина детали в мм")
     profile_type: Optional[str] = Field('round', description="Тип профиля (round/hex/square)")
     drawing_url: Optional[str] = Field(None, description="URL чертежа (Cloudinary)")
+    pinned_machine_id: Optional[int] = Field(None, description="ID станка, за которым закреплена деталь")
 
 class PartCreate(PartBase):
     pass
@@ -163,6 +164,7 @@ class PartUpdate(BaseModel):
     part_length: Optional[float] = None
     profile_type: Optional[str] = None
     drawing_url: Optional[str] = None
+    pinned_machine_id: Optional[int] = None
 
 class PartResponse(PartBase):
     id: int
@@ -2723,6 +2725,65 @@ async def update_part_length(
         db.rollback()
         logger.error(f"Ошибка при обновлении part_length для детали {part_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Ошибка при обновлении part_length: {str(e)}")
+
+
+@app.patch("/parts/{part_id}/pin-machine", tags=["Parts"])
+async def pin_part_to_machine(
+    part_id: int, 
+    machine_id: Optional[int] = Body(None, embed=True, description="ID станка для закрепления (null для открепления)"),
+    db: Session = Depends(get_db_session)
+):
+    """
+    Закрепить деталь за станком (или открепить).
+    
+    Если деталь закреплена за станком, рекомендации будут показывать только этот станок.
+    
+    Args:
+        part_id: ID детали
+        machine_id: ID станка для закрепления (null/None для открепления)
+        
+    Returns:
+        {
+            "success": bool,
+            "pinned_machine_id": int | null,
+            "pinned_machine_name": str | null,
+            "message": str
+        }
+    """
+    try:
+        # Проверяем существование детали
+        part = db.query(PartDB).filter(PartDB.id == part_id).first()
+        if not part:
+            raise HTTPException(status_code=404, detail=f"Деталь с ID {part_id} не найдена")
+        
+        machine_name = None
+        if machine_id:
+            # Проверяем существование станка
+            machine = db.query(MachineDB).filter(MachineDB.id == machine_id).first()
+            if not machine:
+                raise HTTPException(status_code=404, detail=f"Станок с ID {machine_id} не найден")
+            machine_name = machine.name
+        
+        # Обновляем закрепление
+        part.pinned_machine_id = machine_id
+        db.commit()
+        
+        action = f"закреплена за станком {machine_name}" if machine_id else "откреплена"
+        logger.info(f"Деталь {part.drawing_number} (ID: {part_id}) {action}")
+        
+        return {
+            "success": True,
+            "pinned_machine_id": machine_id,
+            "pinned_machine_name": machine_name,
+            "message": f"Деталь {part.drawing_number} {action}"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Ошибка при закреплении детали {part_id} за станком {machine_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ошибка при закреплении: {str(e)}")
 
 
 # <<< КОНЕЦ НОВЫХ ЭНДПОИНТОВ ДЛЯ ЛОТОВ >>>
