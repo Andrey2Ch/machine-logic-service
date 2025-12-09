@@ -39,19 +39,25 @@ class AcceptanceDiscrepancy(BaseModel):
     discrepancy_percent: float  # Процент расхождения
     status: str  # 'critical', 'warning', 'ok'
 
-class DefectRate(BaseModel):
-    """Процент брака по лоту"""
-    machine_name: str
-    drawing_number: str  # Чертёж детали
+class LotDefectInfo(BaseModel):
+    """Информация о браке по одному лоту"""
     lot_id: int
+    drawing_number: str
     lot_status: str  # 'in_production', 'post_production', 'closed'
-    total_produced: int  # Всего принято
-    total_defect: int  # Брак всего
-    defect_percent: float  # % брака общий
-    defect_recent: Optional[int] = None  # Брак за последний период
-    defect_recent_percent: Optional[float] = None  # % брака за последний период
-    period_days: Optional[int] = None  # Дней назад последняя активность
+    total_produced: int
+    total_defect: int
+    defect_percent: float
+    defect_recent: Optional[int] = None
+    period_days: Optional[int] = None
+
+class MachineDefectRate(BaseModel):
+    """Процент брака по станку (с группировкой лотов)"""
+    machine_name: str
+    total_produced: int  # Сумма по всем лотам
+    total_defect: int
+    defect_percent: float
     status: str  # 'critical', 'warning', 'ok'
+    lots: List[LotDefectInfo]  # Список лотов этого станка
 
 class Absence(BaseModel):
     """Отсутствующий сотрудник"""
@@ -79,7 +85,7 @@ class MorningSummary(BaseModel):
     """Полная утренняя сводка"""
     timestamp: datetime
     acceptance_discrepancies: List[AcceptanceDiscrepancy]
-    defect_rates: List[DefectRate]
+    defect_rates: List[MachineDefectRate]
     absences_today: List[Absence]
     absences_tomorrow: List[Absence]
     deadlines_today: List[Deadline]
@@ -250,16 +256,16 @@ async def get_acceptance_discrepancies(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/morning/defect-rates", response_model=List[DefectRate])
+@router.get("/morning/defect-rates", response_model=List[MachineDefectRate])
 async def get_defect_rates(
     db: Session = Depends(get_db_session)
 ):
     """
-    Процент брака по лотам:
+    Процент брака по станкам (с группировкой лотов):
     - in_production: все лоты без ограничений
     - post_production/closed: последний завершённый лот для каждого станка за 7 дней
-    - Группировка по лоту (не по станку)
-    - Сортировка: in_production первый, потом post_production; затем по defect_percent DESC
+    - Группировка по станку, сортировка по общему % брака DESC
+    - post_production с 0% брака НЕ показываются
     """
     try:
         query = text("""
@@ -354,47 +360,71 @@ async def get_defect_rates(
                 WHEN total_accepted > 0 
                 THEN ROUND((total_defect::numeric / total_accepted) * 100, 2)
                 ELSE 0 
-            END as defect_percent,
-            CASE 
-                WHEN defect_recent > 0 AND total_accepted > 0
-                THEN ROUND((defect_recent::numeric / total_accepted) * 100, 2)
-                ELSE NULL 
-            END as defect_recent_percent
+            END as defect_percent
         FROM lot_data
         WHERE machine_name IS NOT NULL
-        ORDER BY 
-            CASE lot_status WHEN 'in_production' THEN 0 ELSE 1 END,
-            defect_percent DESC;
+        ORDER BY machine_name, 
+            CASE lot_status WHEN 'in_production' THEN 0 ELSE 1 END;
         """)
         
         result = db.execute(query).fetchall()
         
         thresholds = DEFAULT_THRESHOLDS['defect_rate']
         
-        defect_rates = []
+        # Группируем по станкам
+        machines_dict: dict = {}
         for row in result:
+            machine = row.machine_name
             defect_pct = float(row.defect_percent)
+            lot_status = row.lot_status
             
-            if defect_pct >= thresholds['critical_percent']:
-                status = 'critical'
-            elif defect_pct >= thresholds['warning_percent']:
-                status = 'warning'
-            else:
-                status = 'ok'
+            # Пропускаем post_production с 0% брака
+            if lot_status != 'in_production' and defect_pct == 0:
+                continue
             
-            defect_rates.append(DefectRate(
-                machine_name=row.machine_name,
-                drawing_number=row.drawing_number or '-',
+            if machine not in machines_dict:
+                machines_dict[machine] = {
+                    'total_produced': 0,
+                    'total_defect': 0,
+                    'lots': []
+                }
+            
+            machines_dict[machine]['total_produced'] += int(row.total_accepted)
+            machines_dict[machine]['total_defect'] += int(row.total_defect)
+            machines_dict[machine]['lots'].append(LotDefectInfo(
                 lot_id=row.lot_id,
-                lot_status=row.lot_status,
+                drawing_number=row.drawing_number or '-',
+                lot_status=lot_status,
                 total_produced=int(row.total_accepted),
                 total_defect=int(row.total_defect),
                 defect_percent=defect_pct,
                 defect_recent=int(row.defect_recent) if row.defect_recent else None,
-                defect_recent_percent=float(row.defect_recent_percent) if row.defect_recent_percent else None,
-                period_days=int(row.period_days) if row.period_days is not None else None,
-                status=status
+                period_days=int(row.period_days) if row.period_days is not None else None
             ))
+        
+        # Формируем результат с сортировкой по % брака
+        defect_rates = []
+        for machine, data in machines_dict.items():
+            total_pct = round((data['total_defect'] / data['total_produced'] * 100), 2) if data['total_produced'] > 0 else 0
+            
+            if total_pct >= thresholds['critical_percent']:
+                status = 'critical'
+            elif total_pct >= thresholds['warning_percent']:
+                status = 'warning'
+            else:
+                status = 'ok'
+            
+            defect_rates.append(MachineDefectRate(
+                machine_name=machine,
+                total_produced=data['total_produced'],
+                total_defect=data['total_defect'],
+                defect_percent=total_pct,
+                status=status,
+                lots=data['lots']
+            ))
+        
+        # Сортируем по % брака DESC
+        defect_rates.sort(key=lambda x: x.defect_percent, reverse=True)
         
         return defect_rates
         
