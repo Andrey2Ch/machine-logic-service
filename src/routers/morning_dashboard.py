@@ -40,15 +40,17 @@ class AcceptanceDiscrepancy(BaseModel):
     status: str  # 'critical', 'warning', 'ok'
 
 class DefectRate(BaseModel):
-    """Процент брака по станку"""
+    """Процент брака по лоту"""
     machine_name: str
-    lot_count: int
-    total_produced: int  # Всего произведено (принято + в производстве)
-    total_defect: int  # Брак
-    total_good: int  # Годные
-    defect_percent: float  # % брака
-    defect_recent: Optional[int] = None  # Брак за последний период активности
-    defect_period_days: Optional[int] = None  # Дней назад последняя активность (0=сегодня, 1=вчера)
+    drawing_number: str  # Чертёж детали
+    lot_id: int
+    lot_status: str  # 'in_production', 'post_production', 'closed'
+    total_produced: int  # Всего принято
+    total_defect: int  # Брак всего
+    defect_percent: float  # % брака общий
+    defect_recent: Optional[int] = None  # Брак за последний период
+    defect_recent_percent: Optional[float] = None  # % брака за последний период
+    period_days: Optional[int] = None  # Дней назад последняя активность
     status: str  # 'critical', 'warning', 'ok'
 
 class Absence(BaseModel):
@@ -253,10 +255,11 @@ async def get_defect_rates(
     db: Session = Depends(get_db_session)
 ):
     """
-    Процент брака по станкам:
+    Процент брака по лотам:
     - in_production: все лоты без ограничений
     - post_production/closed: последний завершённый лот для каждого станка за 7 дней
-    - Динамика: брак с последней активности станка (не привязан к 24ч)
+    - Группировка по лоту (не по станку)
+    - Сортировка: in_production первый, потом post_production; затем по defect_percent DESC
     """
     try:
         query = text("""
@@ -272,26 +275,23 @@ async def get_defect_rates(
               AND sj.end_time > NOW() - INTERVAL '7 days'
             ORDER BY sj.machine_id, sj.end_time DESC NULLS LAST
         ),
-        machine_last_activity AS (
-            -- Последняя активность (батч) для каждого станка
+        lot_last_activity AS (
+            -- Последняя активность (батч) для каждого лота
             SELECT 
-                sj.machine_id,
+                b.lot_id,
                 MAX(b.warehouse_received_at) as last_batch_time,
-                -- Дней назад (0 = сегодня, 1 = вчера, и т.д.)
                 (CURRENT_DATE - MAX(b.warehouse_received_at)::date) as days_ago
             FROM batches b
-            JOIN lots l ON l.id = b.lot_id
-            JOIN setup_jobs sj ON sj.lot_id = l.id
             WHERE b.warehouse_received_at IS NOT NULL
-              AND sj.machine_id IS NOT NULL
-            GROUP BY sj.machine_id
+            GROUP BY b.lot_id
         ),
-        lot_stats AS (
-            SELECT 
+        lot_data AS (
+            SELECT DISTINCT ON (l.id)
                 l.id as lot_id,
                 l.status as lot_status,
-                sj.machine_id,
+                p.drawing_number,
                 m.name as machine_name,
+                sj.machine_id,
                 
                 -- Всего принято (без archived)
                 COALESCE((
@@ -302,69 +302,69 @@ async def get_defect_rates(
                       AND current_location != 'archived'
                 ), 0) as total_accepted,
                 
-                -- Годные
-                COALESCE((
-                    SELECT SUM(current_quantity)
-                    FROM batches
-                    WHERE lot_id = l.id
-                      AND current_location = 'good'
-                ), 0) as good,
-                
                 -- Брак (всего)
                 COALESCE((
                     SELECT SUM(current_quantity)
                     FROM batches
                     WHERE lot_id = l.id
                       AND current_location = 'defect'
-                ), 0) as defect,
+                ), 0) as total_defect,
                 
-                -- Брак с последней активности (с начала того дня)
+                -- Брак с последней активности лота (с начала того дня)
                 COALESCE((
                     SELECT SUM(b2.current_quantity)
                     FROM batches b2
                     WHERE b2.lot_id = l.id
                       AND b2.current_location = 'defect'
                       AND b2.warehouse_received_at >= (
-                          SELECT DATE_TRUNC('day', mla.last_batch_time)
-                          FROM machine_last_activity mla
-                          WHERE mla.machine_id = sj.machine_id
+                          SELECT DATE_TRUNC('day', lla.last_batch_time)
+                          FROM lot_last_activity lla
+                          WHERE lla.lot_id = l.id
                       )
-                ), 0) as defect_recent
+                ), 0) as defect_recent,
+                
+                -- Дней назад последняя активность
+                (SELECT lla.days_ago FROM lot_last_activity lla WHERE lla.lot_id = l.id) as period_days
                 
             FROM lots l
+            JOIN parts p ON p.id = l.part_id
             JOIN setup_jobs sj ON sj.lot_id = l.id
             LEFT JOIN machines m ON m.id = sj.machine_id
             WHERE sj.machine_id IS NOT NULL
               AND (
-                -- Все лоты в производстве (без ограничения по дате)
                 l.status = 'in_production'
                 OR
-                -- Последний завершённый за 7 дней для этого станка
                 EXISTS (
                     SELECT 1 FROM latest_completed lc 
                     WHERE lc.lot_id = l.id AND lc.machine_id = sj.machine_id
                 )
               )
+            ORDER BY l.id, sj.end_time DESC NULLS LAST
         )
         SELECT 
-            ls.machine_name,
-            COUNT(DISTINCT ls.lot_id) as lot_count,
-            SUM(ls.total_accepted) as total_produced,
-            SUM(ls.good) as total_good,
-            SUM(ls.defect) as total_defect,
-            SUM(ls.defect_recent) as defect_recent,
-            mla.days_ago as defect_period_days,
+            lot_id,
+            lot_status,
+            drawing_number,
+            machine_name,
+            total_accepted,
+            total_defect,
+            defect_recent,
+            period_days,
             CASE 
-                WHEN SUM(ls.total_accepted) > 0 
-                THEN ROUND((SUM(ls.defect)::numeric / SUM(ls.total_accepted)) * 100, 2)
+                WHEN total_accepted > 0 
+                THEN ROUND((total_defect::numeric / total_accepted) * 100, 2)
                 ELSE 0 
-            END as defect_percent
-        FROM lot_stats ls
-        LEFT JOIN machine_last_activity mla ON mla.machine_id = ls.machine_id
-        WHERE ls.machine_name IS NOT NULL
-          AND ls.total_accepted > 0
-        GROUP BY ls.machine_name, mla.days_ago
-        ORDER BY defect_percent DESC;
+            END as defect_percent,
+            CASE 
+                WHEN defect_recent > 0 AND total_accepted > 0
+                THEN ROUND((defect_recent::numeric / total_accepted) * 100, 2)
+                ELSE NULL 
+            END as defect_recent_percent
+        FROM lot_data
+        WHERE machine_name IS NOT NULL
+        ORDER BY 
+            CASE lot_status WHEN 'in_production' THEN 0 ELSE 1 END,
+            defect_percent DESC;
         """)
         
         result = db.execute(query).fetchall()
@@ -384,13 +384,15 @@ async def get_defect_rates(
             
             defect_rates.append(DefectRate(
                 machine_name=row.machine_name,
-                lot_count=row.lot_count,
-                total_produced=int(row.total_produced),
-                total_good=int(row.total_good),
+                drawing_number=row.drawing_number or '-',
+                lot_id=row.lot_id,
+                lot_status=row.lot_status,
+                total_produced=int(row.total_accepted),
                 total_defect=int(row.total_defect),
                 defect_percent=defect_pct,
-                defect_recent=int(row.defect_recent) if row.defect_recent is not None else None,
-                defect_period_days=int(row.defect_period_days) if row.defect_period_days is not None else None,
+                defect_recent=int(row.defect_recent) if row.defect_recent else None,
+                defect_recent_percent=float(row.defect_recent_percent) if row.defect_recent_percent else None,
+                period_days=int(row.period_days) if row.period_days is not None else None,
                 status=status
             ))
         
