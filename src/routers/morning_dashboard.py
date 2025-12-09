@@ -278,7 +278,7 @@ async def get_defect_rates(
                 sj.machine_id,
                 MAX(b.warehouse_received_at) as last_batch_time,
                 -- Дней назад (0 = сегодня, 1 = вчера, и т.д.)
-                EXTRACT(DAY FROM (CURRENT_DATE - MAX(b.warehouse_received_at)::date))::int as days_ago
+                (CURRENT_DATE - MAX(b.warehouse_received_at)::date) as days_ago
             FROM batches b
             JOIN lots l ON l.id = b.lot_id
             JOIN setup_jobs sj ON sj.lot_id = l.id
