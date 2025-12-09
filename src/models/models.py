@@ -24,6 +24,7 @@ class MachineDB(Base):
     type = Column(String(50))
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     is_active = Column(Boolean, default=True)
+    is_operational = Column(Boolean, default=True)  # False = поломан/на обслуживании
     location_id = Column(Integer, ForeignKey("areas.id"), nullable=False)
     serial_number = Column(String(255), nullable=True)
     notes = Column(Text, nullable=True)

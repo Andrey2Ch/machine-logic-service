@@ -128,6 +128,7 @@ async def recommend_machines(
             m.supports_no_guidebush
         FROM machines m
         WHERE m.is_active = true
+          AND COALESCE(m.is_operational, true) = true
         ORDER BY m.name
     """)
     
@@ -587,6 +588,7 @@ async def recommend_with_queue_analysis(
                 m.max_part_length, m.is_jbs
             FROM machines m
             WHERE m.id = :pinned_id AND m.is_active = true
+              AND COALESCE(m.is_operational, true) = true
         """)
         machines = db.execute(machines_query, {"pinned_id": pinned_machine_id}).fetchall()
     else:
@@ -597,6 +599,7 @@ async def recommend_with_queue_analysis(
                 m.max_part_length, m.is_jbs
             FROM machines m
             WHERE m.is_active = true
+              AND COALESCE(m.is_operational, true) = true
               AND (m.min_diameter IS NULL OR m.min_diameter <= :diameter)
               AND (m.max_diameter IS NULL OR m.max_diameter >= :diameter)
             ORDER BY m.name
