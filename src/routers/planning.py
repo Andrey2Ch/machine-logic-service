@@ -143,7 +143,7 @@ async def recommend_machines(
             l.actual_diameter as current_diameter
         FROM setup_jobs sj
         JOIN lots l ON sj.lot_id = l.id
-        WHERE sj.status IN ('started', 'completed')
+        WHERE sj.status IN ('created', 'pending_qc', 'allowed', 'started')
           AND sj.end_time IS NULL
     """)
     
@@ -191,7 +191,7 @@ async def recommend_machines(
             JOIN setup_jobs sj ON sj.lot_id = l.id
             LEFT JOIN latest_readings lr ON lr.setup_job_id = sj.id
             WHERE l.status = 'in_production'
-              AND sj.status IN ('started', 'completed')
+              AND sj.status IN ('created', 'pending_qc', 'allowed', 'started')
               AND sj.end_time IS NULL
         )
         SELECT 
@@ -611,7 +611,7 @@ async def recommend_with_queue_analysis(
         SELECT sj.machine_id, l.actual_diameter as current_diameter
         FROM setup_jobs sj
         JOIN lots l ON sj.lot_id = l.id
-        WHERE sj.status IN ('started', 'completed') AND sj.end_time IS NULL
+        WHERE sj.status IN ('created', 'pending_qc', 'allowed', 'started') AND sj.end_time IS NULL
     """)
     current_setups = {row.machine_id: row.current_diameter 
                       for row in db.execute(current_setup_query).fetchall()}
@@ -667,7 +667,7 @@ async def recommend_with_queue_analysis(
         JOIN setup_jobs sj ON sj.lot_id = l.id
         LEFT JOIN latest_readings lr ON lr.setup_job_id = sj.id
         WHERE l.status = 'in_production'
-          AND sj.status IN ('started', 'completed')
+          AND sj.status IN ('created', 'pending_qc', 'allowed', 'started')
           AND sj.end_time IS NULL
         
         ORDER BY machine_id, position
