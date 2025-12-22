@@ -1002,6 +1002,8 @@ class OperatorMachineViewItem(BaseModel):
     plannedQuantity: Optional[int] = Field(None, alias='planned_quantity')
     additionalQuantity: Optional[int] = Field(None, alias='additional_quantity')
     status: Optional[str] = None
+    operatorName: Optional[str] = Field(None, alias='operator_name')
+    qaName: Optional[str] = Field(None, alias='qa_name')
     class Config: 
         from_attributes = True
         populate_by_name = True 
@@ -1062,6 +1064,8 @@ async def get_operator_machines_view(db: Session = Depends(get_db_session)):
                     part_id,
                     status,
                     machine_id,
+                    employee_id,
+                    qa_id,
                     ROW_NUMBER() OVER (PARTITION BY machine_id ORDER BY created_at DESC) as rn
                 FROM setup_jobs
                 WHERE status IN :active_statuses AND end_time IS NULL
@@ -1075,7 +1079,9 @@ async def get_operator_machines_view(db: Session = Depends(get_db_session)):
                 p.drawing_number,
                 ls.planned_quantity,
                 ls.additional_quantity,
-                COALESCE(ls.status, 'idle') as status
+                COALESCE(ls.status, 'idle') as status,
+                op.full_name as operator_name,
+                qa.full_name as qa_name
             FROM machines m
             LEFT JOIN (
                 SELECT * FROM latest_setups WHERE rn = 1
@@ -1084,6 +1090,8 @@ async def get_operator_machines_view(db: Session = Depends(get_db_session)):
                 SELECT * FROM latest_readings WHERE rn = 1
             ) lr ON ls.id = lr.setup_job_id
             LEFT JOIN parts p ON ls.part_id = p.id
+            LEFT JOIN employees op ON ls.employee_id = op.id
+            LEFT JOIN employees qa ON ls.qa_id = qa.id
             WHERE m.is_active = true
             ORDER BY m.name;
             """)
