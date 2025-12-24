@@ -90,6 +90,24 @@ async def send_setup_approval_notifications(db: Session, setup_id: int, notifica
         await _notify_role_by_id_sqlalchemy(db, ADMIN_ROLE_ID, admin_message, exclude_id=machinist_obj.id if machinist_obj else None)
         await _notify_role_by_id_sqlalchemy(db, OPERATOR_ROLE_ID, operator_message, exclude_id=machinist_obj.id if machinist_obj else None)
 
+        # 🔔 Если это завершение - уведомляем ВСЕХ наладчиков об освободившемся станке
+        if notification_type == "completion":
+            free_machine_message = (
+                f"<b>🟢 Станок освободился!</b>\n\n"
+                f"<b>Станок:</b> {machine_name}\n"
+                f"<b>Чертёж:</b> {drawing_number}\n"
+                f"<b>Партия:</b> {lot_number}\n"
+                f"<b>Время:</b> {completion_time}\n\n"
+                f"<i>Станок готов для новой наладки 🛠</i>"
+            )
+            await _notify_role_by_id_sqlalchemy(
+                db, 
+                MACHINIST_ROLE_ID, 
+                free_machine_message, 
+                exclude_id=machinist_obj.id if machinist_obj else None  # не шлём автору наладки
+            )
+            logger.info(f"Sent 'machine free' notification to all machinists for machine {machine_name}")
+
         logger.info(f"Successfully processed {notification_type} notifications for setup {setup_id}")
         return True
 
