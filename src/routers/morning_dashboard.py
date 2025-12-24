@@ -98,10 +98,11 @@ class MachineInfo(BaseModel):
     lot_number: str
     drawing_number: str
     status: str
-    progress: str  # "180/200"
+    progress: str  # "180/200" или "180/200 (live: 185)"
     hours_remaining: float
     estimated_completion: str
     priority: str  # Приоритет наладки
+    live_quantity: Optional[int] = None  # Live данные из MTConnect
 
 class MachinePlan(BaseModel):
     """План работы станков на день"""
@@ -541,19 +542,30 @@ async def get_machine_plan():
             """Конвертируем данные из morning-report в MachineInfo"""
             # Прогресс
             current = m.get("Текущее количество", 0)
+            live = m.get("Live количество")  # Может быть None если MTConnect недоступен
             planned = m.get("План", 0)
             additional = m.get("Доп. кол.", 0)
             total_plan = planned + additional
+            
+            # Формируем строку прогресса с live данными если доступны
+            if total_plan > 0:
+                if live is not None and live != current:
+                    progress = f"{current}/{total_plan} (live: {live})"
+                else:
+                    progress = f"{current}/{total_plan}"
+            else:
+                progress = "-"
             
             return MachineInfo(
                 machine_name=m.get("Станок", ""),
                 lot_number=m.get("Номер лота", ""),
                 drawing_number=m.get("Чертёж", ""),
                 status=m.get("Статус", ""),
-                progress=f"{current}/{total_plan}" if total_plan > 0 else "-",
+                progress=progress,
                 hours_remaining=float(m.get("Осталось часов", 0)),
                 estimated_completion=m.get("Дата и время окончания", ""),
-                priority=m.get("Приоритет наладки", "")
+                priority=m.get("Приоритет наладки", ""),
+                live_quantity=live
             )
         
         # Фильтруем по приоритетам

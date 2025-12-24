@@ -11,6 +11,7 @@ from sqlalchemy import func
 # Относительные импорты для доступа к моделям и сессии БД
 from ..database import get_db_session
 from ..models.models import MachineDB, CardDB, SetupDB, LotDB, PartDB
+from ..services.mtconnect_client import reset_counter_on_qa_approval
 
 # Настройка логгера
 logger = logging.getLogger(__name__)
@@ -176,6 +177,16 @@ async def approve_setup(setup_id: int, payload: ApproveSetupPayload, db: Session
         setup.qa_id = payload.qa_id
         setup.qa_date = datetime.now()
         db.commit()
+
+        # Получаем имя станка для сброса счётчика MTConnect
+        machine = db.query(MachineDB.name).filter(MachineDB.id == setup.machine_id).scalar()
+        
+        # Сбрасываем счётчик MTConnect на 0 при разрешении ОТК
+        if machine:
+            try:
+                await reset_counter_on_qa_approval(machine)
+            except Exception as mtc_error:
+                logger.warning(f"MTConnect counter reset failed (non-critical): {mtc_error}")
 
         # Отправляем уведомление через встроенный QC роутер (локально внутри сервиса)
         try:

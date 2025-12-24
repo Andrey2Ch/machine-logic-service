@@ -41,6 +41,7 @@ import asyncio
 import httpx
 import aiohttp
 from src.services.notification_service import send_setup_approval_notifications, send_batch_discrepancy_alert
+from src.services.mtconnect_client import sync_counter_to_mtconnect, reset_counter_on_qa_approval
 from sqlalchemy import func, desc, case, text, or_, and_
 from sqlalchemy.exc import IntegrityError
 from src.services.metrics import install_sql_capture
@@ -624,17 +625,25 @@ async def save_reading(reading_input: ReadingInput, db: Session = Depends(get_db
         logger.info("Transaction committed successfully")
 
         # 5. Сохраняем в Google Sheets (вне транзакции)
+        machine_name_for_sync = None
         try:
             operator = db.query(EmployeeDB.full_name).filter(EmployeeDB.id == reading_input.operator_id).scalar() or "Unknown"
-            machine = db.query(MachineDB.name).filter(MachineDB.id == reading_input.machine_id).scalar() or "Unknown"
+            machine_name_for_sync = db.query(MachineDB.name).filter(MachineDB.id == reading_input.machine_id).scalar() or "Unknown"
             asyncio.create_task(save_to_sheets(
                 operator=operator,
-                machine=machine,
+                machine=machine_name_for_sync,
                 reading=reading_input.value
             ))
         except Exception as sheet_error:
              logger.error(f"Error saving to Google Sheets: {sheet_error}", exc_info=True)
              # Не прерываем выполнение из-за ошибки Sheets
+
+        # 6. Синхронизируем счётчик с MTConnect (не блокируем основной результат)
+        if machine_name_for_sync and machine_name_for_sync != "Unknown":
+            try:
+                asyncio.create_task(sync_counter_to_mtconnect(machine_name_for_sync, reading_input.value))
+            except Exception as mtc_error:
+                logger.warning(f"MTConnect sync failed (non-critical): {mtc_error}")
 
         return {
             "success": True,
