@@ -12,7 +12,8 @@ import httpx
 logger = logging.getLogger(__name__)
 
 # URL MTConnect API - определяем в зависимости от окружения
-MTCONNECT_API_URL = os.getenv('MTCONNECT_API_URL', 'http://localhost:3001')
+# Production: https://mtconnect-core-production.up.railway.app
+MTCONNECT_API_URL = os.getenv('MTCONNECT_API_URL', 'https://mtconnect-core-production.up.railway.app')
 
 logger.info(f"MTConnect API URL: {MTCONNECT_API_URL}")
 
