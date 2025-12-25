@@ -247,6 +247,75 @@ async def get_parts(
         logger.error(f"Ошибка при получении списка деталей (search='{search}', skip={skip}, limit={limit}): {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Внутренняя ошибка сервера при получении списка деталей: {str(e)}")
 
+@app.get("/parts/history-by-drawing", tags=["Parts"])
+async def get_part_production_history(
+    drawing_number: str = Query(..., description="Номер чертежа/программы детали"),
+    limit: int = Query(50, description="Максимальное количество записей"),
+    db: Session = Depends(get_db_session)
+):
+    """
+    Получить историю производства детали по номеру чертежа.
+    Возвращает все завершённые наладки этой детали с информацией о станке, операторе и времени цикла.
+    """
+    try:
+        logger.info(f"Getting production history for drawing_number: {drawing_number}")
+        
+        # Находим part_id по drawing_number (case-insensitive)
+        part = db.query(PartDB).filter(
+            func.lower(PartDB.drawing_number) == func.lower(drawing_number)
+        ).first()
+        
+        if not part:
+            logger.info(f"Part not found for drawing_number: {drawing_number}")
+            return {"drawing_number": drawing_number, "history": [], "total": 0}
+        
+        logger.info(f"Found part_id={part.id} for drawing_number={drawing_number}")
+        
+        # Запрашиваем историю наладок с JOIN на машину и оператора
+        query = db.query(
+            SetupDB.created_at,
+            SetupDB.end_time,
+            SetupDB.cycle_time,
+            SetupDB.planned_quantity,
+            SetupDB.status,
+            MachineDB.name.label('machine_name'),
+            EmployeeDB.full_name.label('operator_name')
+        ).join(
+            MachineDB, SetupDB.machine_id == MachineDB.id, isouter=True
+        ).join(
+            EmployeeDB, SetupDB.employee_id == EmployeeDB.id, isouter=True
+        ).filter(
+            SetupDB.part_id == part.id
+        ).order_by(
+            SetupDB.created_at.desc()
+        ).limit(limit)
+        
+        results = query.all()
+        logger.info(f"Found {len(results)} setup_jobs for part_id={part.id}")
+        
+        history = []
+        for row in results:
+            history.append({
+                "date": row.created_at.strftime("%Y-%m-%d") if row.created_at else None,
+                "datetime": row.created_at.isoformat() if row.created_at else None,
+                "end_time": row.end_time.isoformat() if row.end_time else None,
+                "machine": row.machine_name or "Unknown",
+                "operator": row.operator_name or "",
+                "cycle_time_sec": row.cycle_time,
+                "quantity_planned": row.planned_quantity,
+                "status": row.status or "unknown"
+            })
+        
+        return {
+            "drawing_number": drawing_number,
+            "history": history,
+            "total": len(history)
+        }
+        
+    except Exception as e:
+        logger.error(f"Ошибка при получении истории детали {drawing_number}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ошибка при получении истории: {str(e)}")
+
 @app.get("/parts/{part_id}", response_model=PartResponse, tags=["Parts"])
 async def get_part(part_id: int, db: Session = Depends(get_db_session)):
     """Получить деталь по ID."""
@@ -2531,93 +2600,6 @@ async def get_multiple_cycle_times(part_ids: List[int], db: Session = Depends(ge
     except Exception as e:
         logger.error(f"Ошибка при получении cycle_times для деталей: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Ошибка при получении cycle_times: {str(e)}")
-
-
-@app.get("/parts/history-by-drawing", tags=["Parts"])
-async def get_part_production_history(
-    drawing_number: str = Query(..., description="Номер чертежа/программы детали"),
-    limit: int = Query(50, description="Максимальное количество записей"),
-    db: Session = Depends(get_db_session)
-):
-    """
-    Получить историю производства детали по номеру чертежа.
-    Возвращает все завершённые наладки этой детали с информацией о станке, операторе и времени цикла.
-    
-    Returns:
-        {
-            "drawing_number": str,
-            "history": [
-                {
-                    "date": "2024-12-20",
-                    "machine": "SR-24",
-                    "operator": "Иванов И.И.",
-                    "cycle_time_sec": 51,
-                    "quantity_produced": 150,
-                    "status": "completed"
-                },
-                ...
-            ],
-            "total": int
-        }
-    """
-    try:
-        logger.info(f"Getting production history for drawing_number: {drawing_number}")
-        
-        # Находим part_id по drawing_number (case-insensitive)
-        part = db.query(PartDB).filter(
-            func.lower(PartDB.drawing_number) == func.lower(drawing_number)
-        ).first()
-        
-        if not part:
-            logger.info(f"Part not found for drawing_number: {drawing_number}")
-            return {"drawing_number": drawing_number, "history": [], "total": 0}
-        
-        logger.info(f"Found part_id={part.id} for drawing_number={drawing_number}")
-        
-        # Запрашиваем историю наладок с JOIN на машину и оператора
-        query = db.query(
-            SetupDB.created_at,
-            SetupDB.end_time,
-            SetupDB.cycle_time,
-            SetupDB.planned_quantity,
-            SetupDB.status,
-            MachineDB.name.label('machine_name'),
-            EmployeeDB.full_name.label('operator_name')
-        ).join(
-            MachineDB, SetupDB.machine_id == MachineDB.id, isouter=True
-        ).join(
-            EmployeeDB, SetupDB.employee_id == EmployeeDB.id, isouter=True
-        ).filter(
-            SetupDB.part_id == part.id
-        ).order_by(
-            SetupDB.created_at.desc()
-        ).limit(limit)
-        
-        results = query.all()
-        logger.info(f"Found {len(results)} setup_jobs for part_id={part.id}")
-        
-        history = []
-        for row in results:
-            history.append({
-                "date": row.created_at.strftime("%Y-%m-%d") if row.created_at else None,
-                "datetime": row.created_at.isoformat() if row.created_at else None,
-                "end_time": row.end_time.isoformat() if row.end_time else None,
-                "machine": row.machine_name or "Unknown",
-                "operator": row.operator_name or "",
-                "cycle_time_sec": row.cycle_time,
-                "quantity_planned": row.planned_quantity,
-                "status": row.status or "unknown"
-            })
-        
-        return {
-            "drawing_number": drawing_number,
-            "history": history,
-            "total": len(history)
-        }
-        
-    except Exception as e:
-        logger.error(f"Ошибка при получении истории детали {drawing_number}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Ошибка при получении истории: {str(e)}")
 
 
 @app.get("/lots/{lot_id}/cycle-time-detailed", tags=["Lots"])
