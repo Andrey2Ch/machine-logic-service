@@ -10,8 +10,10 @@ from sqlalchemy import func
 
 # Относительные импорты для доступа к моделям и сессии БД
 from ..database import get_db_session
-from ..models.models import MachineDB, CardDB, SetupDB, LotDB, PartDB
+from ..models.models import MachineDB, CardDB, SetupDB, LotDB, PartDB, EmployeeDB
 from ..services.mtconnect_client import reset_counter_on_qa_approval
+from ..services.telegram_client import send_telegram_message
+from ..services.whatsapp_client import send_whatsapp_to_role, WHATSAPP_ENABLED
 
 # Настройка логгера
 logger = logging.getLogger(__name__)
@@ -152,6 +154,62 @@ async def send_setup_to_qc(setup_id: int, db: Session = Depends(get_db_session))
         # фиксируем момент передачи в ОТК
         setup.pending_qc_date = datetime.now()
         db.commit()
+        
+        # 🔔 Отправляем уведомления
+        try:
+            # Получаем данные для уведомления
+            machine = db.query(MachineDB).filter(MachineDB.id == setup.machine_id).first()
+            lot = db.query(LotDB).filter(LotDB.id == setup.lot_id).first()
+            part = db.query(PartDB).filter(PartDB.id == setup.part_id).first()
+            machinist = db.query(EmployeeDB).filter(EmployeeDB.id == setup.employee_id).first()
+            
+            machine_name = machine.name if machine else 'Неизвестно'
+            lot_number = lot.lot_number if lot else 'Неизвестно'
+            drawing_number = part.drawing_number if part else 'Неизвестно'
+            machinist_name = machinist.full_name if machinist else 'Неизвестно'
+            planned_qty = setup.planned_quantity or 0
+            
+            message = (
+                f"<b>🔄 Наладка отправлена в ОТК</b>\n\n"
+                f"<b>Станок:</b> {machine_name}\n"
+                f"<b>Чертёж:</b> {drawing_number}\n"
+                f"<b>Партия:</b> {lot_number}\n"
+                f"<b>План:</b> {planned_qty}\n"
+                f"<b>Наладчик:</b> {machinist_name}\n\n"
+                f"<i>Ожидает проверки ОТК ✅</i>"
+            )
+            
+            # Отправляем в Telegram (QA role_id=5, Admin role_id=3)
+            qa_employees = db.query(EmployeeDB).filter(
+                EmployeeDB.role_id == 5,
+                EmployeeDB.is_active == True,
+                EmployeeDB.telegram_id != None
+            ).all()
+            
+            for emp in qa_employees:
+                if emp.telegram_id:
+                    await send_telegram_message(emp.telegram_id, message)
+            
+            admin_employees = db.query(EmployeeDB).filter(
+                EmployeeDB.role_id == 3,
+                EmployeeDB.is_active == True,
+                EmployeeDB.telegram_id != None
+            ).all()
+            
+            for emp in admin_employees:
+                if emp.telegram_id:
+                    await send_telegram_message(emp.telegram_id, message)
+            
+            # Отправляем в WhatsApp группы (QA + Machinists)
+            if WHATSAPP_ENABLED:
+                await send_whatsapp_to_role(db, 5, message)  # QA
+                await send_whatsapp_to_role(db, 2, message)  # Machinists
+            
+            logger.info(f"Sent pending_qc notifications for setup {setup_id}")
+            
+        except Exception as notif_err:
+            logger.warning(f"Failed to send pending_qc notifications (non-critical): {notif_err}")
+        
         return {"success": True, "status": setup.status}
     except HTTPException:
         raise
