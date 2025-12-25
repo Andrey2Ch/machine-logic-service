@@ -9,6 +9,7 @@ from src.database import get_db_session
 from src.models.models import LotDB, PartDB, SetupDB, EmployeeDB, MachineDB
 from pydantic import BaseModel
 from src.services.telegram_client import send_telegram_message
+from src.services.whatsapp_client import send_whatsapp_to_role, WHATSAPP_ENABLED
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Quality Control"])
@@ -216,6 +217,26 @@ async def notify_setup_allowed(
                 successful_sends += 1
             except Exception as send_error:
                 logger.error(f"Не удалось отправить уведомление пользователю {user_id}: {send_error}")
+
+        # 6. Отправить в WhatsApp группы
+        if WHATSAPP_ENABLED:
+            try:
+                # Формируем сообщение для WhatsApp (без HTML)
+                wa_message = (
+                    f"✅ Наладка разрешена ОТК!\n\n"
+                    f"🔧 Станок: {setup_info.machine_name}\n"
+                    f"📝 Чертёж: {setup_info.drawing_number}\n"
+                    f"👨‍🔧 Наладчик: {setup_info.machinist_name}\n"
+                    f"✔️ ОТК: {setup_info.qa_name}\n\n"
+                    f"Операторы могут начинать работу!"
+                )
+                
+                # Отправляем в группы: Наладчики, Операторы (обе смены)
+                await send_whatsapp_to_role(db, 2, wa_message)  # Machinists
+                await send_whatsapp_to_role(db, 1, wa_message)  # Operators
+                logger.info(f"WhatsApp уведомления о разрешении наладки {setup_id} отправлены")
+            except Exception as wa_err:
+                logger.warning(f"WhatsApp уведомление не отправлено (non-critical): {wa_err}")
 
         return {"success": True, "message": f"Уведомления отправлены {successful_sends} из {len(ids_to_notify)} получателей."}
 

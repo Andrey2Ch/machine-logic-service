@@ -140,6 +140,7 @@ class SetupDB(Base):
     qa_date = Column(DateTime)
     qa_id = Column(Integer, ForeignKey("employees.id"))
     additional_quantity = Column(Integer, default=0)
+    pending_qc_date = Column(DateTime)  # Время передачи в ОТК
 
     # Добавляем обратную связь к BatchDB
     batches = relationship("BatchDB", back_populates="setup_job")
