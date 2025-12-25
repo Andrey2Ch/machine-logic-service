@@ -203,7 +203,7 @@ async def send_setup_to_qc(setup_id: int, db: Session = Depends(get_db_session))
             # Отправляем в WhatsApp группы (QA + Machinists)
             if WHATSAPP_ENABLED:
                 await send_whatsapp_to_role(db, 5, message)  # QA
-                await send_whatsapp_to_role(db, 2, message)  # Machinists
+                # await send_whatsapp_to_role(db, 2, message)  # Machinists
             
             logger.info(f"Sent pending_qc notifications for setup {setup_id}")
             
