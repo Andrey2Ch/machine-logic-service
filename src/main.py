@@ -1014,6 +1014,7 @@ class OperatorMachineViewItem(BaseModel):
     status: Optional[str] = None
     operatorName: Optional[str] = Field(None, alias='operator_name')
     qaName: Optional[str] = Field(None, alias='qa_name')
+    setupCreatedAt: Optional[datetime] = Field(None, alias='setup_created_at')
     class Config: 
         from_attributes = True
         populate_by_name = True 
@@ -1076,6 +1077,7 @@ async def get_operator_machines_view(db: Session = Depends(get_db_session)):
                     machine_id,
                     employee_id,
                     qa_id,
+                    created_at,
                     ROW_NUMBER() OVER (PARTITION BY machine_id ORDER BY created_at DESC) as rn
                 FROM setup_jobs
                 WHERE status IN :active_statuses AND end_time IS NULL
@@ -1091,7 +1093,8 @@ async def get_operator_machines_view(db: Session = Depends(get_db_session)):
                 ls.additional_quantity,
                 COALESCE(ls.status, 'idle') as status,
                 op.full_name as operator_name,
-                qa.full_name as qa_name
+                qa.full_name as qa_name,
+                ls.created_at AT TIME ZONE 'Asia/Jerusalem' as setup_created_at
             FROM machines m
             LEFT JOIN (
                 SELECT * FROM latest_setups WHERE rn = 1

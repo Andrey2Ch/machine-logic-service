@@ -463,3 +463,4 @@ CREATE EXTENSION IF NOT EXISTS vector;
 5. [ ] Интегрировать в текущий `llm_query` endpoint
 6. [ ] Протестировать качество на реальных запросах
 
+

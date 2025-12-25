@@ -231,3 +231,4 @@ async def is_notification_enabled(
         logger.warning(f"Error checking notification setting: {e}")
         return True  # При ошибке разрешаем
 
+
