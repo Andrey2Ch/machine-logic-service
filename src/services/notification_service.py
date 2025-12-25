@@ -1,6 +1,7 @@
 import logging
 from sqlalchemy.orm import Session, aliased
 from .telegram_client import send_telegram_message
+from .whatsapp_client import send_whatsapp_to_role, WHATSAPP_ENABLED
 # Убираем RoleDB из импорта
 from src.models.models import SetupDB, EmployeeDB, MachineDB, LotDB, PartDB 
 
@@ -134,6 +135,14 @@ async def _notify_role_by_id_sqlalchemy(db: Session, role_id: int, message: str,
             if emp.telegram_id:
                  logger.debug(f"Sending notification to role_id {role_id}: {emp.full_name} (ID: {emp.id}, TG_ID: {emp.telegram_id})")
                  await send_telegram_message(emp.telegram_id, message)
+
+        # 🔔 Дублируем в WhatsApp
+        if WHATSAPP_ENABLED:
+            try:
+                wa_sent = await send_whatsapp_to_role(db, role_id, message, exclude_id)
+                logger.info(f"WhatsApp sent to {wa_sent} users with role_id {role_id}")
+            except Exception as wa_err:
+                logger.warning(f"WhatsApp send failed (non-critical): {wa_err}")
 
     except Exception as e:
         logger.error(f"Failed to notify role_id '{role_id}': {e}", exc_info=True)

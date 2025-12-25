@@ -49,6 +49,7 @@ class EmployeeDB(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     added_by = Column(Integer)
     is_active = Column(Boolean, default=True)
+    whatsapp_phone = Column(String(20), nullable=True)  # WhatsApp номер для уведомлений
     # Default area for UI filtering
     default_area_id = Column(Integer, ForeignKey("areas.id"), nullable=True)
     
