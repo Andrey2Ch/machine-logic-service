@@ -247,6 +247,77 @@ async def get_parts(
         logger.error(f"Ошибка при получении списка деталей (search='{search}', skip={skip}, limit={limit}): {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Внутренняя ошибка сервера при получении списка деталей: {str(e)}")
 
+@app.get("/machines/shift-setup-time", tags=["Machines"])
+async def get_machine_shift_setup_time(
+    machine_name: str = Query(..., description="Название станка (например SR-23)"),
+    shift_start: str = Query(..., description="Начало смены ISO формат"),
+    shift_end: str = Query(..., description="Конец смены ISO формат"),
+    db: Session = Depends(get_db_session)
+):
+    """
+    Получить суммарное время наладок станка за период (смену).
+    Возвращает общее время в секундах, которое станок провёл в режиме наладки.
+    """
+    try:
+        from datetime import datetime
+        
+        # Парсим даты
+        try:
+            start_dt = datetime.fromisoformat(shift_start.replace('Z', '+00:00'))
+            end_dt = datetime.fromisoformat(shift_end.replace('Z', '+00:00'))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid date format: {e}")
+        
+        # Находим станок по имени
+        machine = db.query(MachineDB).filter(
+            func.lower(MachineDB.name) == func.lower(machine_name)
+        ).first()
+        
+        if not machine:
+            return {"machine_name": machine_name, "setup_time_sec": 0, "setup_count": 0}
+        
+        # Запрашиваем наладки за период
+        # Наладка попадает в период если:
+        # 1. Началась в периоде (created_at между start и end)
+        # 2. ИЛИ закончилась в периоде (end_time между start и end)  
+        # 3. ИЛИ охватывает весь период (created_at < start AND (end_time > end OR end_time IS NULL))
+        setups = db.query(SetupDB).filter(
+            SetupDB.machine_id == machine.id,
+            or_(
+                # Началась в периоде
+                and_(SetupDB.created_at >= start_dt, SetupDB.created_at <= end_dt),
+                # Закончилась в периоде
+                and_(SetupDB.end_time >= start_dt, SetupDB.end_time <= end_dt),
+                # Охватывает период (началась до, закончилась после или ещё не закончилась)
+                and_(SetupDB.created_at < start_dt, or_(SetupDB.end_time > end_dt, SetupDB.end_time == None))
+            )
+        ).all()
+        
+        total_setup_sec = 0
+        for setup in setups:
+            # Определяем фактическое начало наладки в рамках смены
+            setup_start = max(setup.created_at, start_dt) if setup.created_at else start_dt
+            # Определяем фактический конец наладки (или текущий момент если ещё идёт)
+            setup_end = setup.end_time if setup.end_time else datetime.now(start_dt.tzinfo or None)
+            setup_end = min(setup_end, end_dt)
+            
+            # Считаем время только если наладка пересекается с периодом
+            if setup_end > setup_start:
+                duration = (setup_end - setup_start).total_seconds()
+                total_setup_sec += duration
+        
+        return {
+            "machine_name": machine_name,
+            "setup_time_sec": int(total_setup_sec),
+            "setup_count": len(setups)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Ошибка при получении времени наладок для {machine_name}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ошибка: {str(e)}")
+
 @app.get("/parts/history-by-drawing", tags=["Parts"])
 async def get_part_production_history(
     drawing_number: str = Query(..., description="Номер чертежа/программы детали"),
