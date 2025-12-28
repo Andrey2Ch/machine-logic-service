@@ -333,19 +333,31 @@ async def get_machine_shift_setup_time(
         
         total_setup_sec = 0
         
-        # Нормализуем даты из БД (убираем timezone если есть)
-        def normalize_dt(dt):
-            if dt and hasattr(dt, 'tzinfo') and dt.tzinfo:
-                return dt.replace(tzinfo=None)
-            return dt
+        # ВАЖНО: В БД время хранится как naive datetime в Israel timezone!
+        # При чтении через ORM получаем naive datetime. Нужно интерпретировать как Israel и конвертировать в UTC.
+        from zoneinfo import ZoneInfo
+        israel_tz = ZoneInfo('Asia/Jerusalem')
+        utc_tz = ZoneInfo('UTC')
+        
+        def normalize_dt_to_utc(dt):
+            """Конвертирует datetime из БД (Israel naive) в UTC naive для сравнения"""
+            if dt is None:
+                return None
+            # Если уже есть timezone, конвертируем в UTC и убираем
+            if hasattr(dt, 'tzinfo') and dt.tzinfo:
+                return dt.astimezone(utc_tz).replace(tzinfo=None)
+            # Naive datetime из БД — интерпретируем как Israel time
+            dt_israel = dt.replace(tzinfo=israel_tz)
+            dt_utc = dt_israel.astimezone(utc_tz)
+            return dt_utc.replace(tzinfo=None)
         
         # DEBUG: логируем входные параметры
         logger.info(f"[SETUP-TIME-DEBUG] {machine_name}: start_dt={start_dt}, end_dt={end_dt}, now_utc={datetime.utcnow()}")
         
         for setup in setups:
-            setup_created = normalize_dt(setup.created_at)
-            setup_qa_date = normalize_dt(setup.qa_date)
-            setup_start_time = normalize_dt(setup.start_time)
+            setup_created = normalize_dt_to_utc(setup.created_at)
+            setup_qa_date = normalize_dt_to_utc(setup.qa_date)
+            setup_start_time = normalize_dt_to_utc(setup.start_time)
             
             # DEBUG: логируем данные наладки
             logger.info(f"[SETUP-TIME-DEBUG] {machine_name}: setup_id={setup.id}, status={setup.status}, created={setup_created}, qa_date={setup_qa_date}, start_time={setup_start_time}")
@@ -388,9 +400,9 @@ async def get_machine_shift_setup_time(
         
         # Пересчитаем с debug для каждой наладки
         for setup in setups:
-            setup_created = normalize_dt(setup.created_at)
-            setup_qa_date = normalize_dt(setup.qa_date)
-            setup_start_time = normalize_dt(setup.start_time)
+            setup_created = normalize_dt_to_utc(setup.created_at)
+            setup_qa_date = normalize_dt_to_utc(setup.qa_date)
+            setup_start_time = normalize_dt_to_utc(setup.start_time)
             
             setup_end_point = None
             if setup_qa_date:
