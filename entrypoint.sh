@@ -7,5 +7,5 @@ PORT=${PORT:-8000}
 mkdir -p /app/drawings
 chmod 777 /app/drawings
 
-# Запустить uvicorn с правильным портом
-exec uvicorn src.main:app --host 0.0.0.0 --port $PORT 
+# Запустить uvicorn с несколькими workers для параллельной обработки
+exec uvicorn src.main:app --host 0.0.0.0 --port $PORT --workers 4 
