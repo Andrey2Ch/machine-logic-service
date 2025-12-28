@@ -232,3 +232,4 @@ async def is_notification_enabled(
         return True  # При ошибке разрешаем
 
 
+

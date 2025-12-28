@@ -62,3 +62,4 @@ CREATE TRIGGER trigger_update_notification_settings
 COMMENT ON TABLE notification_settings IS 'Настройки WhatsApp и Telegram уведомлений для разных групп';
 
 
+

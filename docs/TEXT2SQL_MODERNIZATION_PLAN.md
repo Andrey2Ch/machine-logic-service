@@ -464,3 +464,4 @@ CREATE EXTENSION IF NOT EXISTS vector;
 6. [ ] Протестировать качество на реальных запросах
 
 
+

@@ -108,16 +108,52 @@ async def update_work_shift(employee_id: int, shift_date: date, db: Session):
     Обновить агрегированные данные смены
     Вычисляет общее время работы на основе записей входа/выхода
     
-    Логика: суммирует время по парам вход-выход
-    - 10:50 ВХОД, 10:51 ВЫХОД = 1 минута
-    - 11:36 ВХОД, 11:39 ВЫХОД = 3 минуты
-    - Итого: 4 минуты
+    Логика ночных смен:
+    - Смена привязывается к дате ВХОДА (check_in)
+    - Если вход после 17:00 (ночная смена), выход ищется до 10:00 следующего дня
+    - Если вход до 17:00 (дневная смена), выход ищется в тот же день
     """
-    # Получить все записи за день
-    entries = db.query(TimeEntryDB).filter(
+    # Определяем временные границы для поиска записей
+    # shift_date = дата смены (по первому входу)
+    shift_start = datetime.combine(shift_date, datetime.min.time())  # 00:00:00
+    
+    # Для ночных смен захватываем до 10:00 следующего дня
+    next_day = shift_date + timedelta(days=1)
+    shift_end = datetime.combine(next_day, datetime.min.time().replace(hour=10))  # следующий день 10:00
+    
+    # Получаем все записи в расширенном диапазоне
+    all_entries = db.query(TimeEntryDB).filter(
         TimeEntryDB.employee_id == employee_id,
-        func.date(TimeEntryDB.entry_time) == shift_date
+        TimeEntryDB.entry_time >= shift_start,
+        TimeEntryDB.entry_time < shift_end
     ).order_by(TimeEntryDB.entry_time).all()
+    
+    if not all_entries:
+        return
+    
+    # Фильтруем записи, которые принадлежат ЭТОЙ смене
+    # Смена определяется первым входом в shift_date
+    entries = []
+    shift_check_in_found = False
+    
+    for entry in all_entries:
+        entry_date = entry.entry_time.date()
+        
+        if entry.entry_type == 'check_in' and entry_date == shift_date:
+            # Нашли вход в нужную дату - это начало нашей смены
+            shift_check_in_found = True
+            entries.append(entry)
+        elif shift_check_in_found:
+            # После найденного входа собираем все записи до следующего входа в shift_date
+            if entry.entry_type == 'check_in' and entry_date == shift_date:
+                # Новый вход в ту же дату - это уже новая сессия в рамках той же смены
+                entries.append(entry)
+            elif entry.entry_type == 'check_out':
+                # Выход - добавляем (может быть на следующий день для ночной смены)
+                entries.append(entry)
+            elif entry.entry_type == 'check_in' and entry_date > shift_date:
+                # Вход на следующий день - это уже другая смена, останавливаемся
+                break
     
     if not entries:
         return
@@ -302,8 +338,9 @@ async def check_and_create_auto_checkout(employee_id: int, db: Session):
                 db.refresh(auto_entry)
                 auto_checkout_created = auto_entry
                 
-                # Обновляем смену
-                await update_work_shift(employee_id, next_day, db)
+                # Обновляем смену по дате ВХОДА (check_in_date), не по дате выхода!
+                # Ночная смена привязывается к дате начала
+                await update_work_shift(employee_id, check_in_date, db)
                 
                 logger.info(f"Создан автоматический выход в 6:00 для сотрудника {employee_id}")
     
@@ -390,7 +427,22 @@ async def create_time_entry(entry: TimeEntryCreate, db: Session = Depends(get_db
     db.refresh(db_entry)
     
     # Обновить агрегированные данные смены
-    await update_work_shift(employee.id, db_entry.entry_time.date(), db)
+    # Для checkout нужно определить дату смены по соответствующему входу
+    shift_date_to_update = db_entry.entry_time.date()
+    
+    if entry.entry_type == 'check_out':
+        # Ищем последний незакрытый вход перед этим выходом
+        last_check_in = db.query(TimeEntryDB).filter(
+            TimeEntryDB.employee_id == employee.id,
+            TimeEntryDB.entry_type == 'check_in',
+            TimeEntryDB.entry_time < db_entry.entry_time
+        ).order_by(TimeEntryDB.entry_time.desc()).first()
+        
+        if last_check_in:
+            # Смена привязывается к дате входа
+            shift_date_to_update = last_check_in.entry_time.date()
+    
+    await update_work_shift(employee.id, shift_date_to_update, db)
     
     logger.info(f"Создана запись ID {db_entry.id} для сотрудника {employee.full_name}")
     
