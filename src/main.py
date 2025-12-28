@@ -277,33 +277,71 @@ async def get_machine_shift_setup_time(
             return {"machine_name": machine_name, "setup_time_sec": 0, "setup_count": 0}
         
         # Запрашиваем наладки за период
+        # ВАЖНО: Наладка = время от created_at до qa_date (разрешение ОТК) или start_time (начало работы)
+        # НЕ используем end_time — это конец работы, а не наладки!
+        # 
         # Наладка попадает в период если:
-        # 1. Началась в периоде (created_at между start и end)
-        # 2. ИЛИ закончилась в периоде (end_time между start и end)  
-        # 3. ИЛИ охватывает весь период (created_at < start AND (end_time > end OR end_time IS NULL))
+        # 1. Создана в периоде (created_at между start и end)
+        # 2. ИЛИ получила разрешение ОТК в периоде (qa_date между start и end)
+        # 3. ИЛИ началась работа в периоде (start_time между start и end)
+        # 4. ИЛИ была активна во время периода (created_at < start AND нет qa_date/start_time, статус created/pending_qc)
         setups = db.query(SetupDB).filter(
             SetupDB.machine_id == machine.id,
             or_(
-                # Началась в периоде
+                # Создана в периоде
                 and_(SetupDB.created_at >= start_dt, SetupDB.created_at <= end_dt),
-                # Закончилась в периоде
-                and_(SetupDB.end_time >= start_dt, SetupDB.end_time <= end_dt),
-                # Охватывает период (началась до, закончилась после или ещё не закончилась)
-                and_(SetupDB.created_at < start_dt, or_(SetupDB.end_time > end_dt, SetupDB.end_time == None))
+                # Получила разрешение ОТК в периоде
+                and_(SetupDB.qa_date >= start_dt, SetupDB.qa_date <= end_dt),
+                # Работа началась в периоде  
+                and_(SetupDB.start_time >= start_dt, SetupDB.start_time <= end_dt),
+                # Была создана до периода и ещё в режиме наладки
+                and_(
+                    SetupDB.created_at < start_dt,
+                    SetupDB.status.in_(['created', 'pending_qc']),
+                    SetupDB.qa_date == None,
+                    SetupDB.start_time == None
+                ),
+                # Была создана до периода, но получила qa_date/start_time после начала периода
+                and_(
+                    SetupDB.created_at < start_dt,
+                    or_(
+                        and_(SetupDB.qa_date != None, SetupDB.qa_date >= start_dt),
+                        and_(SetupDB.start_time != None, SetupDB.start_time >= start_dt)
+                    )
+                )
             )
         ).all()
         
         total_setup_sec = 0
         for setup in setups:
             # Нормализуем даты из БД (убираем timezone если есть)
-            setup_created = setup.created_at.replace(tzinfo=None) if setup.created_at and hasattr(setup.created_at, 'tzinfo') and setup.created_at.tzinfo else setup.created_at
-            setup_ended = setup.end_time.replace(tzinfo=None) if setup.end_time and hasattr(setup.end_time, 'tzinfo') and setup.end_time.tzinfo else setup.end_time
+            def normalize_dt(dt):
+                if dt and hasattr(dt, 'tzinfo') and dt.tzinfo:
+                    return dt.replace(tzinfo=None)
+                return dt
+            
+            setup_created = normalize_dt(setup.created_at)
+            setup_qa_date = normalize_dt(setup.qa_date)
+            setup_start_time = normalize_dt(setup.start_time)
+            
+            # Определяем когда наладка закончилась
+            # Приоритет: qa_date (ОТК разрешила) -> start_time (работа началась) -> ещё активна
+            setup_end_point = None
+            if setup_qa_date:
+                setup_end_point = setup_qa_date
+            elif setup_start_time:
+                setup_end_point = setup_start_time
+            # Если наладка ещё активна (статус created/pending_qc), берём NOW
+            elif setup.status in ['created', 'pending_qc']:
+                setup_end_point = datetime.utcnow()
+            else:
+                # Статус allowed/started/completed но нет дат — пропускаем (нет данных)
+                continue
             
             # Определяем фактическое начало наладки в рамках смены
             setup_start = max(setup_created, start_dt) if setup_created else start_dt
-            # Определяем фактический конец наладки (или текущий момент если ещё идёт)
-            setup_end = setup_ended if setup_ended else datetime.utcnow()
-            setup_end = min(setup_end, end_dt)
+            # Определяем фактический конец наладки в рамках смены
+            setup_end = min(setup_end_point, end_dt)
             
             # Считаем время только если наладка пересекается с периодом
             if setup_end > setup_start:

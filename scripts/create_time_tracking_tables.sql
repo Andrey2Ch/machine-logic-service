@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS time_entries (
     entry_time TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
     
     -- Метод фиксации
-    method VARCHAR(20) NOT NULL CHECK (method IN ('telegram', 'terminal', 'web', 'manual')),
+    method VARCHAR(20) NOT NULL CHECK (method IN ('telegram', 'terminal', 'web', 'manual', 'auto')),
     
     -- Данные геолокации (для Telegram)
     latitude DECIMAL(10, 8),
