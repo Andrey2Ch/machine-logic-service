@@ -268,12 +268,31 @@ async def get_machine_shift_setup_time(
         except ValueError as e:
             raise HTTPException(status_code=400, detail=f"Invalid date format: {e}")
         
-        # Находим станок по имени
-        machine = db.query(MachineDB).filter(
-            func.lower(MachineDB.name) == func.lower(machine_name)
-        ).first()
+        # Находим станок по имени (с поддержкой разных форматов)
+        # MTConnect может передавать: "DT-26", "M_5_DT_26", а MLS знает "D-26"
+        import re
+        
+        # Извлекаем ключевую часть имени (убираем префиксы M_X_, заменяем DT->D, BT->B)
+        clean_name = machine_name
+        # Убираем префикс типа M_5_ или M_1_
+        clean_name = re.sub(r'^M_\d+_', '', clean_name)
+        # Заменяем подчёркивания на дефисы
+        clean_name = clean_name.replace('_', '-')
+        # DT-26 -> D-26, BT-38 -> B-38
+        alt_name = re.sub(r'^(D)T-', r'\1-', clean_name)
+        alt_name = re.sub(r'^(B)T-', r'\1-', alt_name)
+        
+        # Пробуем найти по разным вариантам имени
+        machine = None
+        for name_variant in [machine_name, clean_name, alt_name]:
+            machine = db.query(MachineDB).filter(
+                func.lower(MachineDB.name) == func.lower(name_variant)
+            ).first()
+            if machine:
+                break
         
         if not machine:
+            logger.debug(f"Станок не найден: {machine_name} (варианты: {clean_name}, {alt_name})")
             return {"machine_name": machine_name, "setup_time_sec": 0, "setup_count": 0}
         
         # Запрашиваем наладки за период
