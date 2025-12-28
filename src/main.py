@@ -390,6 +390,148 @@ async def get_machine_shift_setup_time(
         logger.error(f"Ошибка при получении времени наладок для {machine_name}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Ошибка: {str(e)}")
 
+
+@app.get("/machines/hourly-setup-time", tags=["Machines"])
+async def get_machine_hourly_setup_time(
+    machine_name: str = Query(..., description="Название станка (например SR-23)"),
+    shift_start: str = Query(..., description="Начало смены ISO формат"),
+    shift_end: str = Query(..., description="Конец смены ISO формат"),
+    db: Session = Depends(get_db_session)
+):
+    """
+    Получить время наладок станка ПО ЧАСАМ за период (смену).
+    Возвращает массив [{hour: 6, setup_sec: 1200}, ...] для построения стековых графиков.
+    """
+    try:
+        from datetime import datetime, timedelta
+        import re
+        
+        # Парсим даты и убираем timezone (работаем в naive UTC)
+        try:
+            start_dt = datetime.fromisoformat(shift_start.replace('Z', '+00:00')).replace(tzinfo=None)
+            end_dt = datetime.fromisoformat(shift_end.replace('Z', '+00:00')).replace(tzinfo=None)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid date format: {e}")
+        
+        # Находим станок по имени (с поддержкой разных форматов)
+        clean_name = machine_name
+        clean_name = re.sub(r'^M_\d+_', '', clean_name)
+        clean_name = clean_name.replace('_', '-')
+        alt_name = re.sub(r'^(D)T-', r'\1-', clean_name)
+        alt_name = re.sub(r'^(B)T-', r'\1-', alt_name)
+        
+        machine = None
+        for name_variant in [machine_name, clean_name, alt_name]:
+            machine = db.query(MachineDB).filter(
+                func.lower(MachineDB.name) == func.lower(name_variant)
+            ).first()
+            if machine:
+                break
+        
+        if not machine:
+            return {"machine_name": machine_name, "hourly": []}
+        
+        # Запрашиваем наладки за период
+        setups = db.query(SetupDB).filter(
+            SetupDB.machine_id == machine.id,
+            or_(
+                and_(SetupDB.created_at >= start_dt, SetupDB.created_at <= end_dt),
+                and_(SetupDB.qa_date >= start_dt, SetupDB.qa_date <= end_dt),
+                and_(SetupDB.start_time >= start_dt, SetupDB.start_time <= end_dt),
+                and_(
+                    SetupDB.created_at < start_dt,
+                    SetupDB.status.in_(['created', 'pending_qc']),
+                    SetupDB.qa_date == None,
+                    SetupDB.start_time == None
+                ),
+                and_(
+                    SetupDB.created_at < start_dt,
+                    or_(
+                        and_(SetupDB.qa_date != None, SetupDB.qa_date >= start_dt),
+                        and_(SetupDB.start_time != None, SetupDB.start_time >= start_dt)
+                    )
+                )
+            )
+        ).all()
+        
+        def normalize_dt_to_utc(dt):
+            if dt is None:
+                return None
+            if hasattr(dt, 'tzinfo') and dt.tzinfo:
+                from zoneinfo import ZoneInfo
+                return dt.astimezone(ZoneInfo('UTC')).replace(tzinfo=None)
+            return dt
+        
+        # Инициализируем часы (12 часов смены)
+        hourly_setup = {}
+        current_hour = start_dt.replace(minute=0, second=0, microsecond=0)
+        while current_hour < end_dt:
+            hourly_setup[current_hour.hour] = 0
+            current_hour += timedelta(hours=1)
+        
+        # Распределяем время наладки по часам
+        for setup in setups:
+            setup_created = normalize_dt_to_utc(setup.created_at)
+            setup_qa_date = normalize_dt_to_utc(setup.qa_date)
+            setup_start_time = normalize_dt_to_utc(setup.start_time)
+            
+            # Определяем когда наладка закончилась
+            setup_end_point = None
+            if setup_qa_date:
+                setup_end_point = setup_qa_date
+            elif setup_start_time:
+                setup_end_point = setup_start_time
+            elif setup.status in ['created', 'pending_qc']:
+                setup_end_point = datetime.now(timezone.utc).replace(tzinfo=None)
+            else:
+                continue
+            
+            # Границы наладки в рамках смены
+            setup_start = max(setup_created, start_dt) if setup_created else start_dt
+            setup_end = min(setup_end_point, end_dt)
+            
+            if setup_end <= setup_start:
+                continue
+            
+            # Распределяем по часам
+            hour_start = setup_start.replace(minute=0, second=0, microsecond=0)
+            while hour_start < setup_end:
+                hour_end = hour_start + timedelta(hours=1)
+                # Пересечение наладки с этим часом
+                intersect_start = max(setup_start, hour_start)
+                intersect_end = min(setup_end, hour_end)
+                
+                if intersect_end > intersect_start:
+                    duration = (intersect_end - intersect_start).total_seconds()
+                    h = hour_start.hour
+                    if h in hourly_setup:
+                        hourly_setup[h] += duration
+                
+                hour_start = hour_end
+        
+        # Конвертируем в массив
+        result = []
+        current_hour = start_dt.replace(minute=0, second=0, microsecond=0)
+        while current_hour < end_dt:
+            h = current_hour.hour
+            result.append({
+                "hour": h,
+                "setup_sec": int(hourly_setup.get(h, 0))
+            })
+            current_hour += timedelta(hours=1)
+        
+        return {
+            "machine_name": machine_name,
+            "hourly": result
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Ошибка при получении hourly наладок для {machine_name}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ошибка: {str(e)}")
+
+
 @app.get("/parts/history-by-drawing", tags=["Parts"])
 async def get_part_production_history(
     drawing_number: str = Query(..., description="Номер чертежа/программы детали"),
