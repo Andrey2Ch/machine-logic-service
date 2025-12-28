@@ -261,10 +261,10 @@ async def get_machine_shift_setup_time(
     try:
         from datetime import datetime
         
-        # Парсим даты
+        # Парсим даты и убираем timezone (работаем в naive UTC)
         try:
-            start_dt = datetime.fromisoformat(shift_start.replace('Z', '+00:00'))
-            end_dt = datetime.fromisoformat(shift_end.replace('Z', '+00:00'))
+            start_dt = datetime.fromisoformat(shift_start.replace('Z', '+00:00')).replace(tzinfo=None)
+            end_dt = datetime.fromisoformat(shift_end.replace('Z', '+00:00')).replace(tzinfo=None)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=f"Invalid date format: {e}")
         
@@ -295,10 +295,14 @@ async def get_machine_shift_setup_time(
         
         total_setup_sec = 0
         for setup in setups:
+            # Нормализуем даты из БД (убираем timezone если есть)
+            setup_created = setup.created_at.replace(tzinfo=None) if setup.created_at and hasattr(setup.created_at, 'tzinfo') and setup.created_at.tzinfo else setup.created_at
+            setup_ended = setup.end_time.replace(tzinfo=None) if setup.end_time and hasattr(setup.end_time, 'tzinfo') and setup.end_time.tzinfo else setup.end_time
+            
             # Определяем фактическое начало наладки в рамках смены
-            setup_start = max(setup.created_at, start_dt) if setup.created_at else start_dt
+            setup_start = max(setup_created, start_dt) if setup_created else start_dt
             # Определяем фактический конец наладки (или текущий момент если ещё идёт)
-            setup_end = setup.end_time if setup.end_time else datetime.now(start_dt.tzinfo or None)
+            setup_end = setup_ended if setup_ended else datetime.utcnow()
             setup_end = min(setup_end, end_dt)
             
             # Считаем время только если наладка пересекается с периодом
