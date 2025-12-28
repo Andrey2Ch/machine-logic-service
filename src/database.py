@@ -35,8 +35,8 @@ def initialize_database():
         # Увеличиваем размер пула соединений для предотвращения timeout ошибок
         engine = create_engine(
             db_settings.DATABASE_URL,
-            pool_size=10,  # Размер пула (было 5 по умолчанию)
-            max_overflow=20,  # Максимальное переполнение (было 10 по умолчанию)
+            pool_size=5,  # Уменьшено для работы с несколькими workers
+            max_overflow=10,  # 8 workers × (5+10) = 120 max connections
             pool_timeout=30,  # Таймаут ожидания соединения
             pool_recycle=3600,  # Переиспользование соединений через час
             pool_pre_ping=True,  # Проверка соединения перед использованием

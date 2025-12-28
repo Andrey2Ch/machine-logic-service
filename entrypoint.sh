@@ -8,4 +8,4 @@ mkdir -p /app/drawings
 chmod 777 /app/drawings
 
 # Запустить uvicorn с несколькими workers для параллельной обработки
-exec uvicorn src.main:app --host 0.0.0.0 --port $PORT --workers 4 
+exec uvicorn src.main:app --host 0.0.0.0 --port $PORT --workers 8 
