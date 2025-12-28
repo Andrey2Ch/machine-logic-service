@@ -332,6 +332,10 @@ async def get_machine_shift_setup_time(
         ).all()
         
         total_setup_sec = 0
+        
+        # DEBUG: логируем входные параметры
+        logger.info(f"[SETUP-TIME-DEBUG] {machine_name}: start_dt={start_dt}, end_dt={end_dt}, now_utc={datetime.utcnow()}")
+        
         for setup in setups:
             # Нормализуем даты из БД (убираем timezone если есть)
             def normalize_dt(dt):
@@ -342,6 +346,9 @@ async def get_machine_shift_setup_time(
             setup_created = normalize_dt(setup.created_at)
             setup_qa_date = normalize_dt(setup.qa_date)
             setup_start_time = normalize_dt(setup.start_time)
+            
+            # DEBUG: логируем данные наладки
+            logger.info(f"[SETUP-TIME-DEBUG] {machine_name}: setup_id={setup.id}, status={setup.status}, created={setup_created}, qa_date={setup_qa_date}, start_time={setup_start_time}")
             
             # Определяем когда наладка закончилась
             # Приоритет: qa_date (ОТК разрешила) -> start_time (работа началась) -> ещё активна
@@ -362,10 +369,14 @@ async def get_machine_shift_setup_time(
             # Определяем фактический конец наладки в рамках смены
             setup_end = min(setup_end_point, end_dt)
             
+            # DEBUG: логируем расчёт
+            logger.info(f"[SETUP-TIME-DEBUG] {machine_name}: setup_end_point={setup_end_point}, setup_start={setup_start}, setup_end={setup_end}")
+            
             # Считаем время только если наладка пересекается с периодом
             if setup_end > setup_start:
                 duration = (setup_end - setup_start).total_seconds()
                 total_setup_sec += duration
+                logger.info(f"[SETUP-TIME-DEBUG] {machine_name}: duration={duration}sec, total_so_far={total_setup_sec}sec")
         
         return {
             "machine_name": machine_name,
