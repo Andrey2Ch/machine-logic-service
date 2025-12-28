@@ -588,6 +588,58 @@ async def get_my_history(
     }
 
 
+@router.post("/recalculate-shifts")
+async def recalculate_all_shifts(
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    employee_id: Optional[int] = None,
+    db: Session = Depends(get_db_session)
+):
+    """
+    Пересчитать все смены на основе time_entries
+    
+    Параметры:
+    - start_date: начало периода (по умолчанию 30 дней назад)
+    - end_date: конец периода (по умолчанию сегодня)
+    - employee_id: конкретный сотрудник (опционально, по умолчанию все)
+    """
+    if not start_date:
+        start_date = date.today() - timedelta(days=30)
+    if not end_date:
+        end_date = date.today()
+    
+    # Получаем всех сотрудников или конкретного
+    if employee_id:
+        employees = db.query(EmployeeDB).filter(EmployeeDB.id == employee_id).all()
+    else:
+        employees = db.query(EmployeeDB).filter(EmployeeDB.is_active == True).all()
+    
+    recalculated = 0
+    errors = []
+    
+    for emp in employees:
+        # Получаем все уникальные даты входов для этого сотрудника в периоде
+        check_in_dates = db.query(func.date(TimeEntryDB.entry_time)).filter(
+            TimeEntryDB.employee_id == emp.id,
+            TimeEntryDB.entry_type == 'check_in',
+            func.date(TimeEntryDB.entry_time).between(start_date, end_date)
+        ).distinct().all()
+        
+        for (shift_date_row,) in check_in_dates:
+            try:
+                await update_work_shift(emp.id, shift_date_row, db)
+                recalculated += 1
+            except Exception as e:
+                errors.append(f"Employee {emp.id}, date {shift_date_row}: {str(e)}")
+    
+    return {
+        "message": f"Пересчитано {recalculated} смен",
+        "period": {"start": start_date, "end": end_date},
+        "employees_processed": len(employees),
+        "errors": errors if errors else None
+    }
+
+
 @router.get("/entries/{entry_id}")
 async def get_time_entry(entry_id: int, db: Session = Depends(get_db_session)):
     """Получить конкретную запись по ID"""
