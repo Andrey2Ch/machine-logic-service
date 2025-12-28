@@ -333,23 +333,18 @@ async def get_machine_shift_setup_time(
         
         total_setup_sec = 0
         
-        # ВАЖНО: В БД время хранится как naive datetime в Israel timezone!
-        # При чтении через ORM получаем naive datetime. Нужно интерпретировать как Israel и конвертировать в UTC.
-        from zoneinfo import ZoneInfo
-        israel_tz = ZoneInfo('Asia/Jerusalem')
-        utc_tz = ZoneInfo('UTC')
-        
+        # Нормализуем даты из БД (убираем timezone если есть)
+        # Данные в БД хранятся как naive UTC
         def normalize_dt_to_utc(dt):
-            """Конвертирует datetime из БД (Israel naive) в UTC naive для сравнения"""
+            """Нормализует datetime к naive UTC"""
             if dt is None:
                 return None
-            # Если уже есть timezone, конвертируем в UTC и убираем
+            # Если есть timezone, конвертируем в UTC и убираем tzinfo
             if hasattr(dt, 'tzinfo') and dt.tzinfo:
-                return dt.astimezone(utc_tz).replace(tzinfo=None)
-            # Naive datetime из БД — интерпретируем как Israel time
-            dt_israel = dt.replace(tzinfo=israel_tz)
-            dt_utc = dt_israel.astimezone(utc_tz)
-            return dt_utc.replace(tzinfo=None)
+                from zoneinfo import ZoneInfo
+                return dt.astimezone(ZoneInfo('UTC')).replace(tzinfo=None)
+            # Naive datetime — уже в UTC
+            return dt
         
         
         for setup in setups:
@@ -1311,7 +1306,7 @@ async def get_operator_machines_view(db: Session = Depends(get_db_session)):
                 COALESCE(ls.status, 'idle') as status,
                 op.full_name as operator_name,
                 qa.full_name as qa_name,
-                ls.created_at AT TIME ZONE 'Asia/Jerusalem' as setup_created_at
+                ls.created_at as setup_created_at  -- уже в UTC
             FROM machines m
             LEFT JOIN (
                 SELECT * FROM latest_setups WHERE rn = 1
