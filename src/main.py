@@ -333,16 +333,16 @@ async def get_machine_shift_setup_time(
         
         total_setup_sec = 0
         
+        # Нормализуем даты из БД (убираем timezone если есть)
+        def normalize_dt(dt):
+            if dt and hasattr(dt, 'tzinfo') and dt.tzinfo:
+                return dt.replace(tzinfo=None)
+            return dt
+        
         # DEBUG: логируем входные параметры
         logger.info(f"[SETUP-TIME-DEBUG] {machine_name}: start_dt={start_dt}, end_dt={end_dt}, now_utc={datetime.utcnow()}")
         
         for setup in setups:
-            # Нормализуем даты из БД (убираем timezone если есть)
-            def normalize_dt(dt):
-                if dt and hasattr(dt, 'tzinfo') and dt.tzinfo:
-                    return dt.replace(tzinfo=None)
-                return dt
-            
             setup_created = normalize_dt(setup.created_at)
             setup_qa_date = normalize_dt(setup.qa_date)
             setup_start_time = normalize_dt(setup.start_time)
@@ -378,10 +378,49 @@ async def get_machine_shift_setup_time(
                 total_setup_sec += duration
                 logger.info(f"[SETUP-TIME-DEBUG] {machine_name}: duration={duration}sec, total_so_far={total_setup_sec}sec")
         
+        # DEBUG: добавляем debug info в response
+        debug_info = {
+            "start_dt": str(start_dt),
+            "end_dt": str(end_dt),
+            "now_utc": str(datetime.now(timezone.utc)),
+            "setups_debug": []
+        }
+        
+        # Пересчитаем с debug для каждой наладки
+        for setup in setups:
+            setup_created = normalize_dt(setup.created_at)
+            setup_qa_date = normalize_dt(setup.qa_date)
+            setup_start_time = normalize_dt(setup.start_time)
+            
+            setup_end_point = None
+            if setup_qa_date:
+                setup_end_point = setup_qa_date
+            elif setup_start_time:
+                setup_end_point = setup_start_time
+            elif setup.status in ['created', 'pending_qc']:
+                setup_end_point = datetime.now(timezone.utc).replace(tzinfo=None)
+            else:
+                continue
+                
+            setup_start_calc = max(setup_created, start_dt) if setup_created else start_dt
+            setup_end_calc = min(setup_end_point, end_dt)
+            
+            debug_info["setups_debug"].append({
+                "id": setup.id,
+                "status": setup.status,
+                "created_at_raw": str(setup.created_at),
+                "created_at_normalized": str(setup_created),
+                "qa_date": str(setup_qa_date),
+                "setup_end_point": str(setup_end_point),
+                "setup_start_calc": str(setup_start_calc),
+                "setup_end_calc": str(setup_end_calc),
+            })
+        
         return {
             "machine_name": machine_name,
             "setup_time_sec": int(total_setup_sec),
-            "setup_count": len(setups)
+            "setup_count": len(setups),
+            "debug": debug_info
         }
         
     except HTTPException:
