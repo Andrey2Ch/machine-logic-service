@@ -359,7 +359,7 @@ async def get_machine_shift_setup_time(
                 setup_end_point = setup_start_time
             # Если наладка ещё активна (статус created/pending_qc), берём NOW
             elif setup.status in ['created', 'pending_qc']:
-                setup_end_point = datetime.utcnow()
+                setup_end_point = datetime.now(timezone.utc).replace(tzinfo=None)  # naive UTC для сравнения
             else:
                 # Статус allowed/started/completed но нет дат — пропускаем (нет данных)
                 continue
@@ -733,7 +733,7 @@ async def save_reading(reading_input: ReadingInput, db: Session = Depends(get_db
             machine_id=reading_input.machine_id,
             reading=reading_input.value,
             setup_job_id=setup.id,  # Связываем с активной наладкой
-            created_at=datetime.now() # Фиксируем время явно
+            created_at=datetime.now(timezone.utc) # Фиксируем время явно в UTC
         )
         db.add(reading_db)
         db.flush() # Чтобы получить ID и время, если нужно
@@ -1040,7 +1040,7 @@ async def create_setup(setup: SetupInput, db: Session = Depends(get_db_session))
         planned_quantity=setup.planned_quantity,
         cycle_time=setup.cycle_time_seconds,
         status=SetupStatus.CREATED.value,
-        created_at=datetime.now(),
+        created_at=datetime.now(timezone.utc),
         lot_id=lot.id,
         part_id=part.id
     )
@@ -1138,7 +1138,7 @@ async def approve_setup(
         # Обновить статус, qa_id и qa_date
         setup.status = 'allowed' # Новый статус
         setup.qa_id = payload.qa_id
-        setup.qa_date = datetime.now()
+        setup.qa_date = datetime.now(timezone.utc)
 
         db.commit() # Сохраняем изменения
         db.refresh(setup) # Обновляем объект setup из БД
@@ -1509,7 +1509,7 @@ async def complete_setup(setup_id: int, db: Session = Depends(get_db_session)):
 
         # Обновить статус и время завершения
         setup.status = 'completed'
-        setup.end_time = datetime.now()
+        setup.end_time = datetime.now(timezone.utc)
         logger.info(f"Updated setup status to 'completed' and set end_time to {setup.end_time}")
 
         # Проверяем, есть ли наладка в очереди
@@ -1707,7 +1707,7 @@ async def inspect_batch(batch_id: int, payload: InspectBatchPayload, db: Session
                 original_location=location,  # Сохраняем исходный статус дочернего батча
                 operator_id=payload.inspector_id,
                 parent_batch_id=batch.id,
-                batch_time=datetime.now(),
+                batch_time=datetime.now(timezone.utc),
             )
             db.add(child)
             db.flush()
@@ -1785,7 +1785,7 @@ async def move_batch(
                 
                 # Устанавливаем qc_inspector_id для отслеживания кто проверил
                 batch.qc_inspector_id = payload.inspector_id
-                batch.qc_inspected_at = datetime.now()
+                batch.qc_inspected_at = datetime.now(timezone.utc)
                 logger.info(f"Batch {batch.id} moved to final QC state '{target_location}' by inspector {inspector.full_name} (ID: {payload.inspector_id})")
             else:
                 # Если inspector_id не указан, но это финальное состояние - ошибка
@@ -1795,7 +1795,7 @@ async def move_batch(
                 )
 
         batch.current_location = target_location
-        batch.updated_at = datetime.now() # Явно обновляем время изменения
+        batch.updated_at = datetime.now(timezone.utc) # Явно обновляем время изменения
         
         # Если нужно отслеживать, кто переместил:
         # if payload.employee_id:
@@ -2004,10 +2004,10 @@ async def accept_batch_on_warehouse(batch_id: int, payload: AcceptWarehousePaylo
             batch.current_location = 'warehouse_counted'  # Обычные батчи
             
         batch.warehouse_employee_id = payload.warehouse_employee_id
-        batch.warehouse_received_at = datetime.now()
+        batch.warehouse_received_at = datetime.now(timezone.utc)
         # НЕ МЕНЯЕМ operator_id! Оставляем оригинального оператора для истории
         # batch.operator_id остается прежним - это оператор, который делал деталь
-        batch.updated_at = datetime.now() 
+        batch.updated_at = datetime.now(timezone.utc) 
 
         # --- АВТОМАТИЧЕСКИЙ ВОЗВРАТ КАРТОЧКИ ---
         # Ищем карточку, которая была привязана к этому батчу
@@ -2016,7 +2016,7 @@ async def accept_batch_on_warehouse(batch_id: int, payload: AcceptWarehousePaylo
             logger.info(f"Card #{card.card_number} (machine {card.machine_id}) was associated with batch {batch_id}. Returning to circulation.")
             card.status = 'free'
             card.batch_id = None
-            card.last_event = datetime.now()
+            card.last_event = datetime.now(timezone.utc)
         else:
             # Это может быть нормально, если батч был создан без карточки (например, старая система)
             logger.info(f"No card found for accepted batch {batch_id}. Nothing to return.")
@@ -3567,7 +3567,7 @@ async def reserve_card_transactional(data: CardReservationRequest, db: Session =
             
             # Связь batch-card осуществляется через batch_id в таблице cards (уже обновлено выше)
         
-        reserved_until = datetime.now() + timedelta(seconds=30)
+        reserved_until = datetime.now(timezone.utc) + timedelta(seconds=30)
         
         logger.info(f"Card {card_number} reserved for batch {data.batch_id} by operator {data.operator_id}")
         
@@ -3802,7 +3802,7 @@ async def return_card(card_number: int, machine_id: int, db: Session = Depends(g
         
         card.status = 'free'
         card.batch_id = None
-        card.last_event = datetime.now()
+        card.last_event = datetime.now(timezone.utc)
         
         # Очищаем поле card_number в таблице batches
         if batch_id:
@@ -3837,7 +3837,7 @@ async def mark_card_lost(card_number: int, machine_id: int, db: Session = Depend
             raise HTTPException(status_code=404, detail="Карточка не найдена")
         
         card.status = 'lost'
-        card.last_event = datetime.now()
+        card.last_event = datetime.now(timezone.utc)
         
         db.commit()
         
@@ -4786,7 +4786,7 @@ async def reset_cards_for_machine(payload: ResetCardsPayload, db: Session = Depe
         for card in cards_to_reset:
             card.status = 'free'
             card.batch_id = None
-            card.last_event = datetime.now()
+            card.last_event = datetime.now(timezone.utc)
             count += 1
         
         db.commit()
