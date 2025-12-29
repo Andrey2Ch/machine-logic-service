@@ -63,3 +63,4 @@ COMMENT ON TABLE notification_settings IS 'Настройки WhatsApp и Telegr
 
 
 
+

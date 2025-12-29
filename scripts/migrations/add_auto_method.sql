@@ -11,3 +11,4 @@ ALTER TABLE time_entries ADD CONSTRAINT time_entries_method_check
 -- Обновляем комментарий
 COMMENT ON COLUMN time_entries.method IS 'Способ фиксации: telegram, terminal, web, manual, auto (автоматическое закрытие)';
 
+
