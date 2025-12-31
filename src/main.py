@@ -2143,8 +2143,8 @@ async def accept_batch_on_warehouse(batch_id: int, payload: AcceptWarehousePaylo
             # Если operator_reported_qty == 0, процент не считаем, но абсолютное расхождение сохраняем
             # Можно добавить отдельное уведомление если operator=0, а clerk > 0?
 
-        # Обновляем основные поля батча
-        batch.current_quantity = recounted_clerk_qty # Актуальное кол-во теперь = пересчитанному кладовщиком
+        # current_quantity НЕ меняем - это оригинальное кол-во от оператора
+        # recounted_quantity уже записано выше - это кол-во от кладовщика
         
         # Определяем новый статус в зависимости от текущего
         if batch.current_location == 'sorting':
