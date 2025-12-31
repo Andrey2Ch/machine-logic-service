@@ -281,10 +281,12 @@ async def get_machine_shift_setup_time(
         # DT-26 -> D-26, BT-38 -> B-38
         alt_name = re.sub(r'^(D)T-', r'\1-', clean_name)
         alt_name = re.sub(r'^(B)T-', r'\1-', alt_name)
+        # K-162 -> K-16-2, K-163 -> K-16-3 (MTConnect vs MLS naming)
+        k_alt = re.sub(r'^(K-\d+)(\d)$', r'\1-\2', clean_name)
         
         # Пробуем найти по разным вариантам имени
         machine = None
-        for name_variant in [machine_name, clean_name, alt_name]:
+        for name_variant in [machine_name, clean_name, alt_name, k_alt]:
             machine = db.query(MachineDB).filter(
                 func.lower(MachineDB.name) == func.lower(name_variant)
             ).first()
@@ -419,9 +421,11 @@ async def get_machine_hourly_setup_time(
         clean_name = clean_name.replace('_', '-')
         alt_name = re.sub(r'^(D)T-', r'\1-', clean_name)
         alt_name = re.sub(r'^(B)T-', r'\1-', alt_name)
+        # K-162 -> K-16-2, K-163 -> K-16-3 (MTConnect vs MLS naming)
+        k_alt = re.sub(r'^(K-\d+)(\d)$', r'\1-\2', clean_name)
         
         machine = None
-        for name_variant in [machine_name, clean_name, alt_name]:
+        for name_variant in [machine_name, clean_name, alt_name, k_alt]:
             machine = db.query(MachineDB).filter(
                 func.lower(MachineDB.name) == func.lower(name_variant)
             ).first()
