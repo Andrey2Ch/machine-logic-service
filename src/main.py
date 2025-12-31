@@ -282,7 +282,8 @@ async def get_machine_shift_setup_time(
         alt_name = re.sub(r'^(D)T-', r'\1-', clean_name)
         alt_name = re.sub(r'^(B)T-', r'\1-', alt_name)
         # K-162 -> K-16-2, K-163 -> K-16-3 (MTConnect vs MLS naming)
-        k_alt = re.sub(r'^(K-\d+)(\d)$', r'\1-\2', clean_name)
+        # Паттерн: K-XX + последняя цифра → K-XX-последняя
+        k_alt = re.sub(r'^(K-\d{1,2})(\d)$', r'\1-\2', clean_name)
         
         # Пробуем найти по разным вариантам имени
         machine = None
@@ -422,7 +423,7 @@ async def get_machine_hourly_setup_time(
         alt_name = re.sub(r'^(D)T-', r'\1-', clean_name)
         alt_name = re.sub(r'^(B)T-', r'\1-', alt_name)
         # K-162 -> K-16-2, K-163 -> K-16-3 (MTConnect vs MLS naming)
-        k_alt = re.sub(r'^(K-\d+)(\d)$', r'\1-\2', clean_name)
+        k_alt = re.sub(r'^(K-\d{1,2})(\d)$', r'\1-\2', clean_name)
         
         machine = None
         for name_variant in [machine_name, clean_name, alt_name, k_alt]:
