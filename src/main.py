@@ -1746,6 +1746,7 @@ class BatchViewItem(BaseModel):
     drawing_number: Optional[str]
     lot_number: Optional[str]
     current_quantity: int 
+    recounted_quantity: Optional[int]  # Пересчитанное количество (для инспекции ОТК)
     current_location: str
     batch_time: Optional[datetime]
     warehouse_received_at: Optional[datetime]
@@ -1791,6 +1792,7 @@ async def get_batches_for_lot(lot_id: int, db: Session = Depends(get_db_session)
                 'drawing_number': part_obj.drawing_number if part_obj else None,
                 'lot_number': lot_obj.lot_number if lot_obj else None,
                 'current_quantity': batch_obj.current_quantity,
+                'recounted_quantity': batch_obj.recounted_quantity,  # Добавляем для инспекции ОТК
                 'current_location': batch_obj.current_location,
                 'batch_time': batch_obj.batch_time.replace(tzinfo=timezone.utc).astimezone(timezone(timedelta(hours=3))) if batch_obj.batch_time else None,
                 'warehouse_received_at': batch_obj.warehouse_received_at, 
