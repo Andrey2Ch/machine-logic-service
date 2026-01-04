@@ -444,17 +444,20 @@ async def get_machine_hourly_setup_time(
             return {"machine_name": machine_name, "hourly": []}
         
         # Запрашиваем наладки за период
+        # ВАЖНО: start_time может быть установлен при первом показании,
+        # но status='created'/'pending_qc' означает что наладка ВСЁ ЕЩЁ активна!
         setups = db.query(SetupDB).filter(
             SetupDB.machine_id == machine.id,
             or_(
                 and_(SetupDB.created_at >= start_dt, SetupDB.created_at <= end_dt),
                 and_(SetupDB.qa_date >= start_dt, SetupDB.qa_date <= end_dt),
                 and_(SetupDB.start_time >= start_dt, SetupDB.start_time <= end_dt),
+                # Была создана до периода и ещё в режиме наладки (status определяет активность!)
                 and_(
                     SetupDB.created_at < start_dt,
                     SetupDB.status.in_(['created', 'pending_qc']),
-                    SetupDB.qa_date == None,
-                    SetupDB.start_time == None
+                    SetupDB.qa_date == None
+                    # НЕ проверяем start_time - он может быть установлен при первом показании
                 ),
                 and_(
                     SetupDB.created_at < start_dt,
@@ -488,13 +491,15 @@ async def get_machine_hourly_setup_time(
             setup_start_time = normalize_dt_to_utc(setup.start_time)
             
             # Определяем когда наладка закончилась
+            # ВАЖНО: status='created'/'pending_qc' означает активную наладку!
             setup_end_point = None
-            if setup_qa_date:
+            if setup.status in ['created', 'pending_qc']:
+                # Наладка ВСЁ ЕЩЁ активна, берём NOW
+                setup_end_point = datetime.now(timezone.utc).replace(tzinfo=None)
+            elif setup_qa_date:
                 setup_end_point = setup_qa_date
             elif setup_start_time:
                 setup_end_point = setup_start_time
-            elif setup.status in ['created', 'pending_qc']:
-                setup_end_point = datetime.now(timezone.utc).replace(tzinfo=None)
             else:
                 continue
             
