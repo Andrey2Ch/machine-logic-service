@@ -4224,8 +4224,8 @@ async def get_batch_label_info(batch_id: int, db: Session = Depends(get_db_sessi
             # Fallback если нет setup или machine_id
             current_quantity = batch.initial_quantity + batch.current_quantity
 
-        # ПРАВИЛЬНЫЙ batch_quantity = количество оператора из БД
-        batch_quantity = batch.operator_reported_quantity or batch.current_quantity
+        # batch_quantity = пересчитанное количество (приоритет) или количество оператора
+        batch_quantity = batch.recounted_quantity or batch.operator_reported_quantity or batch.current_quantity
 
         # Вычисляем смену (копируем логику из active-batch-label)
         calculated_shift = "N/A"
