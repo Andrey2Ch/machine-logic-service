@@ -126,10 +126,9 @@ async def create_setup(payload: CreateSetupPayload, db: Session = Depends(get_db
             # Если лот был assigned, переводим в in_production, так как наладка создана
             lot.status = 'in_production'
         
-        # Устанавливаем start_time для статуса 'created' как момент регистрации наладки
-        # (это нужно, чтобы витрина и бот видели чертеж сразу после регистрации)
-        if setup.status == 'created' and getattr(setup, 'start_time', None) is None:
-            setup.start_time = datetime.utcnow()
+        # УБРАНО: start_time НЕ должен устанавливаться при создании наладки!
+        # start_time = начало РАБОТЫ (когда станок получает показания и статус -> 'started')
+        # Для отображения чертежа на витрине нужно использовать created_at, а не start_time
 
         db.commit()
         db.refresh(setup)
