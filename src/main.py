@@ -317,11 +317,13 @@ async def get_machine_shift_setup_time(
                 # Работа началась в периоде  
                 and_(SetupDB.start_time >= start_dt, SetupDB.start_time <= end_dt),
                 # Была создана до периода и ещё в режиме наладки
+                # ВАЖНО: start_time может быть установлен (при первом показании),
+                # но status='created'/'pending_qc' означает что наладка ВСЁ ЕЩЁ активна!
                 and_(
                     SetupDB.created_at < start_dt,
                     SetupDB.status.in_(['created', 'pending_qc']),
-                    SetupDB.qa_date == None,
-                    SetupDB.start_time == None
+                    SetupDB.qa_date == None
+                    # НЕ проверяем start_time - он может быть установлен при первом показании
                 ),
                 # Была создана до периода, но получила qa_date/start_time после начала периода
                 and_(
@@ -358,15 +360,21 @@ async def get_machine_shift_setup_time(
             logger.debug(f"Setup {setup.id}: created={setup_created}, qa_date={setup_qa_date}, start_time={setup_start_time}, status={setup.status}")
             
             # Определяем когда наладка закончилась
-            # Приоритет: qa_date (ОТК разрешила) -> start_time (работа началась) -> ещё активна
+            # ВАЖНО: status='created' или 'pending_qc' означает что наладка ВСЁ ЕЩЁ активна!
+            # start_time может быть установлен при первом показании счётчика, но это НЕ конец наладки.
+            # Наладка заканчивается только когда:
+            # 1. ОТК разрешила работу (qa_date установлен) - для статусов allowed, started, completed
+            # 2. Станок начал работать (start_time) - только если статус УЖЕ НЕ created/pending_qc
             setup_end_point = None
-            if setup_qa_date:
+            
+            # Если статус created/pending_qc - наладка ВСЁ ЕЩЁ активна, берём NOW
+            if setup.status in ['created', 'pending_qc']:
+                setup_end_point = datetime.now(timezone.utc).replace(tzinfo=None)  # naive UTC для сравнения
+            # Иначе: qa_date (ОТК разрешила) или start_time (работа началась)
+            elif setup_qa_date:
                 setup_end_point = setup_qa_date
             elif setup_start_time:
                 setup_end_point = setup_start_time
-            # Если наладка ещё активна (статус created/pending_qc), берём NOW
-            elif setup.status in ['created', 'pending_qc']:
-                setup_end_point = datetime.now(timezone.utc).replace(tzinfo=None)  # naive UTC для сравнения
             else:
                 # Статус allowed/started/completed но нет дат — пропускаем (нет данных)
                 logger.debug(f"Setup {setup.id}: skipped (status={setup.status}, no end point)")
