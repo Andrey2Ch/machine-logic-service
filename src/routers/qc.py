@@ -22,6 +22,8 @@ class LotInfoItem(BaseModel):
     inspector_name: Optional[str] = None
     machinist_name: Optional[str] = None
     planned_quantity: Optional[int] = None
+    initial_planned_quantity: Optional[int] = None
+    additional_quantity: Optional[int] = None
     machine_name: Optional[str] = None
     status: Optional[str] = None
 
@@ -73,6 +75,8 @@ async def get_lots_pending_qc(
             LotDB,
             PartDB.drawing_number,
             (SetupDB.planned_quantity + SetupDB.additional_quantity).label('total_planned_quantity'),
+            LotDB.initial_planned_quantity.label('initial_planned_quantity'),
+            SetupDB.additional_quantity.label('additional_quantity'),
             MachineDB.name.label('machine_name'),
             machinist_alias.c.full_name.label('machinist_name'),
             inspector_alias.c.full_name.label('inspector_name')
@@ -107,13 +111,15 @@ async def get_lots_pending_qc(
         
         # Собираем ответ
         response_items = []
-        for lot, drawing_number, planned_quantity, machine_name, machinist_name, inspector_name in results:
+        for lot, drawing_number, planned_quantity, initial_planned_quantity, additional_quantity, machine_name, machinist_name, inspector_name in results:
             response_items.append(
                 LotInfoItem(
                     id=lot.id,
                     drawing_number=drawing_number,
                     lot_number=lot.lot_number,
                     planned_quantity=planned_quantity,
+                    initial_planned_quantity=initial_planned_quantity or 0,
+                    additional_quantity=additional_quantity or 0,
                     machine_name=machine_name,
                     machinist_name=machinist_name,
                     inspector_name=inspector_name,
