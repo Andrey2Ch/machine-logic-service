@@ -357,7 +357,6 @@ async def get_machine_shift_setup_time(
             setup_qa_date = normalize_dt_to_utc(setup.qa_date)
             setup_start_time = normalize_dt_to_utc(setup.start_time)
             
-            logger.debug(f"Setup {setup.id}: created={setup_created}, qa_date={setup_qa_date}, start_time={setup_start_time}, status={setup.status}")
             
             # Определяем когда наладка закончилась
             # ВАЖНО: status='created' или 'pending_qc' означает что наладка ВСЁ ЕЩЁ активна!
@@ -377,7 +376,6 @@ async def get_machine_shift_setup_time(
                 setup_end_point = setup_start_time
             else:
                 # Статус allowed/started/completed но нет дат — пропускаем (нет данных)
-                logger.debug(f"Setup {setup.id}: skipped (status={setup.status}, no end point)")
                 continue
             
             # Определяем фактическое начало наладки в рамках смены
@@ -385,37 +383,15 @@ async def get_machine_shift_setup_time(
             # Определяем фактический конец наладки в рамках смены
             setup_end = min(setup_end_point, end_dt)
             
-            logger.debug(f"Setup {setup.id}: setup_start={setup_start}, setup_end={setup_end}, end_point={setup_end_point}")
-            
             # Считаем время только если наладка пересекается с периодом
             if setup_end > setup_start:
                 duration = (setup_end - setup_start).total_seconds()
                 total_setup_sec += duration
-                logger.debug(f"Setup {setup.id}: duration={duration} sec")
-            else:
-                logger.debug(f"Setup {setup.id}: NO OVERLAP (setup_end <= setup_start)")
-        
-        # Debug info для отладки
-        debug_info = []
-        for setup in setups:
-            setup_created = normalize_dt_to_utc(setup.created_at)
-            debug_info.append({
-                "id": setup.id,
-                "created": str(setup_created),
-                "status": setup.status,
-                "qa_date": str(normalize_dt_to_utc(setup.qa_date)) if setup.qa_date else None,
-                "start_time": str(normalize_dt_to_utc(setup.start_time)) if setup.start_time else None,
-            })
         
         return {
             "machine_name": machine_name,
             "setup_time_sec": int(total_setup_sec),
-            "setup_count": len(setups),
-            "debug": {
-                "start_dt": str(start_dt),
-                "end_dt": str(end_dt),
-                "setups": debug_info
-            }
+            "setup_count": len(setups)
         }
         
     except HTTPException:
