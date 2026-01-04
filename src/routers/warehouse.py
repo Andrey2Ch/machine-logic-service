@@ -208,8 +208,8 @@ def update_batch_quantity(batch_id: int, payload: UpdateQuantityPayload, db: Ses
     if not batch:
         raise HTTPException(status_code=404, detail=f"Batch with id {batch_id} not found")
 
-    # current_quantity НЕ меняем - это оригинальное количество от оператора
-    # Меняем только recounted_quantity - то что насчитал/исправил кладовщик
+    # current_quantity = изначальное кол-во от оператора (НЕ МЕНЯЕТСЯ)
+    # recounted_quantity = что насчитал кладовщик (меняется при исправлении)
     batch.recounted_quantity = payload.new_quantity
     
     try:
