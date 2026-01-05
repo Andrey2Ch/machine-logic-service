@@ -1,5 +1,62 @@
 # Schema documentation for schema `public`
 
+## КРИТИЧЕСКИ ВАЖНО: Расчёт деталей и машино-часов
+
+### Количество деталей = `recounted_quantity`
+
+**ВСЕГДА используй `b.recounted_quantity`** — это реальное количество деталей, пересчитанное складом.
+
+❌ НЕПРАВИЛЬНО: `initial_quantity - current_quantity`
+❌ НЕПРАВИЛЬНО: `machine_readings` с LAG
+✅ ПРАВИЛЬНО: `SUM(b.recounted_quantity)`
+
+### Машино-часы = детали × цикл / 3600
+
+```sql
+ROUND(SUM(b.recounted_quantity * sj.cycle_time / 3600.0), 1) AS "Маш.часы"
+```
+
+### Шаблон: детали/часы по ОПЕРАТОРУ
+```sql
+SELECT 
+  e.full_name AS "Оператор",
+  SUM(b.recounted_quantity) AS "Детали",
+  ROUND(SUM(b.recounted_quantity * sj.cycle_time / 3600.0), 1) AS "Маш.часы"
+FROM batches b
+JOIN setup_jobs sj ON b.setup_job_id = sj.id
+JOIN employees e ON b.operator_id = e.id
+WHERE b.batch_time >= '2025-12-01' AND b.batch_time < '2026-01-01'
+  AND sj.cycle_time > 0
+GROUP BY e.full_name
+ORDER BY "Маш.часы" DESC;
+```
+
+### Шаблон: детали/часы по СТАНКУ
+```sql
+SELECT 
+  m.name AS "Станок",
+  SUM(b.recounted_quantity) AS "Детали",
+  ROUND(SUM(b.recounted_quantity * sj.cycle_time / 3600.0), 1) AS "Маш.часы"
+FROM batches b
+JOIN setup_jobs sj ON b.setup_job_id = sj.id
+JOIN machines m ON sj.machine_id = m.id
+WHERE b.batch_time >= '2025-12-01' AND b.batch_time < '2026-01-01'
+  AND sj.cycle_time > 0
+GROUP BY m.name
+ORDER BY "Маш.часы" DESC;
+```
+
+### Шаблон: один станок по имени
+```sql
+WHERE m.name ILIKE '%SR-24%'
+```
+
+### Фильтр по неделе:
+```sql
+WHERE EXTRACT(ISOYEAR FROM b.batch_time) = 2025
+  AND EXTRACT(WEEK FROM b.batch_time) = 50
+```
+
 ## Бизнес-логика системы
 
 ### Станки (machines)

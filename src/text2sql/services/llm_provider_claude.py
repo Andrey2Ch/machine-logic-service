@@ -28,6 +28,9 @@ class ClaudeText2SQL:
     def _build_system_prompt(self) -> str:
         return (
             "You are an expert Text-to-SQL assistant for PostgreSQL. "
+            "CRITICAL: Always follow the instructions at the TOP of the schema documentation! "
+            "For machine hours and parts count, ALWAYS use batches.recounted_quantity. "
+            "NEVER use machine_readings with LAG. NEVER use initial_quantity - current_quantity. "
             "Return ONLY SQL code block without explanations. Prefer selecting existing columns, avoid hallucinations. "
             "If the request is vague, infer reasonable filters and add LIMIT if missing."
         )

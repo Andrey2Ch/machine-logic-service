@@ -40,33 +40,76 @@ LEFT JOIN setup_jobs sj ON m.id = sj.machine_id AND sj.status = 'active' AND sj.
 WHERE sj.id IS NULL AND m.is_active = true
 ```
 
-### Поиск по имени станка
-Q: "сколько деталей вчера сделал станок SR23?"
+### Детали и машино-часы по станку
+Q: "сколько деталей сделал станок SR-24 в декабре 2025?"
 SQL:
 ```sql
-SELECT SUM(b.initial_quantity - b.current_quantity) AS total_parts_produced
+SELECT m.name AS "Станок", SUM(b.recounted_quantity) AS "Детали"
 FROM batches b
 JOIN setup_jobs sj ON b.setup_job_id = sj.id
 JOIN machines m ON sj.machine_id = m.id
-WHERE m.name LIKE '%SR23%'
-  AND b.batch_time::date = CURRENT_DATE - INTERVAL '1 day'
+WHERE m.name ILIKE '%SR-24%'
+  AND b.batch_time >= '2025-12-01' AND b.batch_time < '2026-01-01'
+GROUP BY m.name
 ```
 
-Q: "сколько деталей сделал SR23 в свою последнюю рабочую смену?"
+Q: "машино-часы станка K-16 за ноябрь"
 SQL:
 ```sql
-SELECT SUM(b.initial_quantity - b.current_quantity) AS total_parts_produced
+SELECT m.name AS "Станок", 
+  SUM(b.recounted_quantity) AS "Детали",
+  ROUND(SUM(b.recounted_quantity * sj.cycle_time / 3600.0), 1) AS "Маш.часы"
 FROM batches b
 JOIN setup_jobs sj ON b.setup_job_id = sj.id
 JOIN machines m ON sj.machine_id = m.id
-WHERE m.name LIKE '%SR23%'
-  AND b.batch_time = (
-    SELECT MAX(b2.batch_time)
-    FROM batches b2
-    JOIN setup_jobs sj2 ON b2.setup_job_id = sj2.id
-    JOIN machines m2 ON sj2.machine_id = m2.id
-    WHERE m2.name LIKE '%SR23%'
-  )
+WHERE m.name ILIKE '%K-16%'
+  AND b.batch_time >= '2025-11-01' AND b.batch_time < '2025-12-01'
+  AND sj.cycle_time > 0
+GROUP BY m.name
+```
+
+### Детали и машино-часы по оператору
+Q: "сколько машино-часов отработал каждый оператор в декабре 2025?"
+SQL:
+```sql
+SELECT e.full_name AS "Оператор",
+  SUM(b.recounted_quantity) AS "Детали",
+  ROUND(SUM(b.recounted_quantity * sj.cycle_time / 3600.0), 1) AS "Маш.часы"
+FROM batches b
+JOIN setup_jobs sj ON b.setup_job_id = sj.id
+JOIN employees e ON b.operator_id = e.id
+WHERE b.batch_time >= '2025-12-01' AND b.batch_time < '2026-01-01'
+  AND sj.cycle_time > 0
+GROUP BY e.full_name
+ORDER BY "Маш.часы" DESC
+```
+
+Q: "сколько деталей сделал Roman в ноябре?"
+SQL:
+```sql
+SELECT e.full_name AS "Оператор", SUM(b.recounted_quantity) AS "Детали"
+FROM batches b
+JOIN setup_jobs sj ON b.setup_job_id = sj.id
+JOIN employees e ON b.operator_id = e.id
+WHERE e.full_name ILIKE '%Roman%'
+  AND b.batch_time >= '2025-11-01' AND b.batch_time < '2025-12-01'
+GROUP BY e.full_name
+```
+
+Q: "машино-часы в 50-ю неделю 2025"
+SQL:
+```sql
+SELECT e.full_name AS "Оператор",
+  SUM(b.recounted_quantity) AS "Детали",
+  ROUND(SUM(b.recounted_quantity * sj.cycle_time / 3600.0), 1) AS "Маш.часы"
+FROM batches b
+JOIN setup_jobs sj ON b.setup_job_id = sj.id
+JOIN employees e ON b.operator_id = e.id
+WHERE EXTRACT(ISOYEAR FROM b.batch_time) = 2025
+  AND EXTRACT(WEEK FROM b.batch_time) = 50
+  AND sj.cycle_time > 0
+GROUP BY e.full_name
+ORDER BY "Маш.часы" DESC
 ```
 
 ### Батчи
@@ -119,13 +162,13 @@ FROM cards
 WHERE batch_id = 456
 ```
 
-### Настройки станков
+### Настройки и наладки
 Q: "Сколько активных настроек?"
 SQL:
 ```sql
 SELECT COUNT(*) AS active_setups_count
 FROM setup_jobs
-WHERE status = 'active' AND end_time IS NULL
+WHERE status = 'started' AND end_time IS NULL
 ```
 
 Q: "Покажи все активные настройки"
@@ -134,7 +177,30 @@ SQL:
 SELECT sj.id, m.name, sj.start_time, sj.planned_quantity
 FROM setup_jobs sj
 JOIN machines m ON sj.machine_id = m.id
-WHERE sj.status = 'active' AND sj.end_time IS NULL
+WHERE sj.status = 'started' AND sj.end_time IS NULL
+```
+
+Q: "сколько наладок сделал каждый наладчик в декабре 2025?"
+SQL:
+```sql
+SELECT e.full_name AS "Наладчик", COUNT(*) AS "Наладок"
+FROM setup_jobs sj
+JOIN employees e ON sj.employee_id = e.id
+WHERE sj.created_at >= '2025-12-01' AND sj.created_at < '2026-01-01'
+GROUP BY e.full_name
+ORDER BY "Наладок" DESC
+```
+
+Q: "топ наладчиков за ноябрь"
+SQL:
+```sql
+SELECT e.full_name AS "Наладчик", COUNT(*) AS "Наладок"
+FROM setup_jobs sj
+JOIN employees e ON sj.employee_id = e.id
+WHERE sj.created_at >= '2025-11-01' AND sj.created_at < '2025-12-01'
+GROUP BY e.full_name
+ORDER BY "Наладок" DESC
+LIMIT 10
 ```
 
 ### Статистика по станкам
