@@ -38,257 +38,511 @@
 
 | column | type | nullable | description |
 |---|---|---|---|
-| id | integer | NO | Уникальный идентификатор попытки доступа |
-| telegram_id | bigint | NO | Telegram ID пользователя |
-| username | character varying | YES | Имя пользователя в Telegram |
-| full_name | character varying | YES | Полное имя пользователя |
-| timestamp | timestamp without time zone | NO | Время попытки доступа |
-| processed | boolean | YES | Обработана ли попытка |
+| id | integer | NO | Primary key |
+| telegram_id | bigint | NO |  |
+| username | character varying | YES |  |
+| full_name | character varying | YES |  |
+| timestamp | timestamp without time zone | NO |  |
+| processed | boolean | YES |  |
 
 ## areas
 
 | column | type | nullable | description |
 |---|---|---|---|
-| id | bigint | NO | Уникальный идентификатор зоны |
-| name | text | NO | Название зоны производства |
-| code | text | YES | Код зоны |
-| is_active | boolean | NO | Активна ли зона |
-| created_at | timestamp without time zone | NO | Дата создания |
+| id | integer | NO | Primary key |
+| name | character varying | NO |  |
+| code | character varying | YES |  |
+| is_active | boolean | NO |  |
+| created_at | timestamp without time zone | NO |  |
 
 ## batch_operations
 
 | column | type | nullable | description |
 |---|---|---|---|
-| id | integer | NO | Уникальный идентификатор операции |
-| batch_id | integer | YES | ID батча |
-| new_batch_id | integer | YES | ID нового батча (при разделении) |
-| operation_type | character varying | NO | Тип операции |
-| quantity | integer | NO | Количество деталей |
-| employee_id | integer | YES | ID сотрудника |
-| created_at | timestamp without time zone | YES | Время создания операции |
+| id | integer | NO | Primary key |
+| batch_id | integer | YES |  |
+| new_batch_id | integer | YES |  |
+| operation_type | character varying | NO |  |
+| quantity | integer | NO |  |
+| employee_id | integer | YES |  |
+| created_at | timestamp without time zone | YES |  |
 
 ## batches
 
 | column | type | nullable | description |
 |---|---|---|---|
-| id | integer | NO | Уникальный идентификатор батча |
-| setup_job_id | integer | YES | ID настройки станка |
-| lot_id | integer | YES | ID партии |
-| parent_batch_id | integer | YES | ID родительского батча |
-| initial_quantity | integer | NO | Начальное количество деталей |
-| current_quantity | integer | NO | Текущее количество деталей (0 = батч закрыт) |
-| current_location | character varying | NO | Текущее местоположение |
-| operator_id | integer | YES | ID оператора |
-| batch_time | timestamp without time zone | NO | Время создания батча |
-| created_at | timestamp without time zone | YES | Дата создания |
-| recounted_quantity | integer | YES | Пересчитанное количество |
-| warehouse_employee_id | integer | YES | ID складского сотрудника |
-| warehouse_received_at | timestamp without time zone | YES | Время получения на складе |
-| qc_inspector_id | integer | YES | ID контролера качества |
-| qc_comment | text | YES | Комментарий контролера |
-| qc_end_time | timestamp without time zone | YES | Время окончания контроля |
-| qa_date | timestamp without time zone | YES | Дата QA |
-| discrepancy_percentage | real | YES | Процент расхождения |
-| admin_acknowledged_discrepancy | boolean | NO | Подтверждено ли расхождение админом |
-| updated_at | timestamp without time zone | YES | Время обновления |
-| operator_reported_quantity | integer | YES | Количество, сообщенное оператором |
-| discrepancy_absolute | integer | YES | Абсолютное расхождение |
-| qc_start_time | timestamp without time zone | YES | Время начала контроля |
+| id | integer | NO | Primary key |
+| setup_job_id | integer | YES |  |
+| lot_id | integer | YES |  |
+| parent_batch_id | integer | YES |  |
+| initial_quantity | integer | NO |  |
+| current_quantity | integer | NO |  |
+| current_location | character varying | NO |  |
+| original_location | character varying | YES |  |
+| operator_id | integer | YES |  |
+| batch_time | timestamp without time zone | NO |  |
+| created_at | timestamp without time zone | YES |  |
+| recounted_quantity | integer | YES |  |
+| qc_good_quantity | integer | YES |  |
+| qc_rejected_quantity | integer | YES |  |
+| qc_rework_quantity | integer | YES |  |
+| warehouse_employee_id | integer | YES |  |
+| warehouse_received_at | timestamp without time zone | YES |  |
+| qc_inspector_id | integer | YES |  |
+| qc_comment | character varying | YES |  |
+| qc_end_time | timestamp without time zone | YES |  |
+| qa_date | timestamp without time zone | YES |  |
+| discrepancy_percentage | double precision | YES |  |
+| admin_acknowledged_discrepancy | boolean | NO |  |
+| updated_at | timestamp without time zone | YES |  |
+| operator_reported_quantity | integer | YES |  |
+| discrepancy_absolute | integer | YES |  |
+| qc_start_time | timestamp without time zone | YES |  |
+
+## calendar_holidays
+
+| column | type | nullable | description |
+|---|---|---|---|
+| id | integer | NO | Primary key |
+| date | date | NO |  |
+| name | character varying | NO |  |
+| name_en | character varying | YES |  |
+| is_company_wide | boolean | YES |  |
+| is_recurring | boolean | YES |  |
+| created_at | timestamp without time zone | YES |  |
+| created_by | integer | YES |  |
+
+## calendar_request_types
+
+| column | type | nullable | description |
+|---|---|---|---|
+| id | integer | NO | Primary key |
+| name | character varying | NO |  |
+| name_en | character varying | YES |  |
+| description | text | YES |  |
+| color | character varying | YES |  |
+| is_active | boolean | YES |  |
+| is_system | boolean | YES |  |
+| created_at | timestamp without time zone | YES |  |
+| created_by | integer | YES |  |
+| updated_at | timestamp without time zone | YES |  |
+
+## calendar_requests
+
+| column | type | nullable | description |
+|---|---|---|---|
+| id | integer | NO | Primary key |
+| employee_id | integer | NO |  |
+| request_type_id | integer | NO |  |
+| start_date | date | NO |  |
+| end_date | date | NO |  |
+| status | character varying | YES |  |
+| comment | text | YES |  |
+| admin_comment | text | YES |  |
+| approved_by | integer | YES |  |
+| approved_at | timestamp without time zone | YES |  |
+| google_calendar_event_id | character varying | YES |  |
+| created_at | timestamp without time zone | YES |  |
+| updated_at | timestamp without time zone | YES |  |
 
 ## cards
 
 | column | type | nullable | description |
 |---|---|---|---|
-| card_number | integer | NO | Номер карточки |
-| machine_id | bigint | NO | ID станка |
-| status | character varying | NO | Статус карточки: 'free' (свободна), 'in_use' (используется), 'defective' (брак) |
-| batch_id | bigint | YES | ID батча (если используется) |
-| last_event | timestamp without time zone | NO | Время последнего события |
+| card_number | integer | NO |  |
+| machine_id | integer | NO |  |
+| status | character varying | NO |  |
+| batch_id | integer | YES |  |
+| last_event | timestamp without time zone | NO |  |
 
 ## employee_area_roles
 
 | column | type | nullable | description |
 |---|---|---|---|
-| id | bigint | NO | Уникальный идентификатор |
-| employee_id | bigint | NO | ID сотрудника |
-| area_id | bigint | NO | ID зоны |
-| role | text | NO | Роль в зоне |
+| id | integer | NO | Primary key |
+| employee_id | integer | NO |  |
+| area_id | integer | NO |  |
+| created_at | timestamp without time zone | NO |  |
 
 ## employee_machine_subscriptions
 
 | column | type | nullable | description |
 |---|---|---|---|
-| employee_id | bigint | NO | ID сотрудника |
-| machine_id | bigint | NO | ID станка |
-| subscribed | boolean | NO | Подписан ли на уведомления |
-| active | boolean | NO | Активна ли подписка |
-| notify_on | ARRAY | NO | События для уведомлений |
-| last_activated_at | timestamp with time zone | YES | Время последней активации |
-| updated_at | timestamp with time zone | NO | Время обновления |
+| employee_id | bigint | NO |  |
+| machine_id | bigint | NO |  |
+| subscribed | boolean | NO |  |
+| active | boolean | NO |  |
+| last_activated_at | timestamp without time zone | YES |  |
+| updated_at | timestamp without time zone | NO |  |
 
 ## employees
 
 | column | type | nullable | description |
 |---|---|---|---|
-| id | integer | NO | Уникальный идентификатор сотрудника |
-| telegram_id | bigint | YES | Telegram ID |
-| username | character varying | YES | Имя пользователя в Telegram |
-| full_name | character varying | YES | Полное имя |
-| role_id | integer | YES | ID роли |
-| created_at | timestamp without time zone | YES | Дата создания |
-| added_by | bigint | YES | Добавлен кем |
-| is_active | boolean | NO | Активен ли сотрудник |
-| factory_number | character varying | YES | Заводской номер |
-| default_area_id | bigint | YES | Зона по умолчанию |
+| id | integer | NO | Primary key |
+| telegram_id | bigint | YES | Unique identifier |
+| username | character varying | YES |  |
+| full_name | character varying | YES |  |
+| role_id | integer | YES |  |
+| created_at | timestamp without time zone | YES |  |
+| added_by | bigint | YES |  |
+| is_active | boolean | NO |  |
+| factory_number | character varying | YES | Unique identifier |
+| default_area_id | integer | YES |  |
+| whatsapp_phone | character varying | YES |  |
+
+## face_embeddings
+
+| column | type | nullable | description |
+|---|---|---|---|
+| id | integer | NO | Primary key |
+| employee_id | integer | NO |  |
+| embedding | bytea | NO |  |
+| photo_url | text | YES |  |
+| created_at | timestamp without time zone | YES |  |
+| is_active | boolean | YES |  |
+
+## lot_materials
+
+| column | type | nullable | description |
+|---|---|---|---|
+| id | integer | NO | Primary key |
+| lot_id | integer | NO |  |
+| machine_id | integer | YES |  |
+| material_receipt_id | integer | YES |  |
+| material_type | character varying | YES |  |
+| diameter | double precision | YES |  |
+| calculated_bars_needed | integer | YES |  |
+| calculated_weight_kg | double precision | YES |  |
+| issued_bars | integer | NO |  |
+| issued_weight_kg | double precision | YES |  |
+| issued_at | timestamp without time zone | YES |  |
+| issued_by | integer | YES |  |
+| returned_bars | integer | NO |  |
+| returned_weight_kg | double precision | YES |  |
+| returned_at | timestamp without time zone | YES |  |
+| returned_by | integer | YES |  |
+| used_bars | integer | NO |  |
+| status | character varying | YES |  |
+| notes | text | YES |  |
+| created_at | timestamp without time zone | YES |  |
 
 ## lots
 
 | column | type | nullable | description |
 |---|---|---|---|
-| id | integer | NO | Уникальный идентификатор партии |
-| part_id | integer | YES | ID детали |
-| lot_number | character varying | NO | Номер партии |
-| total_planned_quantity | integer | YES | Общее запланированное количество |
-| status | character varying | NO | Статус партии |
-| created_at | timestamp without time zone | YES | Дата создания |
-| order_manager_id | bigint | YES | ID менеджера заказа |
-| created_by_order_manager_at | timestamp with time zone | YES | Время создания менеджером |
-| due_date | timestamp with time zone | YES | Срок выполнения |
-| initial_planned_quantity | integer | YES | Начальное запланированное количество |
+| id | integer | NO | Primary key |
+| part_id | integer | YES |  |
+| lot_number | character varying | NO | Unique identifier |
+| total_planned_quantity | integer | YES |  |
+| status | character varying | NO |  |
+| actual_diameter | double precision | YES |  |
+| actual_profile_type | character varying | YES |  |
+| material_status | character varying | YES |  |
+| created_at | timestamp without time zone | YES |  |
+| order_manager_id | integer | YES |  |
+| created_by_order_manager_at | timestamp without time zone | YES |  |
+| due_date | timestamp without time zone | YES |  |
+| initial_planned_quantity | integer | YES |  |
+| assigned_machine_id | integer | YES |  |
+| assigned_order | integer | YES |  |
 
 ## machine_readings
 
 | column | type | nullable | description |
 |---|---|---|---|
-| id | integer | NO | Уникальный идентификатор показания |
-| employee_id | integer | YES | ID сотрудника |
-| machine_id | integer | YES | ID станка |
-| reading | integer | YES | Показание счетчика |
-| created_at | timestamp without time zone | YES | Время показания |
-| setup_job_id | integer | YES | ID настройки |
+| id | integer | NO | Primary key |
+| employee_id | integer | YES |  |
+| machine_id | integer | YES |  |
+| reading | integer | YES |  |
+| created_at | timestamp without time zone | YES |  |
+| setup_job_id | integer | YES |  |
 
 ## machines
 
 | column | type | nullable | description |
 |---|---|---|---|
-| id | integer | NO | Уникальный идентификатор станка |
-| name | character varying | YES | Название станка |
-| type | character varying | NO | Тип станка |
-| created_at | timestamp without time zone | YES | Дата создания |
-| is_active | boolean | NO | Активен ли станок |
-| location_id | bigint | NO | ID местоположения |
-| serial_number | text | YES | Серийный номер |
-| notes | text | YES | Заметки |
-| display_order | integer | YES | Порядок отображения |
+| id | integer | NO | Primary key |
+| name | character varying | YES |  |
+| type | character varying | NO |  |
+| min_diameter | double precision | YES |  |
+| max_diameter | double precision | YES |  |
+| max_bar_length | double precision | YES |  |
+| is_jbs | boolean | NO |  |
+| supports_no_guidebush | boolean | NO |  |
+| max_part_length | double precision | YES |  |
+| created_at | timestamp without time zone | YES |  |
+| is_active | boolean | NO |  |
+| is_operational | boolean | NO |  |
+
+## material_operations
+
+| column | type | nullable | description |
+|---|---|---|---|
+| id | integer | NO | Primary key |
+| lot_material_id | integer | NO |  |
+| operation_type | character varying | NO |  |
+| quantity_bars | integer | NO |  |
+| diameter | double precision | YES |  |
+| performed_by | integer | YES |  |
+| performed_at | timestamp without time zone | YES |  |
+| notes | text | YES |  |
+| created_at | timestamp without time zone | YES |  |
+
+## material_types
+
+| column | type | nullable | description |
+|---|---|---|---|
+| id | integer | NO | Primary key |
+| material_name | character varying | NO | Unique identifier |
+| density_kg_per_m3 | double precision | NO |  |
+| description | text | YES |  |
+| created_at | timestamp without time zone | YES |  |
+
+## notification_settings
+
+| column | type | nullable | description |
+|---|---|---|---|
+| id | integer | NO | Primary key |
+| notification_type | character varying | NO |  |
+| display_name | character varying | NO |  |
+| description | text | YES |  |
+| category | character varying | YES |  |
+| enabled_machinists | boolean | YES |  |
+| enabled_operators | boolean | YES |  |
+| enabled_qa | boolean | YES |  |
+| enabled_admin | boolean | YES |  |
+| enabled_telegram | boolean | YES |  |
+| created_at | timestamp without time zone | YES |  |
+| updated_at | timestamp without time zone | YES |  |
 
 ## operator_mapping
 
 | column | type | nullable | description |
 |---|---|---|---|
-| id | integer | NO | Уникальный идентификатор |
-| telegram_id | bigint | NO | Telegram ID |
-| username | character varying | YES | Имя пользователя |
-| full_name | character varying | NO | Полное имя |
-| operator_name | character varying | NO | Имя оператора |
+| id | integer | NO | Primary key |
+| telegram_id | bigint | NO |  |
+| username | character varying | YES |  |
+| full_name | character varying | NO |  |
+| operator_name | character varying | NO |  |
 
 ## parts
 
 | column | type | nullable | description |
 |---|---|---|---|
-| id | integer | NO | Уникальный идентификатор детали |
-| drawing_number | character varying | NO | Номер чертежа |
-| material | text | YES | Материал детали |
-| created_at | timestamp without time zone | YES | Дата создания |
+| id | integer | NO | Primary key |
+| drawing_number | character varying | NO | Unique identifier |
+| material | character varying | YES |  |
+| recommended_diameter | double precision | YES |  |
+| profile_type | character varying | YES |  |
+| part_length | double precision | YES |  |
+| description | text | YES |  |
+| drawing_url | text | YES |  |
+| created_at | timestamp without time zone | YES |  |
+| pinned_machine_id | integer | YES |  |
+
+## role_permissions
+
+| column | type | nullable | description |
+|---|---|---|---|
+| id | integer | NO | Primary key |
+| role_id | integer | NO |  |
+| resource_type | text | NO |  |
+| resource_path | text | NO |  |
+| action | text | YES |  |
+| allowed | boolean | NO |  |
+| created_at | timestamp without time zone | YES |  |
+| updated_at | timestamp without time zone | YES |  |
 
 ## roles
 
 | column | type | nullable | description |
 |---|---|---|---|
-| id | integer | NO | Уникальный идентификатор роли |
-| role_name | character varying | NO | Название роли |
-| description | text | NO | Описание роли |
-| created_at | timestamp without time zone | YES | Дата создания |
+| id | integer | NO | Primary key |
+| role_name | character varying | NO |  |
+| description | character varying | NO |  |
+| is_readonly | boolean | NO |  |
+| created_at | timestamp without time zone | YES |  |
 
 ## setup_defects
 
 | column | type | nullable | description |
 |---|---|---|---|
-| id | integer | NO | Уникальный идентификатор дефекта |
-| setup_job_id | integer | YES | ID настройки |
-| defect_quantity | integer | YES | Количество дефектных деталей |
-| defect_reason | text | YES | Причина дефекта |
-| employee_id | integer | YES | ID сотрудника |
-| created_at | timestamp without time zone | YES | Время создания записи |
+| id | integer | NO | Primary key |
+| setup_job_id | integer | YES |  |
+| defect_quantity | integer | YES |  |
+| defect_reason | character varying | YES |  |
+| employee_id | integer | YES |  |
+| created_at | timestamp without time zone | YES |  |
 
 ## setup_jobs
 
 | column | type | nullable | description |
 |---|---|---|---|
-| id | integer | NO | Уникальный идентификатор настройки |
-| employee_id | integer | YES | ID сотрудника |
-| machine_id | integer | YES | ID станка |
-| lot_id | integer | YES | ID партии |
-| part_id | integer | YES | ID детали |
-| planned_quantity | integer | NO | Запланированное количество |
-| status | character varying | YES | Статус: 'active' (активна), 'completed' (завершена), 'cancelled' (отменена) |
-| start_time | timestamp without time zone | YES | Время начала |
-| end_time | timestamp without time zone | YES | Время окончания (NULL = активна) |
-| created_at | timestamp without time zone | YES | Дата создания |
-| cycle_time | integer | YES | Время цикла в секундах |
-| qa_date | timestamp with time zone | YES | Дата QA |
-| qa_id | integer | YES | ID QA |
-| additional_quantity | integer | YES | Дополнительное количество |
+| id | integer | NO | Primary key |
+| employee_id | integer | YES |  |
+| machine_id | integer | YES |  |
+| lot_id | integer | YES |  |
+| part_id | integer | YES |  |
+| planned_quantity | integer | NO |  |
+| status | character varying | YES |  |
+| start_time | timestamp without time zone | YES |  |
+| end_time | timestamp without time zone | YES |  |
+| created_at | timestamp without time zone | YES |  |
+| cycle_time | integer | YES |  |
+| qa_date | timestamp without time zone | YES |  |
+| qa_id | integer | YES |  |
+| additional_quantity | integer | YES |  |
+| order_manager_id | bigint | YES |  |
+| created_by_order_manager_at | timestamp without time zone | YES |  |
+| pending_qc_date | timestamp without time zone | YES |  |
+| setup_quantity_adjustments | text | YES |  |
 
 ## setup_quantity_adjustments
 
 | column | type | nullable | description |
 |---|---|---|---|
-| id | integer | NO | Уникальный идентификатор корректировки |
-| setup_job_id | integer | YES | ID настройки |
-| created_at | timestamp without time zone | YES | Время создания |
-| created_by | integer | YES | Создано кем |
-| auto_adjustment | integer | YES | Автоматическая корректировка |
-| manual_adjustment | integer | YES | Ручная корректировка |
-| defect_adjustment | integer | YES | Корректировка по дефектам |
-| total_adjustment | integer | YES | Общая корректировка |
+| id | integer | NO | Primary key |
+| setup_job_id | integer | YES | Unique identifier |
+| created_at | timestamp without time zone | YES |  |
+| created_by | integer | YES |  |
+| auto_adjustment | integer | YES |  |
+| manual_adjustment | integer | YES |  |
+| defect_adjustment | integer | YES |  |
+| total_adjustment | integer | YES |  |
 
 ## setup_statuses
 
 | column | type | nullable | description |
 |---|---|---|---|
-| id | integer | NO | Уникальный идентификатор статуса |
-| status_name | character varying | NO | Название статуса |
-| description | character varying | YES | Описание статуса |
-| created_at | timestamp without time zone | YES | Дата создания |
+| id | integer | NO | Primary key |
+| status_name | character varying | NO | Unique identifier |
+| description | character varying | YES |  |
+| created_at | timestamp without time zone | YES |  |
 
-## Примеры запросов
+## terminals
 
-### Работающие станки
-```sql
-SELECT m.id, m.name, sj.status, sj.start_time
-FROM machines m
-JOIN setup_jobs sj ON m.id = sj.machine_id
-WHERE sj.status = 'started' AND sj.end_time IS NULL
-```
+| column | type | nullable | description |
+|---|---|---|---|
+| id | integer | NO | Primary key |
+| device_id | character varying | NO |  |
+| device_name | character varying | NO |  |
+| location_description | text | YES |  |
+| is_active | boolean | YES |  |
+| last_seen_at | timestamp without time zone | YES |  |
+| created_at | timestamp without time zone | YES |  |
 
-### Свободные станки
-```sql
-SELECT m.id, m.name
-FROM machines m
-LEFT JOIN setup_jobs sj ON m.id = sj.machine_id AND sj.status = 'started' AND sj.end_time IS NULL
-WHERE sj.id IS NULL AND m.is_active = true
-```
+## text2sql_captured
 
-### Открытые батчи
-```sql
-SELECT id, current_quantity, created_at
-FROM batches
-WHERE current_quantity > 0
-```
+| column | type | nullable | description |
+|---|---|---|---|
+| id | bigint | NO | Primary key |
+| captured_at | timestamp without time zone | NO |  |
+| duration_ms | integer | YES |  |
+| is_error | boolean | YES |  |
+| sql | text | NO |  |
+| params_json | jsonb | YES |  |
+| rows_affected | integer | YES |  |
+| route | text | YES |  |
+| user_id | text | YES |  |
+| role | text | YES |  |
+| source_host | text | YES |  |
+| question_ru | text | YES |  |
+| question_hints | jsonb | YES |  |
+| question_generated_at | timestamp without time zone | YES |  |
 
-### Свободные карточки
-```sql
-SELECT card_number, machine_id, last_event
-FROM cards
-WHERE status = 'free'
-```
+## text2sql_examples
+
+| column | type | nullable | description |
+|---|---|---|---|
+| id | integer | NO | Primary key |
+| normalized_sql | text | NO |  |
+| business_question_ru | text | NO |  |
+| business_question_en | text | YES |  |
+| operation_type | character varying | YES |  |
+| quality_score | integer | YES |  |
+| source_captured_id | integer | YES |  |
+| created_at | timestamp without time zone | YES |  |
+
+## text2sql_history
+
+| column | type | nullable | description |
+|---|---|---|---|
+| id | bigint | NO | Primary key |
+| session_id | text | NO |  |
+| question | text | NO |  |
+| sql | text | NO |  |
+| validated_sql | text | YES |  |
+| rows_preview | jsonb | YES |  |
+| created_at | timestamp without time zone | YES |  |
+
+## time_entries
+
+| column | type | nullable | description |
+|---|---|---|---|
+| id | integer | NO | Primary key |
+| employee_id | integer | NO |  |
+| entry_type | character varying | NO |  |
+| entry_time | timestamp without time zone | NO |  |
+| method | character varying | NO |  |
+| latitude | numeric | YES |  |
+| longitude | numeric | YES |  |
+| location_accuracy | numeric | YES |  |
+| is_location_valid | boolean | YES |  |
+| terminal_device_id | character varying | YES |  |
+| face_confidence | numeric | YES |  |
+| client_timestamp | timestamp without time zone | YES |  |
+| synced_at | timestamp without time zone | YES |  |
+| is_manual_correction | boolean | YES |  |
+| corrected_by | integer | YES |  |
+| correction_reason | text | YES |  |
+| created_at | timestamp without time zone | YES |  |
+| updated_at | timestamp without time zone | YES |  |
+
+## warehouse_locations
+
+| column | type | nullable | description |
+|---|---|---|---|
+| id | integer | NO | Primary key |
+| name | character varying | NO |  |
+| code | character varying | YES |  |
+| is_active | boolean | NO |  |
+| created_at | timestamp without time zone | NO |  |
+
+## warehouse_stock
+
+| column | type | nullable | description |
+|---|---|---|---|
+| id | integer | NO | Primary key |
+| location_id | integer | NO |  |
+| part_id | integer | NO |  |
+| quantity | integer | NO |  |
+| updated_at | timestamp without time zone | NO |  |
+
+## work_calendar
+
+| column | type | nullable | description |
+|---|---|---|---|
+| id | integer | NO | Primary key |
+| date | date | NO | Unique identifier |
+| first_shift_hours | integer | YES |  |
+| first_shift_break | integer | YES |  |
+| second_shift_hours | integer | YES |  |
+| second_shift_break | integer | YES |  |
+| description | text | YES |  |
+| created_at | timestamp without time zone | YES |  |
+
+## work_shifts
+
+| column | type | nullable | description |
+|---|---|---|---|
+| id | integer | NO | Primary key |
+| employee_id | integer | NO |  |
+| shift_date | date | NO |  |
+| check_in_time | timestamp without time zone | YES |  |
+| check_out_time | timestamp without time zone | YES |  |
+| total_hours | numeric | YES |  |
+| status | character varying | YES |  |
+| created_at | timestamp without time zone | YES |  |
+| updated_at | timestamp without time zone | YES |  |
+
