@@ -195,7 +195,9 @@ def get_accepted_batches(
 @router.patch("/batches/{batch_id}/update-quantity", response_model=BatchOut)
 def update_batch_quantity(batch_id: int, payload: UpdateQuantityPayload, db: Session = Depends(get_db_session)):
     """
-    Обновляет фактическое количество (current_quantity) для указанной партии.
+    Обновляет количество для указанной партии:
+    - Для дочерних батчей (good, defect) — обновляет current_quantity
+    - Для родительских батчей — обновляет recounted_quantity
     """
     batch = db.query(BatchDB)\
         .options(
@@ -208,9 +210,13 @@ def update_batch_quantity(batch_id: int, payload: UpdateQuantityPayload, db: Ses
     if not batch:
         raise HTTPException(status_code=404, detail=f"Batch with id {batch_id} not found")
 
-    # current_quantity = изначальное кол-во от оператора (НЕ МЕНЯЕТСЯ)
-    # recounted_quantity = что насчитал кладовщик (меняется при исправлении)
-    batch.recounted_quantity = payload.new_quantity
+    # Для дочерних батчей (good/defect) обновляем current_quantity
+    # Для родительских — recounted_quantity
+    child_locations = ['good', 'defect']
+    if batch.current_location in child_locations:
+        batch.current_quantity = payload.new_quantity
+    else:
+        batch.recounted_quantity = payload.new_quantity
     
     try:
         db.commit()
