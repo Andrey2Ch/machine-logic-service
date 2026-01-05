@@ -57,6 +57,52 @@ WHERE EXTRACT(ISOYEAR FROM b.batch_time) = 2025
   AND EXTRACT(WEEK FROM b.batch_time) = 50
 ```
 
+## Брак и статусы батчей
+
+**Статус батча — поле `current_location`:**
+- `defect` — брак
+- `rework_repair` — на переделку
+- `good` — хорошие
+- `warehouse_counted` — на складе пересчитаны
+- `archived` — архив
+- `production` — в производстве
+- `inspection` — на проверке
+- `sorting_warehouse` — сортировка
+
+### Шаблон: брак по операторам
+```sql
+SELECT e.full_name AS "Оператор",
+  COUNT(*) AS "Батчей с браком",
+  SUM(b.recounted_quantity) AS "Деталей"
+FROM batches b
+JOIN employees e ON b.operator_id = e.id
+WHERE b.batch_time >= '2025-12-01' AND b.batch_time < '2026-01-01'
+  AND b.current_location = 'defect'
+GROUP BY e.full_name
+```
+
+### Шаблон: брак по сотрудникам ОТК
+**Связь через `setup_jobs.qa_id`** — кто разрешил наладку:
+```sql
+SELECT e.full_name AS "ОТК",
+  COUNT(*) AS "Батчей с браком",
+  SUM(b.recounted_quantity) AS "Деталей"
+FROM batches b
+JOIN setup_jobs sj ON b.setup_job_id = sj.id
+JOIN employees e ON sj.qa_id = e.id
+WHERE b.batch_time >= '2025-12-01' AND b.batch_time < '2026-01-01'
+  AND b.current_location = 'defect'
+GROUP BY e.full_name
+```
+
+### Шаблон: общая статистика по статусам
+```sql
+SELECT current_location AS "Статус", COUNT(*) AS "Батчей"
+FROM batches
+WHERE batch_time >= '2025-12-01'
+GROUP BY current_location
+```
+
 ## Бизнес-логика системы
 
 ### Станки (machines)

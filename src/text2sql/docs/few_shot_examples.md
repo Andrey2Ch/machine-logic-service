@@ -203,6 +203,77 @@ ORDER BY "Наладок" DESC
 LIMIT 10
 ```
 
+### Брак (current_location = 'defect')
+Q: "сколько брака у каждого оператора в декабре?"
+SQL:
+```sql
+SELECT e.full_name AS "Оператор",
+  COUNT(*) AS "Батчей с браком",
+  SUM(b.recounted_quantity) AS "Деталей"
+FROM batches b
+JOIN employees e ON b.operator_id = e.id
+WHERE b.batch_time >= '2025-12-01' AND b.batch_time < '2026-01-01'
+  AND b.current_location = 'defect'
+GROUP BY e.full_name
+ORDER BY "Батчей с браком" DESC
+```
+
+Q: "сколько брака разрешил каждый сотрудник ОТК?"
+SQL:
+```sql
+SELECT e.full_name AS "ОТК",
+  COUNT(*) AS "Батчей с браком",
+  SUM(b.recounted_quantity) AS "Деталей"
+FROM batches b
+JOIN setup_jobs sj ON b.setup_job_id = sj.id
+JOIN employees e ON sj.qa_id = e.id
+WHERE b.batch_time >= '2025-12-01' AND b.batch_time < '2026-01-01'
+  AND b.current_location = 'defect'
+GROUP BY e.full_name
+ORDER BY "Батчей с браком" DESC
+```
+
+Q: "какие детали чаще всего идут в брак?"
+SQL:
+```sql
+SELECT p.drawing_number AS "Чертеж",
+  p.description AS "Деталь",
+  COUNT(*) AS "Батчей",
+  SUM(b.recounted_quantity) AS "Деталей"
+FROM batches b
+JOIN setup_jobs sj ON b.setup_job_id = sj.id
+JOIN parts p ON sj.part_id = p.id
+WHERE b.batch_time >= '2025-12-01' AND b.current_location = 'defect'
+GROUP BY p.drawing_number, p.description
+ORDER BY "Батчей" DESC
+LIMIT 10
+```
+
+Q: "статистика по статусам батчей"
+SQL:
+```sql
+SELECT current_location AS "Статус", COUNT(*) AS "Батчей"
+FROM batches
+WHERE batch_time >= '2025-12-01'
+GROUP BY current_location
+ORDER BY "Батчей" DESC
+```
+
+Q: "процент брака по станкам"
+SQL:
+```sql
+SELECT m.name AS "Станок",
+  COUNT(*) FILTER (WHERE b.current_location = 'defect') AS "Брак",
+  COUNT(*) AS "Всего",
+  ROUND(100.0 * COUNT(*) FILTER (WHERE b.current_location = 'defect') / COUNT(*), 1) AS "% брака"
+FROM batches b
+JOIN setup_jobs sj ON b.setup_job_id = sj.id
+JOIN machines m ON sj.machine_id = m.id
+WHERE b.batch_time >= '2025-12-01'
+GROUP BY m.name
+ORDER BY "% брака" DESC
+```
+
 ### Статистика по станкам
 Q: "Сколько всего станков?"
 SQL:
