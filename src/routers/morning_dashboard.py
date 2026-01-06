@@ -633,11 +633,13 @@ async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
         shift_end = shift_start + timedelta(days=1)
         
         # Все батчи на переборку за эту смену (детальный список)
+        # Для родительских батчей (sorting/sorting_warehouse) используем recounted_quantity или initial_quantity
+        # т.к. current_quantity = 0 до обработки ОТК
         all_batches_query = text("""
         SELECT 
             b.id,
             b.batch_time,
-            b.current_quantity,
+            COALESCE(b.recounted_quantity, b.initial_quantity, 0) as quantity,
             b.current_location,
             m.name as machine_name,
             e.full_name as operator_name,
@@ -659,7 +661,7 @@ async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
         all_batches = db.execute(all_batches_query, {'shift_start': shift_start, 'shift_end': shift_end}).fetchall()
         
         total_batches = len(all_batches)
-        total_parts = sum(b.current_quantity for b in all_batches)
+        total_parts = sum(b.quantity or 0 for b in all_batches)
         
         # Группируем по станкам
         by_machine_dict = {}
@@ -673,13 +675,13 @@ async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
             by_machine_dict[b.machine_name]['batches_list'].append({
                 'id': b.id,
                 'batch_time': b.batch_time.isoformat() if b.batch_time else None,
-                'quantity': b.current_quantity,
+                'quantity': b.quantity or 0,
                 'location': b.current_location,
                 'operator': b.operator_name,
                 'drawing_number': b.drawing_number or '-',
                 'lot_number': b.lot_number or '-'
             })
-            by_machine_dict[b.machine_name]['total_parts'] += b.current_quantity
+            by_machine_dict[b.machine_name]['total_parts'] += (b.quantity or 0)
         
         by_machine = [
             {
@@ -704,13 +706,13 @@ async def get_operator_rework_stats(target_date: date, db: Session) -> dict:
             by_operator_dict[b.operator_name]['batches_list'].append({
                 'id': b.id,
                 'batch_time': b.batch_time.isoformat() if b.batch_time else None,
-                'quantity': b.current_quantity,
+                'quantity': b.quantity or 0,
                 'location': b.current_location,
                 'machine': b.machine_name,
                 'drawing_number': b.drawing_number or '-',
                 'lot_number': b.lot_number or '-'
             })
-            by_operator_dict[b.operator_name]['total_parts'] += b.current_quantity
+            by_operator_dict[b.operator_name]['total_parts'] += (b.quantity or 0)
         
         by_operator = [
             {
