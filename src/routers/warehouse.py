@@ -216,7 +216,7 @@ def update_batch_quantity(batch_id: int, payload: UpdateQuantityPayload, db: Ses
     if batch.current_location in child_locations:
         batch.current_quantity = payload.new_quantity
     else:
-    batch.recounted_quantity = payload.new_quantity
+        batch.recounted_quantity = payload.new_quantity
     
     try:
         db.commit()
