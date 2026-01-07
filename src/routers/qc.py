@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text, desc
 
 from src.database import get_db_session
-from src.models.models import LotDB, PartDB, SetupDB, EmployeeDB, MachineDB, BatchDB
+from src.models.models import LotDB, PartDB, SetupDB, EmployeeDB, MachineDB
 from pydantic import BaseModel
 from src.services.telegram_client import send_telegram_message
 from src.services.whatsapp_client import send_whatsapp_to_role, WHATSAPP_ENABLED
@@ -109,34 +109,9 @@ async def get_lots_pending_qc(
 
         results = query.all()
         
-        # Получаем все lot_id со статусом post_production для проверки
-        post_production_lot_ids = [lot.id for lot, *_ in results if lot.status == 'post_production']
-        
-        # Для post_production лотов проверяем, есть ли необработанные батчи
-        # Финальные статусы: good, defect, archived
-        final_qc_locations = ['good', 'defect', 'archived']
-        
-        # Получаем ID лотов, у которых есть необработанные батчи (один оптимизированный запрос)
-        lots_with_pending_batches = set()
-        if post_production_lot_ids:
-            pending_batches = db.query(BatchDB.lot_id).filter(
-                BatchDB.lot_id.in_(post_production_lot_ids),
-                BatchDB.current_location.notin_(final_qc_locations)
-            ).distinct().all()
-            lots_with_pending_batches = {b.lot_id for b in pending_batches}
-        
-        # Лоты де-факто закрытые = post_production лоты БЕЗ pending батчей
-        # Показываем их со статусом 'closed' для фронтенда, но НЕ меняем в БД
-        lots_defacto_closed = set(post_production_lot_ids) - lots_with_pending_batches
-        if lots_defacto_closed:
-            logger.info(f"Found {len(lots_defacto_closed)} post_production lots with all batches in final status (showing as closed)")
-        
-        # Собираем ответ
+        # Собираем ответ (показываем все лоты с оригинальными статусами)
         response_items = []
         for lot, drawing_number, planned_quantity, initial_planned_quantity, additional_quantity, machine_name, machinist_name, inspector_name in results:
-            # Для де-факто закрытых лотов показываем статус 'closed' на фронтенде
-            display_status = 'closed' if lot.id in lots_defacto_closed else lot.status
-                
             response_items.append(
                 LotInfoItem(
                     id=lot.id,
@@ -148,11 +123,11 @@ async def get_lots_pending_qc(
                     machine_name=machine_name,
                     machinist_name=machinist_name,
                     inspector_name=inspector_name,
-                    status=display_status
+                    status=lot.status
                 )
             )
 
-        logger.info(f"Сформировано {len(response_items)} элементов для ответа /qc/lots-pending. Де-факто закрыто {len(lots_defacto_closed)} лотов.")
+        logger.info(f"Сформировано {len(response_items)} элементов для ответа /qc/lots-pending.")
         
         # Логируем статусы для отладки
         status_counts = {}
