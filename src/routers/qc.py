@@ -125,17 +125,24 @@ async def get_lots_pending_qc(
             ).distinct().all()
             lots_with_pending_batches = {b.lot_id for b in pending_batches}
         
-        # Лоты для исключения = post_production лоты БЕЗ pending батчей (де-факто закрыты)
-        lots_to_exclude = set(post_production_lot_ids) - lots_with_pending_batches
-        if lots_to_exclude:
-            logger.info(f"Excluding {len(lots_to_exclude)} post_production lots with all batches in final status")
+        # Лоты для автозакрытия = post_production лоты БЕЗ pending батчей (де-факто закрыты)
+        lots_to_auto_close = set(post_production_lot_ids) - lots_with_pending_batches
+        
+        # Автоматически закрываем такие лоты
+        if lots_to_auto_close:
+            logger.info(f"Auto-closing {len(lots_to_auto_close)} post_production lots with all batches in final status: {lots_to_auto_close}")
+            for lot_id in lots_to_auto_close:
+                lot_to_close = db.query(LotDB).filter(LotDB.id == lot_id).first()
+                if lot_to_close and lot_to_close.status == 'post_production':
+                    lot_to_close.status = 'closed'
+                    logger.info(f"Auto-closed lot {lot_id}")
+            db.commit()
         
         # Собираем ответ
         response_items = []
         for lot, drawing_number, planned_quantity, initial_planned_quantity, additional_quantity, machine_name, machinist_name, inspector_name in results:
-            # Пропускаем post_production лоты где все батчи уже обработаны
-            if lot.id in lots_to_exclude:
-                continue
+            # Определяем актуальный статус (учитываем автозакрытие)
+            actual_status = 'closed' if lot.id in lots_to_auto_close else lot.status
                 
             response_items.append(
                 LotInfoItem(
@@ -148,11 +155,11 @@ async def get_lots_pending_qc(
                     machine_name=machine_name,
                     machinist_name=machinist_name,
                     inspector_name=inspector_name,
-                    status=lot.status
+                    status=actual_status
                 )
             )
 
-        logger.info(f"Сформировано {len(response_items)} элементов для ответа /qc/lots-pending. Исключено {len(lots_to_exclude)} де-факто закрытых лотов.")
+        logger.info(f"Сформировано {len(response_items)} элементов для ответа /qc/lots-pending. Автозакрыто {len(lots_to_auto_close)} лотов.")
         
         # Логируем статусы для отладки
         status_counts = {}
