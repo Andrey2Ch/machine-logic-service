@@ -2024,6 +2024,114 @@ class AcceptWarehousePayload(BaseModel):
     recounted_quantity: int
     warehouse_employee_id: int
 
+class CreateManualBatchPayload(BaseModel):
+    """Payload для создания батча вручную (когда оператор не смог зафиксировать в системе)"""
+    machine_id: int                    # ID станка
+    operator_id: int                   # ID оператора (можно найти по factory_number)
+    quantity: int                      # Количество деталей
+    batch_type: str                    # 'warehouse_counted' или 'sorting_warehouse'
+    warehouse_employee_id: int         # ID кладовщика, который создаёт
+    lot_id: Optional[int] = None       # Если нет активного setup - можно указать вручную
+
+@app.post("/batches/create-manual")
+async def create_manual_batch(payload: CreateManualBatchPayload, db: Session = Depends(get_db_session)):
+    """
+    Создать батч вручную для случаев, когда оператор не смог зафиксировать в системе.
+    Батч сразу создаётся как принятый на склад.
+    """
+    try:
+        # Валидация batch_type
+        if payload.batch_type not in ['warehouse_counted', 'sorting_warehouse']:
+            raise HTTPException(status_code=400, detail="batch_type must be 'warehouse_counted' or 'sorting_warehouse'")
+        
+        # Проверяем существование станка
+        machine = db.query(MachineDB).filter(MachineDB.id == payload.machine_id).first()
+        if not machine:
+            raise HTTPException(status_code=404, detail="Machine not found")
+        
+        # Проверяем существование оператора
+        operator = db.query(EmployeeDB).filter(EmployeeDB.id == payload.operator_id).first()
+        if not operator:
+            raise HTTPException(status_code=404, detail="Operator not found")
+        
+        # Проверяем существование кладовщика
+        warehouse_employee = db.query(EmployeeDB).filter(EmployeeDB.id == payload.warehouse_employee_id).first()
+        if not warehouse_employee:
+            raise HTTPException(status_code=404, detail="Warehouse employee not found")
+        
+        # Определяем lot_id и setup_job_id
+        lot_id = payload.lot_id
+        setup_job_id = None
+        
+        if lot_id is None:
+            # Ищем активный setup на станке
+            active_setup = db.query(SetupDB).filter(
+                SetupDB.machine_id == payload.machine_id,
+                SetupDB.status.in_(['allowed', 'started'])
+            ).first()
+            
+            if active_setup:
+                lot_id = active_setup.lot_id
+                setup_job_id = active_setup.id
+            else:
+                raise HTTPException(
+                    status_code=400, 
+                    detail="No active setup found on this machine. Please specify lot_id manually."
+                )
+        else:
+            # Проверяем существование лота
+            lot = db.query(LotDB).filter(LotDB.id == lot_id).first()
+            if not lot:
+                raise HTTPException(status_code=404, detail=f"Lot with id {lot_id} not found")
+            if lot.status == 'closed':
+                raise HTTPException(status_code=400, detail=f"Lot {lot.lot_number} is already closed")
+        
+        # Создаём батч
+        now = datetime.now(timezone.utc)
+        new_batch = BatchDB(
+            lot_id=lot_id,
+            setup_job_id=setup_job_id,
+            operator_id=payload.operator_id,
+            initial_quantity=payload.quantity,
+            current_quantity=payload.quantity,
+            recounted_quantity=payload.quantity,  # Уже пересчитано кладовщиком
+            current_location=payload.batch_type,
+            original_location=payload.batch_type,
+            warehouse_employee_id=payload.warehouse_employee_id,
+            warehouse_received_at=now,
+            batch_time=now,
+            created_at=now,
+            updated_at=now
+        )
+        
+        db.add(new_batch)
+        db.commit()
+        db.refresh(new_batch)
+        
+        # Получаем данные для ответа
+        lot = db.query(LotDB).filter(LotDB.id == lot_id).first()
+        part = db.query(PartDB).filter(PartDB.id == lot.part_id).first() if lot else None
+        
+        logger.info(f"Manual batch created: id={new_batch.id}, lot_id={lot_id}, machine={machine.name}, operator={operator.full_name}, qty={payload.quantity}")
+        
+        return {
+            "success": True,
+            "batch_id": new_batch.id,
+            "lot_number": lot.lot_number if lot else None,
+            "drawing_number": part.drawing_number if part else None,
+            "machine_name": machine.name,
+            "operator_name": operator.full_name,
+            "quantity": payload.quantity,
+            "batch_type": payload.batch_type
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error creating manual batch: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to create batch: {str(e)}")
+
 @app.get("/warehouse/batches-pending", response_model=List[WarehousePendingBatchItem])
 async def get_warehouse_pending_batches(db: Session = Depends(get_db_session)):
     """Получить список батчей, ожидающих приемки на склад (статус 'production' или 'sorting')."""
