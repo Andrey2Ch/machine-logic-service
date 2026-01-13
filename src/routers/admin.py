@@ -13,7 +13,7 @@ from ..database import get_db_session
 from ..models.models import MachineDB, CardDB, SetupDB, LotDB, PartDB, EmployeeDB
 from ..services.mtconnect_client import reset_counter_on_qa_approval
 from ..services.telegram_client import send_telegram_message
-from ..services.whatsapp_client import send_whatsapp_to_role, WHATSAPP_ENABLED
+from ..services.whatsapp_client import send_whatsapp_to_all_enabled_roles, WHATSAPP_ENABLED
 
 # Настройка логгера
 logger = logging.getLogger(__name__)
@@ -199,10 +199,9 @@ async def send_setup_to_qc(setup_id: int, db: Session = Depends(get_db_session))
                 if emp.telegram_id:
                     await send_telegram_message(emp.telegram_id, message)
             
-            # Отправляем в WhatsApp группы (QA + Machinists)
+            # Отправляем в WhatsApp всем включённым ролям
             if WHATSAPP_ENABLED:
-                await send_whatsapp_to_role(db, 5, message, notification_type="setup_pending_qc")  # QA
-                # await send_whatsapp_to_role(db, 2, message, notification_type="setup_pending_qc")  # Machinists
+                await send_whatsapp_to_all_enabled_roles(db, message, "setup_pending_qc")
             
             logger.info(f"Sent pending_qc notifications for setup {setup_id}")
             

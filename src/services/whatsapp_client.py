@@ -164,18 +164,31 @@ async def send_whatsapp_to_role_personal(
 ) -> int:
     """
     Отправка личных WhatsApp сообщений всем сотрудникам с указанной ролью
+    Checks enabled flag from notification_settings!
     
     Args:
         db: Сессия БД
         role_id: ID роли
         message: Текст сообщения
-        notification_type: Тип уведомления для перевода
+        notification_type: Тип уведомления для перевода и проверки enabled
     
     Returns:
         Количество отправленных сообщений
     """
     if not WHATSAPP_ENABLED:
         return 0
+    
+    # Проверяем включено ли для этой роли в настройках
+    lang_column = ROLE_ID_TO_LANG_COLUMN.get(role_id)
+    if lang_column and notification_type:
+        try:
+            from src.routers.notification_settings import is_notification_enabled
+            enabled = await is_notification_enabled(db, notification_type, lang_column)
+            if not enabled:
+                logger.debug(f"WhatsApp personal disabled for {lang_column} on {notification_type}")
+                return 0
+        except Exception as e:
+            logger.warning(f"Failed to check notification enabled: {e}")
     
     from src.models.models import EmployeeDB
     
@@ -227,6 +240,7 @@ async def send_whatsapp_to_role(
 ) -> int:
     """
     Send message to WhatsApp group(s) for a specific role_id
+    Checks enabled flag from notification_settings!
     Supports AI translation based on role language settings
     
     Args:
@@ -234,13 +248,25 @@ async def send_whatsapp_to_role(
         role_id: Role ID (1=operator, 2=machinist, 3=admin, 5=qa, 7=viewer)
         message: Message text (in Russian)
         exclude_id: Employee ID to exclude (not used for group messages)
-        notification_type: Type of notification (for language lookup)
+        notification_type: Type of notification (for language lookup and enabled check)
     
     Returns:
         int: Number of groups message was sent to
     """
     if not WHATSAPP_ENABLED:
         return 0
+    
+    # Проверяем включено ли для этой роли в настройках
+    lang_column = ROLE_ID_TO_LANG_COLUMN.get(role_id)
+    if lang_column and notification_type:
+        try:
+            from src.routers.notification_settings import is_notification_enabled
+            enabled = await is_notification_enabled(db, notification_type, lang_column)
+            if not enabled:
+                logger.debug(f"WhatsApp disabled for {lang_column} on {notification_type}")
+                return 0
+        except Exception as e:
+            logger.warning(f"Failed to check notification enabled: {e}")
     
     groups = ROLE_ID_TO_GROUPS.get(role_id, [])
     if not groups:
@@ -275,3 +301,68 @@ async def send_whatsapp_to_role(
     
     logger.info(f"WhatsApp sent to {sent_count}/{len([g for g in groups if g])} groups for role_id {role_id}")
     return sent_count
+
+
+async def send_whatsapp_to_all_enabled_roles(
+    db: Session,
+    message: str,
+    notification_type: str
+) -> int:
+    """
+    Отправляет WhatsApp уведомление ВСЕМ ролям, у которых включено в настройках.
+    Проверяет enabled_* флаги из таблицы notification_settings.
+    Viewer получает личные сообщения, остальные - в группы.
+    
+    Args:
+        db: Сессия БД
+        message: Текст сообщения
+        notification_type: Тип уведомления (ключ в notification_settings)
+    
+    Returns:
+        Общее количество отправленных сообщений/групп
+    """
+    if not WHATSAPP_ENABLED:
+        return 0
+    
+    if not notification_type:
+        logger.warning("notification_type is required for send_whatsapp_to_all_enabled_roles")
+        return 0
+    
+    try:
+        from src.routers.notification_settings import is_notification_enabled
+        
+        total_sent = 0
+        
+        # Роли и их маппинг: role_id -> (channel_name, is_personal)
+        roles_config = [
+            (1, 'operators', False),    # Operators - группа
+            (2, 'machinists', False),   # Machinists - группа
+            (3, 'admin', False),        # Admin - группа
+            (5, 'qa', False),           # QA - группа
+            (7, 'viewer', True),        # Viewer - личные!
+        ]
+        
+        for role_id, channel, is_personal in roles_config:
+            # Проверяем включено ли в настройках
+            enabled = await is_notification_enabled(db, notification_type, channel)
+            
+            if not enabled:
+                logger.debug(f"WhatsApp disabled for {channel} on {notification_type}")
+                continue
+            
+            if is_personal:
+                # Viewer - личные WhatsApp
+                sent = await send_whatsapp_to_role_personal(db, role_id, message, notification_type)
+            else:
+                # Группы
+                sent = await send_whatsapp_to_role(db, role_id, message, notification_type=notification_type)
+            
+            total_sent += sent
+            logger.debug(f"WhatsApp sent to role {channel}: {sent}")
+        
+        logger.info(f"WhatsApp to all enabled roles for '{notification_type}': {total_sent} total")
+        return total_sent
+        
+    except Exception as e:
+        logger.error(f"Error in send_whatsapp_to_all_enabled_roles: {e}", exc_info=True)
+        return 0

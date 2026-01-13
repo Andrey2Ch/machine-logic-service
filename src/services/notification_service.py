@@ -1,7 +1,7 @@
 import logging
 from sqlalchemy.orm import Session, aliased
 from .telegram_client import send_telegram_message
-from .whatsapp_client import send_whatsapp_to_role, send_whatsapp_to_role_personal, WHATSAPP_ENABLED
+from .whatsapp_client import send_whatsapp_to_role, send_whatsapp_to_role_personal, send_whatsapp_to_all_enabled_roles, WHATSAPP_ENABLED
 # Убираем RoleDB из импорта
 from src.models.models import SetupDB, EmployeeDB, MachineDB, LotDB, PartDB 
 
@@ -119,9 +119,18 @@ async def send_setup_approval_notifications(db: Session, setup_id: int, notifica
                 MACHINIST_ROLE_ID, 
                 free_machine_message, 
                 exclude_id=machinist_obj.id if machinist_obj else None,
-                notification_type="machine_available"
+                notification_type="machine_free"
             )
-            logger.info(f"Sent 'machine free' notification to all machinists for machine {machine_name}")
+            # Операторам тоже
+            await _notify_role_by_id_sqlalchemy(
+                db, 
+                OPERATOR_ROLE_ID, 
+                free_machine_message, 
+                notification_type="machine_free"
+            )
+            # Viewer - личные (TG + WhatsApp)
+            await _notify_viewer_personal(db, free_machine_message, notification_type="machine_available")
+            logger.info(f"Sent 'machine free' notification to machinists + operators + viewers for machine {machine_name}")
 
         # 🔔 Уведомляем Viewer'ов (личные TG + личные WhatsApp)
         await _notify_viewer_personal(db, base_message, notification_type=notif_type)

@@ -9,7 +9,7 @@ from src.database import get_db_session
 from src.models.models import LotDB, PartDB, SetupDB, EmployeeDB, MachineDB
 from pydantic import BaseModel
 from src.services.telegram_client import send_telegram_message
-from src.services.whatsapp_client import send_whatsapp_to_role, WHATSAPP_ENABLED
+from src.services.whatsapp_client import send_whatsapp_to_all_enabled_roles, WHATSAPP_ENABLED
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Quality Control"])
@@ -237,10 +237,9 @@ async def notify_setup_allowed(
                     f"Операторы могут начинать работу!"
                 )
                 
-                # Отправляем в группы: Наладчики, Операторы (обе смены)
-                await send_whatsapp_to_role(db, 2, wa_message, notification_type="setup_allowed")  # Machinists
-                await send_whatsapp_to_role(db, 1, wa_message, notification_type="setup_allowed")  # Operators
-                logger.info(f"WhatsApp уведомления о разрешении наладки {setup_id} отправлены")
+                # Отправляем всем включённым ролям
+                wa_sent = await send_whatsapp_to_all_enabled_roles(db, wa_message, "setup_allowed")
+                logger.info(f"WhatsApp уведомления о разрешении наладки {setup_id} отправлены ({wa_sent})")
             except Exception as wa_err:
                 logger.warning(f"WhatsApp уведомление не отправлено (non-critical): {wa_err}")
 
@@ -384,11 +383,21 @@ async def notify_defect_detected(
         
         logger.info(f"Defect notifications sent: {successful_sends}/{len(recipients)}")
         
+        # 🔔 WhatsApp уведомления о браке - всем включённым ролям
+        wa_sent = 0
+        if WHATSAPP_ENABLED:
+            try:
+                wa_sent = await send_whatsapp_to_all_enabled_roles(db, message, "defect_detected")
+                logger.info(f"WhatsApp defect notifications sent to {wa_sent} recipients/groups")
+            except Exception as wa_err:
+                logger.warning(f"WhatsApp defect notification failed (non-critical): {wa_err}")
+        
         return {
             "success": True,
             "sent": successful_sends,
             "total_recipients": len(recipients),
-            "recipients": sent_recipients
+            "recipients": sent_recipients,
+            "whatsapp_sent": wa_sent
         }
         
     except Exception as e:
