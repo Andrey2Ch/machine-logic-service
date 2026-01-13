@@ -402,4 +402,43 @@ async def notify_defect_detected(
         
     except Exception as e:
         logger.error(f"Error in defect notification: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Ошибка при отправке уведомлений о браке: {str(e)}") 
+        raise HTTPException(status_code=500, detail=f"Ошибка при отправке уведомлений о браке: {str(e)}")
+
+
+@router.post("/test-viewer-whatsapp", summary="Тест WhatsApp для Viewer")
+async def test_viewer_whatsapp(
+    db: Session = Depends(get_db_session)
+):
+    """Тестовый endpoint для проверки WhatsApp личных сообщений Viewer'ам"""
+    from src.services.whatsapp_client import send_whatsapp_to_role_personal, WHATSAPP_ENABLED
+    from src.models.models import EmployeeDB
+    
+    VIEWER_ROLE_ID = 7
+    
+    # Получаем viewer'ов
+    viewers = db.query(EmployeeDB).filter(
+        EmployeeDB.role_id == VIEWER_ROLE_ID,
+        EmployeeDB.is_active == True
+    ).all()
+    
+    viewer_info = []
+    for v in viewers:
+        viewer_info.append({
+            "id": v.id,
+            "name": v.full_name,
+            "whatsapp_phone": v.whatsapp_phone,
+            "has_phone": bool(v.whatsapp_phone and v.whatsapp_phone.strip())
+        })
+    
+    # Отправляем тестовое сообщение
+    wa_sent = 0
+    if WHATSAPP_ENABLED:
+        test_message = "🧪 Тестовое сообщение для Viewer\nЕсли видишь это - WhatsApp работает!"
+        wa_sent = await send_whatsapp_to_role_personal(db, VIEWER_ROLE_ID, test_message, "defect_detected")
+    
+    return {
+        "whatsapp_enabled": WHATSAPP_ENABLED,
+        "viewers_found": len(viewers),
+        "viewers": viewer_info,
+        "whatsapp_sent": wa_sent
+    }
