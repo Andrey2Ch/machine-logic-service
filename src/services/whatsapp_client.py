@@ -5,12 +5,47 @@ Sends messages to GROUPS only (no personal messages)
 Supports AI translation per role language settings
 """
 import os
+import re
 import logging
 import httpx
 from typing import Optional, List
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
+
+
+def html_to_whatsapp(text: str) -> str:
+    """
+    Конвертирует HTML теги в WhatsApp форматирование.
+    - <b>text</b> → *text*
+    - <strong>text</strong> → *text*
+    - <i>text</i> → _text_
+    - <em>text</em> → _text_
+    - <u>text</u> → text (WhatsApp не поддерживает underline)
+    - <s>text</s> → ~text~
+    - <code>text</code> → ```text```
+    """
+    if not text:
+        return text
+    
+    # Bold: <b> or <strong>
+    text = re.sub(r'<b>(.*?)</b>', r'*\1*', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<strong>(.*?)</strong>', r'*\1*', text, flags=re.DOTALL | re.IGNORECASE)
+    
+    # Italic: <i> or <em>
+    text = re.sub(r'<i>(.*?)</i>', r'_\1_', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<em>(.*?)</em>', r'_\1_', text, flags=re.DOTALL | re.IGNORECASE)
+    
+    # Underline: <u> - просто убираем теги (WA не поддерживает)
+    text = re.sub(r'<u>(.*?)</u>', r'\1', text, flags=re.DOTALL | re.IGNORECASE)
+    
+    # Strikethrough: <s>
+    text = re.sub(r'<s>(.*?)</s>', r'~\1~', text, flags=re.DOTALL | re.IGNORECASE)
+    
+    # Code: <code>
+    text = re.sub(r'<code>(.*?)</code>', r'```\1```', text, flags=re.DOTALL | re.IGNORECASE)
+    
+    return text
 
 WHATSAPP_API_URL = os.getenv('WHATSAPP_API_URL', '')
 WHATSAPP_ENABLED = os.getenv('WHATSAPP_ENABLED', 'false').lower() == 'true'
@@ -52,12 +87,8 @@ ROLE_ID_TO_LANG_COLUMN = {
 
 
 def strip_html(text: str) -> str:
-    """Remove HTML tags and convert to WhatsApp formatting"""
-    result = text.replace('<b>', '*').replace('</b>', '*')
-    result = result.replace('<i>', '_').replace('</i>', '_')
-    result = result.replace('<code>', '`').replace('</code>', '`')
-    result = result.replace('<br>', '\n').replace('<br/>', '\n')
-    return result
+    """Convert HTML tags to WhatsApp formatting"""
+    return html_to_whatsapp(text)
 
 
 async def send_whatsapp_to_group(group_jid: str, message: str) -> bool:
