@@ -162,6 +162,11 @@ async def send_whatsapp_personal(phone: str, message: str) -> bool:
     # Убираем + и пробелы из номера
     clean_phone = phone.replace("+", "").replace(" ", "").replace("-", "")
     
+    # Конвертируем израильский формат (0XX) в международный (972XX)
+    if clean_phone.startswith("0") and len(clean_phone) == 10:
+        clean_phone = "972" + clean_phone[1:]
+        logger.debug(f"Converted local phone to international: {clean_phone[:6]}***")
+    
     # Конвертируем HTML в WhatsApp формат
     clean_message = strip_html(message)
     
