@@ -2,6 +2,7 @@
 WhatsApp client for machine-logic-service
 Uses GOWA (Go WhatsApp Web Multi-Device) API
 Sends messages to GROUPS only (no personal messages)
+Supports AI translation per role language settings
 """
 import os
 import logging
@@ -20,6 +21,7 @@ WHATSAPP_GROUP_OPERATORS_A = os.getenv('WHATSAPP_GROUP_OPERATORS_A', '')  # См
 WHATSAPP_GROUP_OPERATORS_B = os.getenv('WHATSAPP_GROUP_OPERATORS_B', '')  # Смена II
 WHATSAPP_GROUP_QA = os.getenv('WHATSAPP_GROUP_QA', '')  # Бикорет (ОТК)
 WHATSAPP_GROUP_ADMIN = os.getenv('WHATSAPP_GROUP_ADMIN', '')  # Руководство (optional)
+WHATSAPP_GROUP_VIEWER = os.getenv('WHATSAPP_GROUP_VIEWER', '')  # Viewer (мониторинг)
 
 # Автоматически добавляем протокол, если отсутствует
 if WHATSAPP_ENABLED and WHATSAPP_API_URL and not WHATSAPP_API_URL.startswith(('http://', 'https://')):
@@ -30,12 +32,22 @@ logger.info(f"WhatsApp API URL: {WHATSAPP_API_URL}")
 logger.info(f"WhatsApp Enabled: {WHATSAPP_ENABLED}")
 
 # Role ID -> Group JID(s) mapping
-# Role IDs: 1=operator, 2=machinist, 3=admin, 5=qa
+# Role IDs: 1=operator, 2=machinist, 3=admin, 5=qa, 7=viewer
 ROLE_ID_TO_GROUPS = {
     1: [WHATSAPP_GROUP_OPERATORS_A, WHATSAPP_GROUP_OPERATORS_B],  # Operators - both shifts
     2: [WHATSAPP_GROUP_MACHINISTS],  # Machinists
     3: [WHATSAPP_GROUP_ADMIN] if WHATSAPP_GROUP_ADMIN else [],  # Admin
     5: [WHATSAPP_GROUP_QA],  # QA
+    7: [WHATSAPP_GROUP_VIEWER] if WHATSAPP_GROUP_VIEWER else [],  # Viewer
+}
+
+# Role ID -> Language setting column name (for translation)
+ROLE_ID_TO_LANG_COLUMN = {
+    1: 'operators',
+    2: 'machinists',
+    3: 'admin',
+    5: 'qa',
+    7: 'viewer',
 }
 
 
@@ -98,16 +110,131 @@ async def send_whatsapp_to_group(group_jid: str, message: str) -> bool:
         return False
 
 
-async def send_whatsapp_to_role(db: Session, role_id: int, message: str, exclude_id: int = None) -> int:
+async def send_whatsapp_personal(phone: str, message: str) -> bool:
     """
-    Send message to WhatsApp group(s) for a specific role_id
-    Note: db and exclude_id parameters kept for API compatibility but not used (groups only)
+    Отправка личного WhatsApp сообщения по номеру телефона
     
     Args:
-        db: Database session (not used for group messages)
-        role_id: Role ID (1=operator, 2=machinist, 3=admin, 5=qa)
-        message: Message text
+        phone: Номер телефона (например "972501234567")
+        message: Текст сообщения (HTML конвертируется в WhatsApp формат)
+    """
+    if not WHATSAPP_ENABLED:
+        return False
+    
+    if not WHATSAPP_API_URL:
+        logger.warning("WHATSAPP_API_URL not configured")
+        return False
+    
+    if not phone:
+        return False
+    
+    # Убираем + и пробелы из номера
+    clean_phone = phone.replace("+", "").replace(" ", "").replace("-", "")
+    
+    # Конвертируем HTML в WhatsApp формат
+    clean_message = strip_html(message)
+    
+    try:
+        url = f"{WHATSAPP_API_URL}/send/message"
+        payload = {
+            "phone": clean_phone,
+            "message": clean_message
+        }
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(url, json=payload)
+            
+            if response.status_code == 200:
+                logger.info(f"WhatsApp personal message sent to {clean_phone[:6]}***")
+                return True
+            else:
+                logger.error(f"WhatsApp API error: {response.status_code} - {response.text}")
+                return False
+                
+    except Exception as e:
+        logger.error(f"WhatsApp personal send error: {e}")
+        return False
+
+
+async def send_whatsapp_to_role_personal(
+    db: Session, 
+    role_id: int, 
+    message: str,
+    notification_type: str = None
+) -> int:
+    """
+    Отправка личных WhatsApp сообщений всем сотрудникам с указанной ролью
+    
+    Args:
+        db: Сессия БД
+        role_id: ID роли
+        message: Текст сообщения
+        notification_type: Тип уведомления для перевода
+    
+    Returns:
+        Количество отправленных сообщений
+    """
+    if not WHATSAPP_ENABLED:
+        return 0
+    
+    from src.models.models import EmployeeDB
+    
+    # Получаем сотрудников с этой ролью и whatsapp_phone
+    employees = db.query(EmployeeDB).filter(
+        EmployeeDB.role_id == role_id,
+        EmployeeDB.is_active == True,
+        EmployeeDB.whatsapp_phone != None,
+        EmployeeDB.whatsapp_phone != ''
+    ).all()
+    
+    if not employees:
+        logger.debug(f"No employees with whatsapp_phone for role_id: {role_id}")
+        return 0
+    
+    # Переводим если нужно
+    final_message = message
+    lang_column = ROLE_ID_TO_LANG_COLUMN.get(role_id)
+    
+    if lang_column and notification_type:
+        try:
+            from src.routers.notification_settings import get_notification_language
+            from src.services.ai_translate import translate_notification
+            
+            target_lang = await get_notification_language(db, notification_type, lang_column)
+            
+            if target_lang and target_lang != 'ru':
+                final_message = await translate_notification(message, target_lang)
+                logger.info(f"Translated personal WA to '{target_lang}' for role_id {role_id}")
+        except Exception as e:
+            logger.warning(f"Translation failed: {e}")
+    
+    sent_count = 0
+    for emp in employees:
+        success = await send_whatsapp_personal(emp.whatsapp_phone, final_message)
+        if success:
+            sent_count += 1
+    
+    logger.info(f"WhatsApp personal sent to {sent_count}/{len(employees)} employees for role_id {role_id}")
+    return sent_count
+
+
+async def send_whatsapp_to_role(
+    db: Session, 
+    role_id: int, 
+    message: str, 
+    exclude_id: int = None,
+    notification_type: str = None
+) -> int:
+    """
+    Send message to WhatsApp group(s) for a specific role_id
+    Supports AI translation based on role language settings
+    
+    Args:
+        db: Database session (used for getting language settings)
+        role_id: Role ID (1=operator, 2=machinist, 3=admin, 5=qa, 7=viewer)
+        message: Message text (in Russian)
         exclude_id: Employee ID to exclude (not used for group messages)
+        notification_type: Type of notification (for language lookup)
     
     Returns:
         int: Number of groups message was sent to
@@ -120,10 +247,29 @@ async def send_whatsapp_to_role(db: Session, role_id: int, message: str, exclude
         logger.debug(f"No WhatsApp groups configured for role_id: {role_id}")
         return 0
     
+    # Get language for this role and translate if needed
+    final_message = message
+    lang_column = ROLE_ID_TO_LANG_COLUMN.get(role_id)
+    
+    if lang_column and notification_type:
+        try:
+            from src.routers.notification_settings import get_notification_language
+            from src.services.ai_translate import translate_notification
+            
+            target_lang = await get_notification_language(db, notification_type, lang_column)
+            
+            if target_lang and target_lang != 'ru':
+                # Translate the message
+                final_message = await translate_notification(message, target_lang)
+                logger.info(f"Translated message to '{target_lang}' for role_id {role_id}")
+        except Exception as e:
+            logger.warning(f"Translation failed, using original: {e}")
+            final_message = message
+    
     sent_count = 0
     for group_jid in groups:
         if group_jid:  # Skip empty JIDs
-            success = await send_whatsapp_to_group(group_jid, message)
+            success = await send_whatsapp_to_group(group_jid, final_message)
             if success:
                 sent_count += 1
     

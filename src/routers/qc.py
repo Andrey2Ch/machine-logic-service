@@ -238,8 +238,8 @@ async def notify_setup_allowed(
                 )
                 
                 # Отправляем в группы: Наладчики, Операторы (обе смены)
-                await send_whatsapp_to_role(db, 2, wa_message)  # Machinists
-                await send_whatsapp_to_role(db, 1, wa_message)  # Operators
+                await send_whatsapp_to_role(db, 2, wa_message, notification_type="setup_allowed")  # Machinists
+                await send_whatsapp_to_role(db, 1, wa_message, notification_type="setup_allowed")  # Operators
                 logger.info(f"WhatsApp уведомления о разрешении наладки {setup_id} отправлены")
             except Exception as wa_err:
                 logger.warning(f"WhatsApp уведомление не отправлено (non-critical): {wa_err}")

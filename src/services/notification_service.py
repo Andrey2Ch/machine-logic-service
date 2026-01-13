@@ -1,7 +1,7 @@
 import logging
 from sqlalchemy.orm import Session, aliased
 from .telegram_client import send_telegram_message
-from .whatsapp_client import send_whatsapp_to_role, WHATSAPP_ENABLED
+from .whatsapp_client import send_whatsapp_to_role, send_whatsapp_to_role_personal, WHATSAPP_ENABLED
 # Убираем RoleDB из импорта
 from src.models.models import SetupDB, EmployeeDB, MachineDB, LotDB, PartDB 
 
@@ -11,6 +11,8 @@ logger = logging.getLogger(__name__)
 ADMIN_ROLE_ID = 3 # Was 4
 OPERATOR_ROLE_ID = 1 # Correct
 MACHINIST_ROLE_ID = 2 # Correct
+QA_ROLE_ID = 5 # ОТК
+VIEWER_ROLE_ID = 7 # Viewer (мониторинг)
 
 async def send_setup_approval_notifications(db: Session, setup_id: int, notification_type: str = "approval"):
     """
@@ -88,8 +90,19 @@ async def send_setup_approval_notifications(db: Session, setup_id: int, notifica
         if machinist_obj and machinist_obj.telegram_id:
             await send_telegram_message(machinist_obj.telegram_id, machinist_message)
 
-        await _notify_role_by_id_sqlalchemy(db, ADMIN_ROLE_ID, admin_message, exclude_id=machinist_obj.id if machinist_obj else None)
-        await _notify_role_by_id_sqlalchemy(db, OPERATOR_ROLE_ID, operator_message, exclude_id=machinist_obj.id if machinist_obj else None)
+        # Используем существующие типы из БД
+        notif_type = "setup_allowed" if notification_type == "approval" else "setup_completed"
+        
+        await _notify_role_by_id_sqlalchemy(
+            db, ADMIN_ROLE_ID, admin_message, 
+            exclude_id=machinist_obj.id if machinist_obj else None,
+            notification_type=notif_type
+        )
+        await _notify_role_by_id_sqlalchemy(
+            db, OPERATOR_ROLE_ID, operator_message, 
+            exclude_id=machinist_obj.id if machinist_obj else None,
+            notification_type=notif_type
+        )
 
         # 🔔 Если это завершение - уведомляем ВСЕХ наладчиков об освободившемся станке
         if notification_type == "completion":
@@ -105,10 +118,14 @@ async def send_setup_approval_notifications(db: Session, setup_id: int, notifica
                 db, 
                 MACHINIST_ROLE_ID, 
                 free_machine_message, 
-                exclude_id=machinist_obj.id if machinist_obj else None  # не шлём автору наладки
+                exclude_id=machinist_obj.id if machinist_obj else None,
+                notification_type="machine_available"
             )
             logger.info(f"Sent 'machine free' notification to all machinists for machine {machine_name}")
 
+        # 🔔 Уведомляем Viewer'ов (личные TG + личные WhatsApp)
+        await _notify_viewer_personal(db, base_message, notification_type=notif_type)
+        
         logger.info(f"Successfully processed {notification_type} notifications for setup {setup_id}")
         return True
 
@@ -116,7 +133,13 @@ async def send_setup_approval_notifications(db: Session, setup_id: int, notifica
         logger.error(f"Error sending {notification_type} notifications for setup {setup_id}: {e}", exc_info=True)
         return False
 
-async def _notify_role_by_id_sqlalchemy(db: Session, role_id: int, message: str, exclude_id: int = None):
+async def _notify_role_by_id_sqlalchemy(
+    db: Session, 
+    role_id: int, 
+    message: str, 
+    exclude_id: int = None,
+    notification_type: str = None
+):
     """Отправляет сообщение всем сотрудникам с указанным role_id SQLAlchemy, кроме exclude_id."""
     try:
         query = db.query(EmployeeDB)\
@@ -136,16 +159,80 @@ async def _notify_role_by_id_sqlalchemy(db: Session, role_id: int, message: str,
                  logger.debug(f"Sending notification to role_id {role_id}: {emp.full_name} (ID: {emp.id}, TG_ID: {emp.telegram_id})")
                  await send_telegram_message(emp.telegram_id, message)
 
-        # 🔔 Дублируем в WhatsApp группу
+        # 🔔 Дублируем в WhatsApp группу (с переводом если настроено)
         if WHATSAPP_ENABLED:
             try:
-                wa_sent = await send_whatsapp_to_role(db, role_id, message, exclude_id)
+                wa_sent = await send_whatsapp_to_role(
+                    db, role_id, message, exclude_id, 
+                    notification_type=notification_type
+                )
                 logger.info(f"WhatsApp sent to {wa_sent} group(s) for role_id {role_id}")
             except Exception as wa_err:
                 logger.warning(f"WhatsApp send failed (non-critical): {wa_err}")
 
     except Exception as e:
         logger.error(f"Failed to notify role_id '{role_id}': {e}", exc_info=True)
+
+
+async def _notify_viewer_personal(
+    db: Session,
+    message: str,
+    notification_type: str = None
+):
+    """
+    Уведомляет Viewer'ов (role_id=7) через личные сообщения:
+    - Telegram личка
+    - WhatsApp личка (не группа!)
+    """
+    try:
+        # Telegram личка
+        employees = db.query(EmployeeDB).filter(
+            EmployeeDB.role_id == VIEWER_ROLE_ID,
+            EmployeeDB.is_active == True,
+            EmployeeDB.telegram_id != None
+        ).all()
+        
+        for emp in employees:
+            if emp.telegram_id:
+                await send_telegram_message(emp.telegram_id, message)
+        
+        logger.debug(f"Sent TG to {len(employees)} viewers")
+        
+        # WhatsApp личка (с переводом)
+        if WHATSAPP_ENABLED:
+            wa_sent = await send_whatsapp_to_role_personal(
+                db, VIEWER_ROLE_ID, message,
+                notification_type=notification_type
+            )
+            logger.info(f"WhatsApp personal sent to {wa_sent} viewers")
+            
+    except Exception as e:
+        logger.error(f"Failed to notify viewers: {e}", exc_info=True)
+
+
+async def _notify_whatsapp_only(
+    db: Session, 
+    role_id: int, 
+    message: str,
+    notification_type: str = None
+):
+    """
+    Отправляет сообщение только в WhatsApp группу роли (без личных Telegram).
+    Используется для Viewer и других ролей где нужен только групповой канал.
+    """
+    if not WHATSAPP_ENABLED:
+        return
+    
+    try:
+        wa_sent = await send_whatsapp_to_role(
+            db, role_id, message, 
+            exclude_id=None,
+            notification_type=notification_type
+        )
+        logger.info(f"WhatsApp-only sent to {wa_sent} group(s) for role_id {role_id}")
+    except Exception as wa_err:
+        logger.warning(f"WhatsApp-only send failed (non-critical): {wa_err}")
+
 
 async def send_batch_discrepancy_alert(db: Session, discrepancy_details: dict):
     """
@@ -188,7 +275,10 @@ async def send_batch_discrepancy_alert(db: Session, discrepancy_details: dict):
             f"<i>Требуется проверка и подтверждение администратора.</i>"
         )
 
-        await _notify_role_by_id_sqlalchemy(db, ADMIN_ROLE_ID, message)
+        await _notify_role_by_id_sqlalchemy(
+            db, ADMIN_ROLE_ID, message,
+            notification_type="defect_detected"
+        )
         logger.info(f"Successfully processed discrepancy alert for Batch ID: {discrepancy_details.get('batch_id')}")
         return True
 
