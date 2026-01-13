@@ -26,7 +26,14 @@ class NotificationSettingResponse(BaseModel):
     enabled_operators: bool
     enabled_qa: bool
     enabled_admin: bool
+    enabled_viewer: bool
     enabled_telegram: bool
+    # Языки для каждой роли
+    language_machinists: str = "ru"
+    language_operators: str = "ru"
+    language_qa: str = "ru"
+    language_admin: str = "ru"
+    language_viewer: str = "he"
     
     class Config:
         from_attributes = True
@@ -37,7 +44,14 @@ class NotificationSettingUpdate(BaseModel):
     enabled_operators: Optional[bool] = None
     enabled_qa: Optional[bool] = None
     enabled_admin: Optional[bool] = None
+    enabled_viewer: Optional[bool] = None
     enabled_telegram: Optional[bool] = None
+    # Языки
+    language_machinists: Optional[str] = None
+    language_operators: Optional[str] = None
+    language_qa: Optional[str] = None
+    language_admin: Optional[str] = None
+    language_viewer: Optional[str] = None
 
 
 class BulkUpdateItem(BaseModel):
@@ -46,7 +60,13 @@ class BulkUpdateItem(BaseModel):
     enabled_operators: Optional[bool] = None
     enabled_qa: Optional[bool] = None
     enabled_admin: Optional[bool] = None
+    enabled_viewer: Optional[bool] = None
     enabled_telegram: Optional[bool] = None
+    language_machinists: Optional[str] = None
+    language_operators: Optional[str] = None
+    language_qa: Optional[str] = None
+    language_admin: Optional[str] = None
+    language_viewer: Optional[str] = None
 
 
 @router.get("/settings", response_model=List[NotificationSettingResponse])
@@ -56,7 +76,12 @@ async def get_notification_settings(db: Session = Depends(get_db_session)):
         result = db.execute(text("""
             SELECT id, notification_type, display_name, description, category,
                    enabled_machinists, enabled_operators, enabled_qa, 
-                   enabled_admin, enabled_telegram
+                   enabled_admin, COALESCE(enabled_viewer, true) as enabled_viewer, enabled_telegram,
+                   COALESCE(language_machinists, 'ru') as language_machinists,
+                   COALESCE(language_operators, 'ru') as language_operators,
+                   COALESCE(language_qa, 'ru') as language_qa,
+                   COALESCE(language_admin, 'ru') as language_admin,
+                   COALESCE(language_viewer, 'he') as language_viewer
             FROM notification_settings
             ORDER BY category, display_name
         """))
@@ -73,7 +98,13 @@ async def get_notification_settings(db: Session = Depends(get_db_session)):
                 enabled_operators=row.enabled_operators,
                 enabled_qa=row.enabled_qa,
                 enabled_admin=row.enabled_admin,
-                enabled_telegram=row.enabled_telegram
+                enabled_viewer=row.enabled_viewer,
+                enabled_telegram=row.enabled_telegram,
+                language_machinists=row.language_machinists,
+                language_operators=row.language_operators,
+                language_qa=row.language_qa,
+                language_admin=row.language_admin,
+                language_viewer=row.language_viewer
             )
             for row in rows
         ]
@@ -110,9 +141,34 @@ async def update_notification_setting(
             updates.append("enabled_admin = :enabled_admin")
             params["enabled_admin"] = update.enabled_admin
             
+        if update.enabled_viewer is not None:
+            updates.append("enabled_viewer = :enabled_viewer")
+            params["enabled_viewer"] = update.enabled_viewer
+            
         if update.enabled_telegram is not None:
             updates.append("enabled_telegram = :enabled_telegram")
             params["enabled_telegram"] = update.enabled_telegram
+        
+        # Языки
+        if update.language_machinists is not None:
+            updates.append("language_machinists = :language_machinists")
+            params["language_machinists"] = update.language_machinists
+            
+        if update.language_operators is not None:
+            updates.append("language_operators = :language_operators")
+            params["language_operators"] = update.language_operators
+            
+        if update.language_qa is not None:
+            updates.append("language_qa = :language_qa")
+            params["language_qa"] = update.language_qa
+            
+        if update.language_admin is not None:
+            updates.append("language_admin = :language_admin")
+            params["language_admin"] = update.language_admin
+            
+        if update.language_viewer is not None:
+            updates.append("language_viewer = :language_viewer")
+            params["language_viewer"] = update.language_viewer
         
         if not updates:
             raise HTTPException(status_code=400, detail="No fields to update")
@@ -172,9 +228,34 @@ async def bulk_update_notification_settings(
                 update_parts.append("enabled_admin = :enabled_admin")
                 params["enabled_admin"] = item.enabled_admin
                 
+            if item.enabled_viewer is not None:
+                update_parts.append("enabled_viewer = :enabled_viewer")
+                params["enabled_viewer"] = item.enabled_viewer
+                
             if item.enabled_telegram is not None:
                 update_parts.append("enabled_telegram = :enabled_telegram")
                 params["enabled_telegram"] = item.enabled_telegram
+            
+            # Языки
+            if item.language_machinists is not None:
+                update_parts.append("language_machinists = :language_machinists")
+                params["language_machinists"] = item.language_machinists
+                
+            if item.language_operators is not None:
+                update_parts.append("language_operators = :language_operators")
+                params["language_operators"] = item.language_operators
+                
+            if item.language_qa is not None:
+                update_parts.append("language_qa = :language_qa")
+                params["language_qa"] = item.language_qa
+                
+            if item.language_admin is not None:
+                update_parts.append("language_admin = :language_admin")
+                params["language_admin"] = item.language_admin
+                
+            if item.language_viewer is not None:
+                update_parts.append("language_viewer = :language_viewer")
+                params["language_viewer"] = item.language_viewer
             
             if update_parts:
                 query = f"""
@@ -197,12 +278,12 @@ async def bulk_update_notification_settings(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# === Функция для проверки настроек при отправке ===
+# === Функции для проверки настроек при отправке ===
 
 async def is_notification_enabled(
     db: Session,
     notification_type: str,
-    channel: str  # 'machinists', 'operators', 'qa', 'admin', 'telegram'
+    channel: str  # 'machinists', 'operators', 'qa', 'admin', 'viewer', 'telegram'
 ) -> bool:
     """
     Проверяет, включено ли уведомление для данного канала.
@@ -211,7 +292,7 @@ async def is_notification_enabled(
     try:
         column_name = f"enabled_{channel}"
         if column_name not in ['enabled_machinists', 'enabled_operators', 
-                               'enabled_qa', 'enabled_admin', 'enabled_telegram']:
+                               'enabled_qa', 'enabled_admin', 'enabled_viewer', 'enabled_telegram']:
             return True  # По умолчанию разрешаем
         
         result = db.execute(text(f"""
@@ -230,6 +311,49 @@ async def is_notification_enabled(
     except Exception as e:
         logger.warning(f"Error checking notification setting: {e}")
         return True  # При ошибке разрешаем
+
+
+async def get_notification_language(
+    db: Session,
+    notification_type: str,
+    channel: str  # 'machinists', 'operators', 'qa', 'admin', 'viewer'
+) -> str:
+    """
+    Получает язык для уведомления конкретной роли.
+    Используется для AI-перевода перед отправкой.
+    
+    Returns: код языка ('ru', 'he', 'en', 'ar')
+    """
+    try:
+        column_name = f"language_{channel}"
+        valid_columns = ['language_machinists', 'language_operators', 
+                        'language_qa', 'language_admin', 'language_viewer']
+        if column_name not in valid_columns:
+            return 'ru'  # По умолчанию русский
+        
+        result = db.execute(text(f"""
+            SELECT COALESCE({column_name}, 'ru') as language
+            FROM notification_settings 
+            WHERE notification_type = :notification_type
+        """), {"notification_type": notification_type})
+        
+        row = result.fetchone()
+        if row:
+            return row.language or 'ru'
+        
+        # Дефолты для каждой роли
+        defaults = {
+            'language_machinists': 'ru',
+            'language_operators': 'ru',
+            'language_qa': 'ru',
+            'language_admin': 'ru',
+            'language_viewer': 'he',  # Viewer по умолчанию на иврите
+        }
+        return defaults.get(column_name, 'ru')
+        
+    except Exception as e:
+        logger.warning(f"Error getting notification language: {e}")
+        return 'ru'  # При ошибке русский
 
 
 
