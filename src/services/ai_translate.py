@@ -60,6 +60,17 @@ Translate the text accurately, keeping:
 - Emoji if present
 - Keep the message concise and natural in the target language
 
+HEBREW GLOSSARY (use these specific terms when translating to Hebrew):
+- Чертёж / Drawing number → פריט (part/item, NOT ציור)
+- Партия / Lot → פק"ע (work order abbreviation, NOT קבוצה)
+- Batch / Серия → מנה
+- Брак / Defect → פסולים (NOT פגום)
+- Общий брак по лоту → סך הכל פסולים בפק"ע
+- Зафиксирован брак → התגלו פסולים
+- Станок → מכונה
+- Оператор → מפעיל
+- Наладчик → כוון
+
 Output ONLY the translated text, nothing else."""
 
     user_prompt = f"""Translate to {target_lang_name}:
