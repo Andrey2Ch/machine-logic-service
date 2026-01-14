@@ -911,6 +911,12 @@ async def save_reading(reading_input: ReadingInput, db: Session = Depends(get_db
                 setup.start_time = reading_db.created_at # Используем время показаний
                 new_setup_status = 'started'
                 batch_message = "Наладка активирована"
+                
+                # Сбрасываем assigned_order лота - он больше не в очереди, а в активной работе
+                lot = db.query(LotDB).filter(LotDB.id == setup.lot_id).first()
+                if lot and lot.assigned_order is not None:
+                    logger.info(f"Clearing assigned_order for lot {lot.id} (was {lot.assigned_order})")
+                    lot.assigned_order = None
             elif setup.status != 'started':
                  raise HTTPException(
                      status_code=400, 
@@ -928,6 +934,12 @@ async def save_reading(reading_input: ReadingInput, db: Session = Depends(get_db
                 new_setup_status = 'started'
                 batch_message = ("⚠️ Внимание! В начале работы необходимо вводить нулевые показания. "
                                  "Наладка автоматически активирована.")
+                
+                # Сбрасываем assigned_order лота - он больше не в очереди, а в активной работе
+                lot = db.query(LotDB).filter(LotDB.id == setup.lot_id).first()
+                if lot and lot.assigned_order is not None:
+                    logger.info(f"Clearing assigned_order for lot {lot.id} (was {lot.assigned_order})")
+                    lot.assigned_order = None
                 
                 # Ищем существующий батч production (на всякий случай, хотя его не должно быть)
                 existing_batch = db.query(BatchDB)\
@@ -2663,9 +2675,12 @@ async def update_lot_assignment(
                     raise HTTPException(status_code=404, detail=f"Machine with id {assignment_update.assigned_machine_id} not found")
             lot.assigned_machine_id = assignment_update.assigned_machine_id
         
-        # Обновляем assigned_order, если передан
+        # Обновляем assigned_order, если передан (включая null для сброса)
         if assignment_update.assigned_order is not None:
             lot.assigned_order = assignment_update.assigned_order
+        elif 'assigned_order' in (assignment_update.model_fields_set or set()):
+            # Если явно передан null, сбрасываем позицию в очереди
+            lot.assigned_order = None
         
         # Обновляем actual_diameter, если передан
         if assignment_update.actual_diameter is not None:
