@@ -594,36 +594,47 @@ def get_lot_materials(
     status: Optional[str] = Query(None, description="Статус (pending/issued/partially_returned/completed/returned)"),
     db: Session = Depends(get_db_session)
 ):
-    """Получить материалы по лоту, станку или статусу (ОПТИМИЗИРОВАНО с JOIN + статусы)"""
+    """Получить материалы по лоту, станку или статусу (ОПТИМИЗИРОВАНО - один SQL запрос)"""
     try:
-        # ОПТИМИЗАЦИЯ: Один запрос с JOIN вместо N+1 queries
-        # Добавляем информацию о статусах лота и наладки для фронтенда
+        # ОПТИМИЗАЦИЯ: Используем LEFT JOIN LATERAL для получения статуса наладки
+        # вместо N+1 запросов в цикле Python
         
-        # Подзапрос для получения статуса последней наладки для лота
+        from sqlalchemy import func, literal_column
+        from sqlalchemy.orm import aliased
+        
+        # Подзапрос: последняя наладка для каждой пары (lot_id, machine_id)
         latest_setup_subq = (
             db.query(
                 SetupDB.lot_id,
-                SetupDB.status.label('setup_status')
+                SetupDB.machine_id,
+                SetupDB.status.label('setup_status'),
+                func.row_number().over(
+                    partition_by=[SetupDB.lot_id, SetupDB.machine_id],
+                    order_by=SetupDB.created_at.desc()
+                ).label('rn')
             )
-            .filter(SetupDB.machine_id == LotMaterialDB.machine_id)
-            .filter(SetupDB.lot_id == LotMaterialDB.lot_id)
-            .order_by(SetupDB.created_at.desc())
-            .limit(1)
-            .correlate(LotMaterialDB)
             .subquery()
         )
         
+        # Основной запрос с JOIN к подзапросу
         query = (
             db.query(
                 LotMaterialDB,
                 LotDB.lot_number,
                 LotDB.status.label('lot_status'),
                 MachineDB.name.label('machine_name'),
-                PartDB.drawing_number
+                PartDB.drawing_number,
+                latest_setup_subq.c.setup_status
             )
             .outerjoin(LotDB, LotMaterialDB.lot_id == LotDB.id)
             .outerjoin(MachineDB, LotMaterialDB.machine_id == MachineDB.id)
             .outerjoin(PartDB, LotDB.part_id == PartDB.id)
+            .outerjoin(
+                latest_setup_subq,
+                (latest_setup_subq.c.lot_id == LotMaterialDB.lot_id) &
+                (latest_setup_subq.c.machine_id == LotMaterialDB.machine_id) &
+                (latest_setup_subq.c.rn == 1)
+            )
         )
         
         # Применяем фильтры
@@ -634,25 +645,12 @@ def get_lot_materials(
         if status:
             query = query.filter(LotMaterialDB.status == status)
         
-        # Выполняем запрос
+        # Выполняем запрос (ОДИН запрос вместо N+1!)
         results = query.order_by(LotMaterialDB.created_at.desc()).all()
         
-        # Формируем результат с дополнительной информацией о статусах
+        # Формируем результат
         output = []
-        for m, lot_number, lot_status, machine_name, drawing_number in results:
-            # Получаем статус последней наладки для этого материала
-            setup_status = None
-            if m.lot_id and m.machine_id:
-                last_setup = (
-                    db.query(SetupDB.status)
-                    .filter(SetupDB.lot_id == m.lot_id)
-                    .filter(SetupDB.machine_id == m.machine_id)
-                    .order_by(SetupDB.created_at.desc())
-                    .first()
-                )
-                if last_setup:
-                    setup_status = last_setup[0]
-            
+        for m, lot_number, lot_status, machine_name, drawing_number, setup_status in results:
             output.append({
                 "id": m.id,
                 "lot_id": m.lot_id,
