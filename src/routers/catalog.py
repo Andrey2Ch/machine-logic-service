@@ -246,3 +246,43 @@ async def delete_machine(machine_id: int, db: Session = Depends(get_db_session))
     return {"success": True}
 
 
+class ReorderMachinesPayload(BaseModel):
+    machine_ids: List[int]
+
+
+@router.post("/machines/reorder")
+async def reorder_machines(
+    area_id: int = Query(..., description="ID участка для перестановки станков"),
+    payload: ReorderMachinesPayload = ...,
+    db: Session = Depends(get_db_session)
+):
+    """
+    Изменить порядок станков внутри участка.
+    machine_ids - список ID станков в желаемом порядке.
+    """
+    # Проверяем, что участок существует
+    area = db.query(AreaDB).filter(AreaDB.id == area_id).first()
+    if not area:
+        raise HTTPException(status_code=404, detail="Area not found")
+    
+    # Проверяем, что все станки принадлежат этому участку
+    machines = db.query(MachineDB).filter(
+        MachineDB.id.in_(payload.machine_ids),
+        MachineDB.location_id == area_id
+    ).all()
+    
+    if len(machines) != len(payload.machine_ids):
+        raise HTTPException(
+            status_code=400, 
+            detail="Some machine IDs are invalid or don't belong to this area"
+        )
+    
+    # Обновляем display_order для каждого станка
+    machine_map = {m.id: m for m in machines}
+    for order, machine_id in enumerate(payload.machine_ids):
+        if machine_id in machine_map:
+            machine_map[machine_id].display_order = order
+    
+    db.commit()
+    return {"success": True, "updated": len(payload.machine_ids)}
+
