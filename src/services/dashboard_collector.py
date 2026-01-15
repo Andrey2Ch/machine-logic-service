@@ -135,22 +135,24 @@ async def collect_shift_setup_times(db: Session, shift_start: datetime, shift_en
     """
     Собирает время наладок за смену для ВСЕХ станков одним запросом.
     Возвращает dict: {machine_name: setup_seconds}
+    Использует start_time и end_time из setup_jobs.
     """
     from src.models.models import SetupDB, MachineDB
     
     # Один запрос для всех станков
+    # Считаем время от start_time до end_time, пересекающееся со сменой
     query = text("""
         SELECT m.name as machine_name, 
                COALESCE(SUM(
                    EXTRACT(EPOCH FROM (
-                       LEAST(s.first_part_at, :shift_end) - GREATEST(s.created_at, :shift_start)
+                       LEAST(s.end_time, :shift_end) - GREATEST(s.start_time, :shift_start)
                    ))
                ), 0) as setup_sec
         FROM setup_jobs s
         JOIN machines m ON s.machine_id = m.id
-        WHERE s.created_at < :shift_end 
-          AND (s.first_part_at IS NULL OR s.first_part_at > :shift_start)
-          AND s.first_part_at IS NOT NULL
+        WHERE s.start_time < :shift_end 
+          AND s.end_time > :shift_start
+          AND s.end_time IS NOT NULL
         GROUP BY m.name
     """)
     
