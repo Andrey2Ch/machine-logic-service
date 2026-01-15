@@ -28,6 +28,7 @@ from .routers import morning_dashboard as morning_dashboard_router
 from .routers import planning as planning_router
 from .routers import notification_settings as notification_settings_router
 from .routers import translate as translate_router
+from .routers import stream as stream_router  # SSE streaming
 from src.models.setup import SetupStatus, BatchLabelInfo
 from src.models.reports import LotSummaryReport, ProductionPerformanceReport, QualityReport
 from typing import Optional, Dict, List, Union
@@ -101,6 +102,10 @@ async def startup_event():
     initialize_database()
     install_sql_capture()  # включит runtime-capture при TEXT2SQL_CAPTURE=1
     
+    # Запуск SSE dashboard collector (фоновый сбор данных)
+    from src.services.dashboard_collector import dashboard_collector_task
+    asyncio.create_task(dashboard_collector_task(get_db_session))
+    
     # Настройка планировщика для автоматических выходов
     async def run_auto_checkout_task():
         """Задача для проверки и создания автоматических выходов"""
@@ -139,7 +144,11 @@ async def startup_event():
 # Событие shutdown для остановки планировщика
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Остановка планировщика при завершении приложения"""
+    """Остановка планировщика и фоновых задач при завершении приложения"""
+    # Остановка SSE collector
+    from src.services.dashboard_collector import stop_collector
+    stop_collector()
+    
     if scheduler.running:
         scheduler.shutdown()
         logger.info("Планировщик задач остановлен")
@@ -5108,3 +5117,4 @@ from .text2sql.routers import router as text2sql_router, admin_router as text2sq
 app.include_router(text2sql_router)
 app.include_router(text2sql_admin_router)
 app.include_router(text2sql_examples_router)
+app.include_router(stream_router.router)  # SSE streaming for dashboards
