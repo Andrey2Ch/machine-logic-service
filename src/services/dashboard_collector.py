@@ -124,7 +124,7 @@ async def collect_machines_data(db: Session) -> List[Dict[str, Any]]:
             "status": getattr(m, 'status', 'unknown'),
             "area_id": m.location_id,
             "area_name": area_name,
-            "position": m.position,
+            "display_order": m.display_order,
             "is_active": m.is_active,
         })
     
