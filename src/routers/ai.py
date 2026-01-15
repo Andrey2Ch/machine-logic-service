@@ -9,7 +9,10 @@ AI Assistant API endpoints.
 """
 
 import os
+import hashlib
+from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from pydantic import BaseModel
@@ -18,6 +21,9 @@ import json
 import httpx
 
 from src.database import get_ai_db_session, is_ai_database_available
+
+# Path to schema documentation
+SCHEMA_DOCS_PATH = Path(__file__).parent.parent / "text2sql" / "docs" / "schema_docs.md"
 
 # OpenAI API для embeddings
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -624,7 +630,7 @@ SEED_SQL_EXAMPLES = [
 FROM setup_jobs sj 
 JOIN machines m ON sj.machine_id = m.id 
 JOIN lots l ON sj.lot_id = l.id 
-LEFT JOIN employees e ON sj.operator_id = e.id 
+LEFT JOIN employees e ON sj.employee_id = e.id 
 JOIN parts p ON l.part_id = p.id 
 WHERE sj.status = 'started' AND sj.end_time IS NULL AND m.is_active = true 
 ORDER BY m.display_order""",
@@ -811,4 +817,99 @@ async def seed_sql_examples(
         "skipped": skipped,
         "errors": errors,
         "results": results
+    }
+
+
+@router.get("/reseed-examples")
+async def reseed_sql_examples(db: Session = Depends(get_ai_db_session)):
+    """
+    Clear all SQL examples and re-seed from scratch.
+    Use this when examples need to be updated.
+    """
+    # 1. Clear all existing examples
+    db.execute(text("DELETE FROM ai_sql_examples"))
+    db.commit()
+    
+    # 2. Re-seed
+    results = []
+    created = 0
+    errors = 0
+    
+    for ex in SEED_SQL_EXAMPLES:
+        try:
+            # Generate embedding
+            embedding = await get_embedding(ex["question"])
+            embedding_str = f"[{','.join(map(str, embedding))}]"
+            
+            # Insert
+            db.execute(
+                text("""
+                    INSERT INTO ai_sql_examples 
+                    (question, question_embedding, sql_query, tables_used, difficulty, tags, is_verified)
+                    VALUES (:question, CAST(:embedding AS vector), :sql_query, :tables_used, :difficulty, :tags, TRUE)
+                """),
+                {
+                    "question": ex["question"],
+                    "embedding": embedding_str,
+                    "sql_query": ex["sql_query"],
+                    "tables_used": ex.get("tables_used", []),
+                    "difficulty": ex.get("difficulty", "medium"),
+                    "tags": ex.get("tags", [])
+                }
+            )
+            db.commit()
+            
+            results.append({"question": ex["question"][:40], "status": "created"})
+            created += 1
+            
+        except Exception as e:
+            db.rollback()
+            results.append({"question": ex["question"][:40], "status": "error", "error": str(e)})
+            errors += 1
+    
+    return {
+        "message": "Cleared and re-seeded",
+        "total": len(SEED_SQL_EXAMPLES),
+        "created": created,
+        "errors": errors,
+        "results": results
+    }
+
+
+# ============================================================================
+# Schema Documentation Endpoint
+# ============================================================================
+
+@router.get("/schema-docs", response_class=PlainTextResponse)
+async def get_schema_docs():
+    """
+    Return full database schema documentation.
+    This is used by AI assistant to have complete knowledge of the DB structure.
+    """
+    if not SCHEMA_DOCS_PATH.exists():
+        raise HTTPException(status_code=404, detail="Schema docs not found")
+    
+    return SCHEMA_DOCS_PATH.read_text(encoding="utf-8")
+
+
+@router.get("/schema-docs-info")
+async def get_schema_docs_info():
+    """
+    Return metadata about schema docs including content hash.
+    Dashboard uses hash to detect changes and reload only when needed.
+    """
+    if not SCHEMA_DOCS_PATH.exists():
+        raise HTTPException(status_code=404, detail="Schema docs not found")
+    
+    stat = SCHEMA_DOCS_PATH.stat()
+    content = SCHEMA_DOCS_PATH.read_text(encoding="utf-8")
+    content_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
+    
+    return {
+        "hash": content_hash,  # Used by dashboard to detect changes
+        "size_bytes": stat.st_size,
+        "lines": len(content.splitlines()),
+        "chars": len(content),
+        "approx_tokens": len(content) // 4,
+        "last_modified": stat.st_mtime
     }
