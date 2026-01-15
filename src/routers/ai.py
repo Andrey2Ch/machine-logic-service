@@ -622,6 +622,70 @@ async def get_sql_examples_count(
     return {"count": result.count}
 
 
+class LearnFromChatRequest(BaseModel):
+    question: str
+    sql_query: str
+
+
+@router.post("/learn-from-chat")
+async def learn_from_chat(
+    request: LearnFromChatRequest,
+    db: Session = Depends(get_ai_db_session)
+):
+    """
+    Learn from user feedback - save successful SQL queries to RAG.
+    Called when user gives thumbs up to an AI response with SQL.
+    """
+    try:
+        # Check if similar question already exists (exact match)
+        existing = db.execute(
+            text("SELECT id, question FROM ai_sql_examples WHERE question = :q"),
+            {"q": request.question}
+        ).fetchone()
+        
+        if existing:
+            return {"status": "exists", "message": "Similar question already in knowledge base", "id": existing.id}
+        
+        # Generate embedding for the question
+        embedding = await get_embedding(request.question)
+        embedding_str = f"[{','.join(map(str, embedding))}]"
+        
+        # Extract tables from SQL (simple heuristic)
+        sql_upper = request.sql_query.upper()
+        common_tables = ['batches', 'setup_jobs', 'employees', 'machines', 'lots', 'parts', 'setup_defects', 'lot_materials']
+        tables_used = [t for t in common_tables if t.upper() in sql_upper]
+        
+        # Insert into database
+        result = db.execute(
+            text("""
+                INSERT INTO ai_sql_examples 
+                (question, question_embedding, sql_query, tables_used, difficulty, tags, is_verified)
+                VALUES (:question, CAST(:embedding AS vector), :sql_query, :tables_used, 'medium', :tags, FALSE)
+                RETURNING id
+            """),
+            {
+                "question": request.question,
+                "embedding": embedding_str,
+                "sql_query": request.sql_query,
+                "tables_used": tables_used,
+                "tags": ["auto-learned", "user-feedback"]
+            }
+        )
+        db.commit()
+        
+        new_id = result.fetchone()[0]
+        return {
+            "status": "created",
+            "message": "Learned from successful query",
+            "id": new_id,
+            "tables_detected": tables_used
+        }
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to learn: {str(e)}")
+
+
 # Pre-defined SQL examples (no Cyrillic in code)
 SEED_SQL_EXAMPLES = [
     {
