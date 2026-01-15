@@ -2739,48 +2739,118 @@ async def update_lot_assignment(
 @app.get("/lots/{lot_id}/produced", tags=["Lots"])
 async def get_lot_produced(lot_id: int, db: Session = Depends(get_db_session)):
     """
-    Get current produced quantity for lot from MTConnect (machine_readings).
-    Returns real-time counter reading from machine.
+    Get current produced quantity for lot from MTConnect Cloud API.
+    Returns REAL-TIME counter reading from machine (not operator readings).
+    
+    Flow:
+    1. Find lot → active setup_job → machine name
+    2. Call MTConnect Cloud API to get live displayPartCount
+    3. Return live counter with fallback to operator readings
     """
     lot = db.query(LotDB).filter(LotDB.id == lot_id).first()
     if not lot:
         raise HTTPException(status_code=404, detail=f"Lot with id {lot_id} not found")
     
-    query = text("""
-        WITH latest_readings AS (
-            SELECT DISTINCT ON (setup_job_id)
-                setup_job_id,
-                reading as actual_produced,
-                created_at
-            FROM machine_readings
-            ORDER BY setup_job_id, id DESC
-        )
+    # Находим активный setup_job и имя станка
+    setup_query = text("""
         SELECT 
             sj.id as setup_job_id,
-            COALESCE(lr.actual_produced, 0) as produced,
-            lr.created_at as last_reading_at
+            m.name as machine_name
         FROM setup_jobs sj
-        LEFT JOIN latest_readings lr ON lr.setup_job_id = sj.id
+        JOIN machines m ON m.id = sj.machine_id
         WHERE sj.lot_id = :lot_id
           AND sj.end_time IS NULL
         ORDER BY sj.id DESC
         LIMIT 1
     """)
+    setup_result = db.execute(setup_query, {"lot_id": lot_id}).fetchone()
     
-    result = db.execute(query, {"lot_id": lot_id}).fetchone()
+    machine_name = setup_result.machine_name if setup_result else None
+    mtconnect_count = None
+    mtconnect_timestamp = None
+    source = "none"
+    
+    # Пытаемся получить live данные из MTConnect Cloud API
+    if machine_name:
+        mtconnect_api_url = os.getenv('MTCONNECT_API_URL', 'https://mtconnect-core-production.up.railway.app')
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.get(f"{mtconnect_api_url}/api/machines")
+                if response.status_code == 200:
+                    data = response.json()
+                    
+                    # Нормализуем имя станка для поиска (M_5_SR_32 → SR-32)
+                    def normalize_name(name: str) -> str:
+                        if not name:
+                            return ""
+                        normalized = name
+                        # Убираем префикс M_X_ (например M_5_SR_32 → SR_32)
+                        if normalized.startswith('M_') and '_' in normalized[2:]:
+                            parts = normalized.split('_', 2)
+                            if len(parts) >= 3:
+                                normalized = parts[2]
+                        # Заменяем _ на -
+                        normalized = normalized.replace('_', '-').upper()
+                        return normalized
+                    
+                    target_name = normalize_name(machine_name)
+                    
+                    # Ищем в mtconnect и adam массивах
+                    all_machines = []
+                    if data.get('machines', {}).get('mtconnect'):
+                        all_machines.extend(data['machines']['mtconnect'])
+                    if data.get('machines', {}).get('adam'):
+                        all_machines.extend(data['machines']['adam'])
+                    
+                    for m in all_machines:
+                        m_name = normalize_name(m.get('name', ''))
+                        if m_name == target_name:
+                            mtconnect_count = m.get('data', {}).get('displayPartCount')
+                            mtconnect_timestamp = m.get('lastUpdate')
+                            source = "mtconnect_live"
+                            logger.info(f"MTConnect live count for {machine_name}: {mtconnect_count}")
+                            break
+                            
+        except Exception as e:
+            logger.warning(f"MTConnect API unavailable: {e}")
+    
+    # Fallback: показания оператора из machine_readings
+    operator_count = None
+    operator_timestamp = None
+    if mtconnect_count is None and setup_result:
+        fallback_query = text("""
+            SELECT reading, created_at
+            FROM machine_readings
+            WHERE setup_job_id = :setup_job_id
+            ORDER BY id DESC
+            LIMIT 1
+        """)
+        fallback_result = db.execute(fallback_query, {"setup_job_id": setup_result.setup_job_id}).fetchone()
+        if fallback_result:
+            operator_count = fallback_result.reading
+            operator_timestamp = fallback_result.created_at
+            source = "operator_reading"
+            logger.info(f"Using operator reading for lot {lot_id}: {operator_count}")
+    
+    # Выбираем лучший источник
+    produced = mtconnect_count if mtconnect_count is not None else (operator_count or 0)
+    timestamp = mtconnect_timestamp or (operator_timestamp.isoformat() if operator_timestamp else None)
     
     total_planned = lot.total_planned_quantity or lot.initial_planned_quantity or 0
-    produced = result.produced if result else 0
     remaining = max(0, total_planned - produced)
     
     return {
         "lot_id": lot_id,
         "lot_number": lot.lot_number,
+        "machine_name": machine_name,
         "total_planned": total_planned,
         "produced": produced,
         "remaining": remaining,
-        "last_reading_at": result.last_reading_at.isoformat() if result and result.last_reading_at else None,
-        "source": "mtconnect"
+        "last_reading_at": timestamp,
+        "source": source,
+        # Для отладки
+        "mtconnect_count": mtconnect_count,
+        "operator_count": operator_count
     }
 
 
