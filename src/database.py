@@ -3,7 +3,7 @@ from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy import create_engine, Engine
 from pydantic_settings import BaseSettings
 import os
-from typing import Generator
+from typing import Generator, Optional
 
 # ИЗМЕНЕННАЯ Pydantic модель для настроек
 class DatabaseSettings(BaseSettings):
@@ -11,6 +11,7 @@ class DatabaseSettings(BaseSettings):
     # Pydantic автоматически найдет переменную окружения с таким же именем (регистр не важен).
     # Значение по умолчанию используется ТОЛЬКО если переменная не найдена.
     DATABASE_URL: str = "postgresql://postgres:postgres@localhost:5432/isramat_bot"
+    AI_DATABASE_URL: Optional[str] = None  # Отдельная БД для AI (pgvector)
 
     class Config:
         # Указываем, что нужно также искать переменные в .env файле
@@ -27,9 +28,13 @@ Base = declarative_base()
 engine: Engine | None = None
 SessionLocal: sessionmaker[Session] | None = None
 
+# AI Database (pgvector) - для RAG и AI Assistant
+ai_engine: Engine | None = None
+AISessionLocal: sessionmaker[Session] | None = None
+
 def initialize_database():
     """Инициализирует engine и SessionLocal после загрузки конфигурации."""
-    global engine, SessionLocal
+    global engine, SessionLocal, ai_engine, AISessionLocal
     if engine is None:
         # Используем атрибут из нашего объекта настроек
         # Увеличиваем размер пула соединений для предотвращения timeout ошибок
@@ -44,6 +49,22 @@ def initialize_database():
         SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
         # Важно: НЕ вызываем create_all здесь. Миграции должны управляться отдельно.
         # Base.metadata.create_all(bind=engine) 
+    
+    # Инициализация AI Database (pgvector)
+    if ai_engine is None and db_settings.AI_DATABASE_URL:
+        ai_engine = create_engine(
+            db_settings.AI_DATABASE_URL,
+            pool_size=3,
+            max_overflow=5,
+            pool_timeout=30,
+            pool_recycle=3600,
+            pool_pre_ping=True,
+        )
+        AISessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=ai_engine)
+        print(f"AI Database (pgvector) initialized: {db_settings.AI_DATABASE_URL[:50]}...")
+    elif not db_settings.AI_DATABASE_URL:
+        print("AI_DATABASE_URL not set - AI features will be disabled")
+    
     # Логируем часть URL для проверки, используем напрямую из объекта настроек
     # Увеличил длину выводимого URL для лучшей диагностики
     print(f"Current working directory: {os.getcwd()}")
@@ -64,3 +85,19 @@ def get_db_session() -> Generator[Session, None, None]:
         yield db
     finally:
         db.close()
+
+
+def get_ai_db_session() -> Generator[Session, None, None]:
+    """FastAPI dependency to get an AI Database session (pgvector)."""
+    if AISessionLocal is None:
+        raise RuntimeError("AI Database not configured. Set AI_DATABASE_URL environment variable.") 
+    db = AISessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def is_ai_database_available() -> bool:
+    """Check if AI Database is configured and available."""
+    return AISessionLocal is not None
