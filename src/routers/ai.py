@@ -52,16 +52,17 @@ class FeedbackRequest(BaseModel):
 
 
 class ConversationCreate(BaseModel):
-    user_id: Optional[int] = None
+    user_id: Optional[str] = None  # Can be 'web-user' string
     title: Optional[str] = None
 
 
 class MessageCreate(BaseModel):
-    conversation_id: str  # UUID
+    conversation_id: str  # session_id (UUID string)
     role: str
     content: str
     model_used: Optional[str] = None
     tokens_used: Optional[int] = None
+    metadata: Optional[dict] = None  # sql, sqlResult, sqlError
 
 
 # ============================================================================
@@ -169,6 +170,40 @@ async def search_sql_examples(
 # Conversation Management
 # ============================================================================
 
+@router.get("/conversations")
+async def list_conversations(
+    limit: int = 50,
+    db: Session = Depends(get_ai_db_session)
+):
+    """Получить список бесед."""
+    query = text("""
+        SELECT 
+            session_id::text as session_id,
+            title,
+            message_count,
+            created_at,
+            updated_at
+        FROM ai_conversations
+        WHERE is_archived = FALSE
+        ORDER BY updated_at DESC
+        LIMIT :limit
+    """)
+    
+    result = db.execute(query, {"limit": limit})
+    
+    conversations = []
+    for row in result:
+        conversations.append({
+            "session_id": row.session_id,
+            "title": row.title or "Новая беседа",
+            "message_count": row.message_count,
+            "created_at": row.created_at.isoformat(),
+            "updated_at": row.updated_at.isoformat()
+        })
+    
+    return conversations
+
+
 @router.post("/conversations")
 async def create_conversation(
     request: ConversationCreate,
@@ -176,21 +211,26 @@ async def create_conversation(
 ):
     """Создать новую беседу."""
     try:
+        # user_id может быть строкой 'web-user', храним NULL
+        user_id = None
+        if request.user_id and request.user_id.isdigit():
+            user_id = int(request.user_id)
+        
         query = text("""
             INSERT INTO ai_conversations (user_id, title)
             VALUES (:user_id, :title)
-            RETURNING id, created_at
+            RETURNING session_id::text as session_id, created_at
         """)
         
         result = db.execute(query, {
-            "user_id": request.user_id,
+            "user_id": user_id,
             "title": request.title or "Новая беседа"
         })
         db.commit()
         
         row = result.fetchone()
         return {
-            "id": str(row.id),  # UUID в упрощённой схеме
+            "session_id": row.session_id,
             "created_at": row.created_at.isoformat()
         }
     except Exception as e:
@@ -198,31 +238,42 @@ async def create_conversation(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/conversations/{conversation_id}/messages")
+@router.get("/conversations/{session_id}/messages")
 async def get_conversation_messages(
-    conversation_id: str,
+    session_id: str,
     db: Session = Depends(get_ai_db_session)
 ):
-    """Получить все сообщения беседы."""
+    """Получить все сообщения беседы по session_id."""
     query = text("""
-        SELECT id, role, content, model_used, tokens_used, created_at
-        FROM ai_messages
-        WHERE conversation_id = :conversation_id
-        ORDER BY created_at ASC
+        SELECT 
+            m.id, m.role, m.content, m.model_used, m.tokens_used,
+            m.executed_sql, m.sql_result, m.sql_error, m.created_at
+        FROM ai_messages m
+        JOIN ai_conversations c ON c.id = m.conversation_id
+        WHERE c.session_id = :session_id::uuid
+        ORDER BY m.created_at ASC
     """)
     
-    result = db.execute(query, {"conversation_id": conversation_id})
+    result = db.execute(query, {"session_id": session_id})
     
     messages = []
     for row in result:
-        messages.append({
+        msg = {
             "id": row.id,
             "role": row.role,
             "content": row.content,
             "model_used": row.model_used,
             "tokens_used": row.tokens_used,
             "created_at": row.created_at.isoformat()
-        })
+        }
+        # Добавляем metadata с SQL если есть
+        if row.executed_sql or row.sql_result or row.sql_error:
+            msg["metadata"] = {
+                "sql": row.executed_sql,
+                "sqlResult": row.sql_result,
+                "sqlError": row.sql_error
+            }
+        messages.append(msg)
     
     return messages
 
@@ -234,29 +285,56 @@ async def create_message(
 ):
     """Сохранить сообщение в беседу."""
     try:
+        # Извлекаем SQL данные из metadata
+        executed_sql = None
+        sql_result = None
+        sql_error = None
+        
+        if request.metadata:
+            executed_sql = request.metadata.get("sql")
+            sql_result = request.metadata.get("sqlResult")
+            sql_error = request.metadata.get("sqlError")
+        
+        # Сначала получаем conversation_id по session_id
+        conv_query = text("""
+            SELECT id FROM ai_conversations WHERE session_id = :session_id::uuid
+        """)
+        conv_result = db.execute(conv_query, {"session_id": request.conversation_id})
+        conv_row = conv_result.fetchone()
+        
+        if not conv_row:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        conversation_id = conv_row.id
+        
         query = text("""
             INSERT INTO ai_messages 
-                (conversation_id, role, content, model_used, tokens_used)
+                (conversation_id, role, content, model_used, tokens_used, 
+                 executed_sql, sql_result, sql_error)
             VALUES 
-                (:conversation_id, :role, :content, :model_used, :tokens_used)
+                (:conversation_id, :role, :content, :model_used, :tokens_used,
+                 :executed_sql, :sql_result, :sql_error)
             RETURNING id, created_at
         """)
         
         result = db.execute(query, {
-            "conversation_id": request.conversation_id,
+            "conversation_id": conversation_id,
             "role": request.role,
             "content": request.content,
             "model_used": request.model_used,
-            "tokens_used": request.tokens_used
+            "tokens_used": request.tokens_used,
+            "executed_sql": executed_sql,
+            "sql_result": json.dumps(sql_result) if sql_result else None,
+            "sql_error": sql_error
         })
         db.commit()
         
         # Обновляем счётчик сообщений в беседе
         db.execute(text("""
             UPDATE ai_conversations 
-            SET message_count = message_count + 1, last_activity = NOW()
+            SET message_count = message_count + 1, updated_at = NOW()
             WHERE id = :conversation_id
-        """), {"conversation_id": request.conversation_id})
+        """), {"conversation_id": conversation_id})
         db.commit()
         
         row = result.fetchone()
