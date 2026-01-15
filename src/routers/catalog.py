@@ -291,9 +291,9 @@ async def reorder_machines(
             detail="Some machine IDs are invalid or don't belong to this area"
         )
     
-    # Обновляем display_order для каждого станка
+    # Обновляем display_order для каждого станка (1-based индексы)
     machine_map = {m.id: m for m in machines}
-    for order, machine_id in enumerate(payload.machine_ids):
+    for order, machine_id in enumerate(payload.machine_ids, start=1):
         if machine_id in machine_map:
             machine_map[machine_id].display_order = order
     
