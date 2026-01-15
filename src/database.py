@@ -52,8 +52,13 @@ def initialize_database():
     
     # Инициализация AI Database (pgvector)
     if ai_engine is None and db_settings.AI_DATABASE_URL:
+        # Railway даёт postgres://, SQLAlchemy требует postgresql://
+        ai_db_url = db_settings.AI_DATABASE_URL
+        if ai_db_url.startswith("postgres://"):
+            ai_db_url = ai_db_url.replace("postgres://", "postgresql://", 1)
+        
         ai_engine = create_engine(
-            db_settings.AI_DATABASE_URL,
+            ai_db_url,
             pool_size=3,
             max_overflow=5,
             pool_timeout=30,
