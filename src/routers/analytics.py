@@ -55,41 +55,27 @@ async def get_lot_analytics(lot_id: int, db: Session = Depends(get_db_session)):
         
         total_produced_quantity = last_reading_result.last_reading if last_reading_result else 0
         
-        # 🔧 ИСПРАВЛЕНО 2025-12-03: "Принято" = всё принятое складом, КРОМЕ архивных
-        # Архивные батчи (archived) - это исходные батчи которые были заменены
-        # новыми батчами после проверки ОТК (good/defect/rework)
-        # Учитываем их привело бы к двойному подсчету
-        total_warehouse_quantity = sum(
-            batch.current_quantity or 0 
-            for batch in batches 
+        # 🔧 ИСПРАВЛЕНО 2026-01-15: "Принято" = recounted_quantity (пересчитано кладовщиком)
+        # НЕ current_quantity (заявлено оператором)!
+        # Архивные батчи (archived) исключаем чтобы избежать двойного подсчета
+        warehouse_batches = [
+            batch for batch in batches 
             if batch.warehouse_received_at is not None
             and batch.current_location != 'archived'
+        ]
+        
+        # Принято на склад = сумма recounted_quantity (пересчитанное кладовщиком)
+        # Если recounted_quantity нет, используем current_quantity как fallback
+        total_warehouse_quantity = sum(
+            batch.recounted_quantity if batch.recounted_quantity is not None else (batch.current_quantity or 0)
+            for batch in warehouse_batches
         )
         
-        # Оставляем warehouse_batches для расчёта declared_quantity_at_warehouse_recount
-        warehouse_batches = [batch for batch in batches if batch.warehouse_received_at is not None]
-        
-        # Определение заявленного количества на момент пересчета склада
-        declared_quantity_at_warehouse_recount = 0
-        if warehouse_batches:
-            # Берем последнее время пересчета батчей на складе
-            last_warehouse_recount = max(batch.warehouse_received_at for batch in warehouse_batches)
-            
-            # Получаем показания операторов на момент последнего пересчета склада
-            declared_reading_result = db.execute(text("""
-                SELECT COALESCE(
-                    (SELECT mr.reading 
-                     FROM machine_readings mr
-                     JOIN setup_jobs sj ON mr.setup_job_id = sj.id
-                     WHERE sj.lot_id = :lot_id 
-                       AND mr.setup_job_id IS NOT NULL
-                       AND mr.created_at <= :warehouse_recount_time
-                     ORDER BY mr.created_at DESC
-                     LIMIT 1), 
-                    0) as declared_reading
-            """), {"lot_id": lot_id, "warehouse_recount_time": last_warehouse_recount}).fetchone()
-            
-            declared_quantity_at_warehouse_recount = declared_reading_result.declared_reading if declared_reading_result else 0
+        # Заявлено операторами = сумма current_quantity батчей принятых на склад
+        declared_quantity_at_warehouse_recount = sum(
+            batch.current_quantity or 0
+            for batch in warehouse_batches
+        )
         
         total_good_quantity = sum(batch.current_quantity for batch in batches 
                                 if batch.current_location == 'good')
