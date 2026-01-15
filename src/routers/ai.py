@@ -736,7 +736,7 @@ GROUP BY m.id, m.name""",
     m.name as machine, 
     l.lot_number, 
     p.drawing_number, 
-    b.recounted_quantity as defect_quantity, 
+    b.current_quantity as defect_quantity, 
     e.full_name as operator
 FROM batches b 
 JOIN setup_jobs sj ON b.setup_job_id = sj.id 
@@ -749,6 +749,39 @@ ORDER BY b.batch_time DESC""",
         "tables_used": ["batches", "setup_jobs", "machines", "lots", "parts", "employees"],
         "difficulty": "medium",
         "tags": ["defects", "quality"]
+    },
+    {
+        "question": "Defect count by operator for the month",
+        "sql_query": """SELECT 
+    e.full_name as operator,
+    COUNT(b.id) as defect_batches,
+    SUM(b.current_quantity) as total_defects
+FROM batches b 
+JOIN employees e ON b.operator_id = e.id 
+WHERE b.current_location = 'defect' 
+    AND b.batch_time >= DATE_TRUNC('month', CURRENT_DATE)
+GROUP BY e.full_name 
+ORDER BY total_defects DESC""",
+        "tables_used": ["batches", "employees"],
+        "difficulty": "simple",
+        "tags": ["defects", "operators", "quality", "report"]
+    },
+    {
+        "question": "Production vs defects comparison",
+        "sql_query": """SELECT 
+    e.full_name as operator,
+    SUM(CASE WHEN b.current_location != 'defect' THEN b.recounted_quantity ELSE 0 END) as produced,
+    SUM(CASE WHEN b.current_location = 'defect' THEN b.current_quantity ELSE 0 END) as defects,
+    ROUND(100.0 * SUM(CASE WHEN b.current_location = 'defect' THEN b.current_quantity ELSE 0 END) / 
+          NULLIF(SUM(CASE WHEN b.current_location != 'defect' THEN b.recounted_quantity ELSE 0 END), 0), 2) as defect_rate_pct
+FROM batches b 
+JOIN employees e ON b.operator_id = e.id 
+WHERE b.batch_time >= DATE_TRUNC('month', CURRENT_DATE)
+GROUP BY e.full_name 
+ORDER BY defect_rate_pct DESC NULLS LAST""",
+        "tables_used": ["batches", "employees"],
+        "difficulty": "medium",
+        "tags": ["defects", "production", "comparison", "rate"]
     },
 ]
 
