@@ -146,7 +146,7 @@ async def collect_shift_setup_times(db: Session, shift_start: datetime, shift_en
                        LEAST(s.first_part_at, :shift_end) - GREATEST(s.created_at, :shift_start)
                    ))
                ), 0) as setup_sec
-        FROM setups s
+        FROM setup_jobs s
         JOIN machines m ON s.machine_id = m.id
         WHERE s.created_at < :shift_end 
           AND (s.first_part_at IS NULL OR s.first_part_at > :shift_start)
