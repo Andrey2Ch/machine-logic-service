@@ -2735,6 +2735,56 @@ async def get_lot(lot_id: int, db: Session = Depends(get_db_session)):
     
     return lot
 
+
+# <<< ENDPOINT FOR GETTING PRODUCED QUANTITY FROM MTCONNECT >>>
+@app.get("/lots/{lot_id}/produced", tags=["Lots"])
+async def get_lot_produced(lot_id: int, db: Session = Depends(get_db_session)):
+    """
+    Get current produced quantity for lot from MTConnect (machine_readings).
+    Returns real-time counter reading from machine.
+    """
+    lot = db.query(LotDB).filter(LotDB.id == lot_id).first()
+    if not lot:
+        raise HTTPException(status_code=404, detail=f"Lot with id {lot_id} not found")
+    
+    query = text("""
+        WITH latest_readings AS (
+            SELECT DISTINCT ON (setup_job_id)
+                setup_job_id,
+                reading as actual_produced,
+                created_at
+            FROM machine_readings
+            ORDER BY setup_job_id, id DESC
+        )
+        SELECT 
+            sj.id as setup_job_id,
+            COALESCE(lr.actual_produced, 0) as produced,
+            lr.created_at as last_reading_at
+        FROM setup_jobs sj
+        LEFT JOIN latest_readings lr ON lr.setup_job_id = sj.id
+        WHERE sj.lot_id = :lot_id
+          AND sj.end_time IS NULL
+        ORDER BY sj.id DESC
+        LIMIT 1
+    """)
+    
+    result = db.execute(query, {"lot_id": lot_id}).fetchone()
+    
+    total_planned = lot.total_planned_quantity or lot.initial_planned_quantity or 0
+    produced = result.produced if result else 0
+    remaining = max(0, total_planned - produced)
+    
+    return {
+        "lot_id": lot_id,
+        "lot_number": lot.lot_number,
+        "total_planned": total_planned,
+        "produced": produced,
+        "remaining": remaining,
+        "last_reading_at": result.last_reading_at.isoformat() if result and result.last_reading_at else None,
+        "source": "mtconnect"
+    }
+
+
 @app.patch("/lots/{lot_id}/quantity")
 async def update_lot_quantity(
     lot_id: int,
