@@ -239,6 +239,41 @@ async def create_conversation(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.delete("/conversations/{session_id}")
+async def delete_conversation(
+    session_id: str,
+    db: Session = Depends(get_ai_db_session)
+):
+    """Удалить беседу и все её сообщения."""
+    try:
+        # Удаляем сообщения (каскадно удалятся через FK, но на всякий случай)
+        db.execute(text("""
+            DELETE FROM ai_messages 
+            WHERE conversation_id IN (
+                SELECT id FROM ai_conversations WHERE session_id = CAST(:session_id AS uuid)
+            )
+        """), {"session_id": session_id})
+        
+        # Удаляем беседу
+        result = db.execute(text("""
+            DELETE FROM ai_conversations 
+            WHERE session_id = CAST(:session_id AS uuid)
+            RETURNING id
+        """), {"session_id": session_id})
+        db.commit()
+        
+        deleted = result.fetchone()
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        return {"status": "ok", "deleted_id": deleted.id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/conversations/{session_id}/messages")
 async def get_conversation_messages(
     session_id: str,

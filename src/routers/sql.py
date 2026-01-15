@@ -32,9 +32,23 @@ FORBIDDEN_KEYWORDS = [
 ]
 
 
+def strip_sql_comments(query: str) -> str:
+    """Удалить SQL комментарии из запроса."""
+    lines = query.split('\n')
+    clean_lines = []
+    for line in lines:
+        # Убираем однострочные комментарии --
+        if '--' in line:
+            line = line.split('--')[0]
+        clean_lines.append(line.strip())
+    return ' '.join(line for line in clean_lines if line)
+
+
 def validate_query(query: str) -> bool:
     """Проверить что запрос безопасен (только SELECT)."""
-    query_upper = query.upper().strip()
+    # Убираем комментарии перед валидацией
+    clean_query = strip_sql_comments(query)
+    query_upper = clean_query.upper().strip()
     
     # Должен начинаться с SELECT или WITH (CTE)
     if not (query_upper.startswith('SELECT') or query_upper.startswith('WITH')):
