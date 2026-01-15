@@ -16,12 +16,14 @@ router = APIRouter(prefix="/catalog", tags=["Catalog"])
 class AreaCreate(BaseModel):
     name: str
     code: Optional[str] = None
+    bot_row_size: int = 4  # Кол-во станков в ряду в TG-боте (2-6)
 
 
 class AreaUpdate(BaseModel):
     name: Optional[str] = None
     code: Optional[str] = None
     is_active: Optional[bool] = None
+    bot_row_size: Optional[int] = None
 
 
 class AreaOut(BaseModel):
@@ -29,6 +31,7 @@ class AreaOut(BaseModel):
     name: str
     code: Optional[str] = None
     is_active: bool
+    bot_row_size: int = 4
     created_at: Optional[datetime] = None
 
     class Config:
@@ -55,7 +58,15 @@ async def create_area(payload: AreaCreate, db: Session = Depends(get_db_session)
     dup = db.query(AreaDB).filter(func.lower(AreaDB.name) == func.lower(payload.name)).first()
     if dup:
         raise HTTPException(status_code=409, detail="Area name must be unique")
-    item = AreaDB(name=payload.name, code=payload.code, is_active=True, created_at=datetime.now())
+    # Валидация bot_row_size (2-6)
+    row_size = max(2, min(6, payload.bot_row_size))
+    item = AreaDB(
+        name=payload.name, 
+        code=payload.code, 
+        is_active=True, 
+        bot_row_size=row_size,
+        created_at=datetime.now()
+    )
     db.add(item)
     db.commit()
     db.refresh(item)
@@ -76,6 +87,9 @@ async def update_area(area_id: int, payload: AreaUpdate, db: Session = Depends(g
         item.code = payload.code
     if payload.is_active is not None:
         item.is_active = payload.is_active
+    if payload.bot_row_size is not None:
+        # Валидация bot_row_size (2-6)
+        item.bot_row_size = max(2, min(6, payload.bot_row_size))
     db.commit()
     db.refresh(item)
     return item

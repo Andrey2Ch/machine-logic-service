@@ -12,6 +12,7 @@ class AreaDB(Base):
     name = Column(String(255), unique=True, nullable=False)
     code = Column(String(255), nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
+    bot_row_size = Column(Integer, default=4, nullable=False)  # Кол-во станков в ряду в TG-боте (2-6)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
 
     machines = relationship("MachineDB", back_populates="area")
