@@ -30,6 +30,7 @@ from .routers import notification_settings as notification_settings_router
 from .routers import translate as translate_router
 from .routers import stream as stream_router  # SSE streaming
 from .routers import ai as ai_router  # AI assistant
+from .routers import sql as sql_router  # SQL execution for AI
 from src.models.setup import SetupStatus, BatchLabelInfo
 from src.models.reports import LotSummaryReport, ProductionPerformanceReport, QualityReport
 from typing import Optional, Dict, List, Union
@@ -5252,3 +5253,4 @@ app.include_router(text2sql_admin_router)
 app.include_router(text2sql_examples_router)
 app.include_router(stream_router.router)  # SSE streaming for dashboards
 app.include_router(ai_router.router)  # AI assistant endpoints
+app.include_router(sql_router.router)  # SQL execution for AI
