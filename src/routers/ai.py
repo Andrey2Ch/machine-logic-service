@@ -86,14 +86,14 @@ async def search_knowledge(
         query = text("""
             SELECT 
                 id,
-                doc_type,
+                document_type as doc_type,
                 title,
                 content,
-                1 - (embedding <=> :embedding::vector) as similarity
+                1 - (embedding <=> CAST(:embedding AS vector)) as similarity
             FROM ai_knowledge_documents
             WHERE is_active = TRUE
-              AND 1 - (embedding <=> :embedding::vector) > :threshold
-            ORDER BY embedding <=> :embedding::vector
+              AND 1 - (embedding <=> CAST(:embedding AS vector)) > :threshold
+            ORDER BY embedding <=> CAST(:embedding AS vector)
             LIMIT :limit
         """)
         
@@ -137,10 +137,11 @@ async def search_sql_examples(
                 id,
                 question,
                 sql_query,
-                1 - (embedding <=> :embedding::vector) as similarity
+                1 - (question_embedding <=> CAST(:embedding AS vector)) as similarity
             FROM ai_sql_examples
-            WHERE 1 - (embedding <=> :embedding::vector) > :threshold
-            ORDER BY embedding <=> :embedding::vector
+            WHERE question_embedding IS NOT NULL
+              AND 1 - (question_embedding <=> CAST(:embedding AS vector)) > :threshold
+            ORDER BY question_embedding <=> CAST(:embedding AS vector)
             LIMIT :limit
         """)
         
