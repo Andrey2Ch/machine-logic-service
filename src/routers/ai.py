@@ -5,16 +5,23 @@ AI Assistant API endpoints.
 - Поиск в базе знаний (vector similarity)
 - Поиск SQL примеров
 - Сохранение обратной связи
+- Загрузка примеров SQL
 """
 
+import os
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from pydantic import BaseModel
 from typing import List, Optional
 import json
+import httpx
 
 from src.database import get_ai_db_session, is_ai_database_available
+
+# OpenAI API для embeddings
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+EMBEDDING_MODEL = "text-embedding-3-small"
 
 router = APIRouter(prefix="/ai", tags=["AI Assistant"])
 
@@ -488,3 +495,320 @@ async def get_memories(
         })
     
     return memories
+
+
+# ============================================================================
+# Knowledge Loading Endpoints
+# ============================================================================
+
+class SqlExampleInput(BaseModel):
+    question: str
+    sql_query: str
+    tables_used: Optional[List[str]] = None
+    difficulty: Optional[str] = "medium"
+    tags: Optional[List[str]] = None
+
+
+async def get_embedding(text: str) -> List[float]:
+    """Получает embedding от OpenAI API."""
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not set")
+    
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            "https://api.openai.com/v1/embeddings",
+            headers={
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "input": text[:8000],
+                "model": EMBEDDING_MODEL
+            },
+            timeout=30.0
+        )
+        if response.status_code != 200:
+            raise HTTPException(status_code=500, detail=f"OpenAI API error: {response.text}")
+        data = response.json()
+        return data["data"][0]["embedding"]
+
+
+@router.post("/load-sql-example")
+async def load_sql_example(
+    example: SqlExampleInput,
+    db: Session = Depends(get_ai_db_session)
+):
+    """
+    Загрузить SQL пример с автоматической генерацией embedding.
+    """
+    try:
+        # Проверяем, есть ли уже такой пример
+        existing = db.execute(
+            text("SELECT id FROM ai_sql_examples WHERE question = :question"),
+            {"question": example.question}
+        ).fetchone()
+        
+        if existing:
+            return {"status": "exists", "id": existing.id, "message": "Example already exists"}
+        
+        # Генерируем embedding для вопроса
+        embedding = await get_embedding(example.question)
+        embedding_str = f"[{','.join(map(str, embedding))}]"
+        
+        # Вставляем
+        result = db.execute(
+            text("""
+                INSERT INTO ai_sql_examples 
+                (question, question_embedding, sql_query, tables_used, difficulty, tags, is_verified)
+                VALUES (:question, CAST(:embedding AS vector), :sql_query, :tables_used, :difficulty, :tags, TRUE)
+                RETURNING id
+            """),
+            {
+                "question": example.question,
+                "embedding": embedding_str,
+                "sql_query": example.sql_query,
+                "tables_used": example.tables_used or [],
+                "difficulty": example.difficulty,
+                "tags": example.tags or []
+            }
+        )
+        db.commit()
+        new_id = result.fetchone().id
+        
+        return {"status": "created", "id": new_id, "message": "Example created with embedding"}
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/load-sql-examples-batch")
+async def load_sql_examples_batch(
+    examples: List[SqlExampleInput],
+    db: Session = Depends(get_ai_db_session)
+):
+    """
+    Загрузить несколько SQL примеров за раз.
+    """
+    results = []
+    for ex in examples:
+        try:
+            result = await load_sql_example(ex, db)
+            results.append({"question": ex.question[:50], **result})
+        except Exception as e:
+            results.append({"question": ex.question[:50], "status": "error", "error": str(e)})
+    
+    return {
+        "total": len(examples),
+        "created": sum(1 for r in results if r.get("status") == "created"),
+        "exists": sum(1 for r in results if r.get("status") == "exists"),
+        "errors": sum(1 for r in results if r.get("status") == "error"),
+        "results": results
+    }
+
+
+@router.get("/sql-examples-count")
+async def get_sql_examples_count(
+    db: Session = Depends(get_ai_db_session)
+):
+    """Get SQL examples count."""
+    result = db.execute(text("SELECT COUNT(*) as count FROM ai_sql_examples")).fetchone()
+    return {"count": result.count}
+
+
+# Pre-defined SQL examples (no Cyrillic in code)
+SEED_SQL_EXAMPLES = [
+    {
+        "question": "How many machines are currently working?",
+        "sql_query": """SELECT count(*) over() as total_working, m.name as machine_name, l.lot_number, e.full_name as operator
+FROM setup_jobs sj 
+JOIN machines m ON sj.machine_id = m.id 
+JOIN lots l ON sj.lot_id = l.id 
+LEFT JOIN employees e ON sj.operator_id = e.id 
+JOIN parts p ON l.part_id = p.id 
+WHERE sj.status = 'started' AND sj.end_time IS NULL AND m.is_active = true 
+ORDER BY m.display_order""",
+        "tables_used": ["setup_jobs", "machines", "lots", "employees", "parts"],
+        "difficulty": "simple",
+        "tags": ["machines", "status", "working"]
+    },
+    {
+        "question": "Machine hours by operator for the month",
+        "sql_query": """SELECT e.full_name, 
+    SUM(b.recounted_quantity) AS parts, 
+    ROUND(SUM(b.recounted_quantity * sj.cycle_time / 3600.0), 1) AS machine_hours
+FROM batches b 
+JOIN setup_jobs sj ON b.setup_job_id = sj.id 
+JOIN employees e ON b.operator_id = e.id 
+WHERE b.batch_time >= DATE_TRUNC('month', CURRENT_DATE) 
+GROUP BY e.full_name 
+ORDER BY machine_hours DESC""",
+        "tables_used": ["batches", "setup_jobs", "employees"],
+        "difficulty": "medium",
+        "tags": ["machine-hours", "operators", "report"]
+    },
+    {
+        "question": "Which lots are currently in production?",
+        "sql_query": """SELECT l.lot_number, p.drawing_number, p.name as part_name, l.total_planned_quantity, l.created_at
+FROM lots l 
+JOIN parts p ON l.part_id = p.id 
+WHERE l.status = 'in_production' 
+ORDER BY l.created_at DESC""",
+        "tables_used": ["lots", "parts"],
+        "difficulty": "simple",
+        "tags": ["lots", "production", "status"]
+    },
+    {
+        "question": "Top 5 operators by parts count",
+        "sql_query": """SELECT e.full_name, SUM(b.recounted_quantity) as total_parts, COUNT(b.id) as batch_count
+FROM batches b 
+JOIN employees e ON b.operator_id = e.id 
+WHERE b.batch_time >= NOW() - INTERVAL '30 days' 
+GROUP BY e.id, e.full_name 
+ORDER BY total_parts DESC 
+LIMIT 5""",
+        "tables_used": ["batches", "employees"],
+        "difficulty": "simple",
+        "tags": ["top", "operators", "parts", "rating"]
+    },
+    {
+        "question": "Production output by shift today",
+        "sql_query": """SELECT 
+    CASE 
+        WHEN EXTRACT(HOUR FROM b.batch_time) BETWEEN 6 AND 17 THEN 'Shift 1 (day)' 
+        ELSE 'Shift 2 (night)' 
+    END as shift,
+    COUNT(DISTINCT b.operator_id) as operators, 
+    SUM(b.recounted_quantity) as parts, 
+    ROUND(SUM(b.recounted_quantity * sj.cycle_time / 3600.0), 1) as machine_hours
+FROM batches b 
+JOIN setup_jobs sj ON b.setup_job_id = sj.id 
+WHERE b.batch_time >= CURRENT_DATE 
+GROUP BY 1 
+ORDER BY 1""",
+        "tables_used": ["batches", "setup_jobs"],
+        "difficulty": "medium",
+        "tags": ["shifts", "output", "today"]
+    },
+    {
+        "question": "Discrepancies over 10% between operator and warehouse",
+        "sql_query": """SELECT b.batch_time::date as date, 
+    op.full_name as operator, 
+    wh.full_name as warehouse_employee, 
+    b.operator_reported_quantity, 
+    b.recounted_quantity, 
+    b.discrepancy_absolute, 
+    ROUND(b.discrepancy_percentage, 1) as discrepancy_pct
+FROM batches b 
+JOIN employees op ON b.operator_id = op.id 
+LEFT JOIN employees wh ON b.warehouse_employee_id = wh.id 
+WHERE ABS(b.discrepancy_percentage) > 10 AND b.batch_time >= NOW() - INTERVAL '30 days' 
+ORDER BY ABS(b.discrepancy_percentage) DESC""",
+        "tables_used": ["batches", "employees"],
+        "difficulty": "medium",
+        "tags": ["discrepancy", "control", "warehouse"]
+    },
+    {
+        "question": "Machine statistics for a specific machine",
+        "sql_query": """SELECT m.name as machine, 
+    COUNT(DISTINCT sj.id) as setups, 
+    COUNT(DISTINCT sj.lot_id) as lots, 
+    SUM(b.recounted_quantity) as total_parts, 
+    ROUND(SUM(b.recounted_quantity * sj.cycle_time / 3600.0), 1) as machine_hours
+FROM machines m 
+LEFT JOIN setup_jobs sj ON sj.machine_id = m.id AND sj.start_time >= NOW() - INTERVAL '30 days' 
+LEFT JOIN batches b ON b.setup_job_id = sj.id 
+WHERE m.name = 'SR-32' 
+GROUP BY m.id, m.name""",
+        "tables_used": ["machines", "setup_jobs", "batches"],
+        "difficulty": "medium",
+        "tags": ["machine", "statistics"]
+    },
+    {
+        "question": "Defect batches in the last month",
+        "sql_query": """SELECT b.batch_time::date as date, 
+    m.name as machine, 
+    l.lot_number, 
+    p.drawing_number, 
+    b.recounted_quantity as defect_quantity, 
+    e.full_name as operator
+FROM batches b 
+JOIN setup_jobs sj ON b.setup_job_id = sj.id 
+JOIN machines m ON sj.machine_id = m.id 
+JOIN lots l ON sj.lot_id = l.id 
+JOIN parts p ON l.part_id = p.id 
+LEFT JOIN employees e ON b.operator_id = e.id 
+WHERE b.current_location = 'defect' AND b.batch_time >= NOW() - INTERVAL '30 days' 
+ORDER BY b.batch_time DESC""",
+        "tables_used": ["batches", "setup_jobs", "machines", "lots", "parts", "employees"],
+        "difficulty": "medium",
+        "tags": ["defects", "quality"]
+    },
+]
+
+
+@router.get("/seed-examples")
+@router.post("/seed-examples")
+async def seed_sql_examples(
+    db: Session = Depends(get_ai_db_session)
+):
+    """
+    Load pre-defined SQL examples with auto-generated embeddings.
+    Call this once to populate the ai_sql_examples table.
+    """
+    results = []
+    created = 0
+    skipped = 0
+    errors = 0
+    
+    for ex in SEED_SQL_EXAMPLES:
+        try:
+            # Check if exists
+            existing = db.execute(
+                text("SELECT id FROM ai_sql_examples WHERE question = :question"),
+                {"question": ex["question"]}
+            ).fetchone()
+            
+            if existing:
+                results.append({"question": ex["question"][:40], "status": "exists"})
+                skipped += 1
+                continue
+            
+            # Generate embedding
+            embedding = await get_embedding(ex["question"])
+            embedding_str = f"[{','.join(map(str, embedding))}]"
+            
+            # Insert
+            result = db.execute(
+                text("""
+                    INSERT INTO ai_sql_examples 
+                    (question, question_embedding, sql_query, tables_used, difficulty, tags, is_verified)
+                    VALUES (:question, CAST(:embedding AS vector), :sql_query, :tables_used, :difficulty, :tags, TRUE)
+                    RETURNING id
+                """),
+                {
+                    "question": ex["question"],
+                    "embedding": embedding_str,
+                    "sql_query": ex["sql_query"],
+                    "tables_used": ex.get("tables_used", []),
+                    "difficulty": ex.get("difficulty", "medium"),
+                    "tags": ex.get("tags", [])
+                }
+            )
+            db.commit()
+            
+            results.append({"question": ex["question"][:40], "status": "created"})
+            created += 1
+            
+        except Exception as e:
+            db.rollback()
+            results.append({"question": ex["question"][:40], "status": "error", "error": str(e)})
+            errors += 1
+    
+    return {
+        "total": len(SEED_SQL_EXAMPLES),
+        "created": created,
+        "skipped": skipped,
+        "errors": errors,
+        "results": results
+    }

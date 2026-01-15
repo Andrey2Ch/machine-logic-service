@@ -66,10 +66,10 @@ async def load_schema_knowledge(conn: asyncpg.Connection):
     schema_path = KNOWLEDGE_BASE_PATH / "schema" / "tables.json"
     
     if not schema_path.exists():
-        print(f"⚠️  Schema file not found: {schema_path}")
+        print(f"[WARN] Schema file not found: {schema_path}")
         return
     
-    print("📊 Загрузка схемы БД...")
+    print("[INFO] Загрузка схемы БД...")
     
     with open(schema_path, "r", encoding="utf-8") as f:
         schema = json.load(f)
@@ -116,11 +116,11 @@ async def load_schema_knowledge(conn: asyncpg.Connection):
         )
         
         if existing and existing["content_hash"] == content_hash:
-            print(f"  ✅ {table_name} - без изменений")
+            print(f"  [OK] {table_name} - без изменений")
             continue
         
         # Получаем embedding
-        print(f"  📝 {table_name} - генерация embedding...")
+        print(f"  [GEN] {table_name} - генерация embedding...")
         embedding = await get_embedding(content)
         
         metadata = {
@@ -136,23 +136,23 @@ async def load_schema_knowledge(conn: asyncpg.Connection):
                 SET content = $1, content_hash = $2, embedding = $3, metadata = $4, updated_at = NOW()
                 WHERE id = $5
             """, content, content_hash, embedding, json.dumps(metadata), existing["id"])
-            print(f"  🔄 {table_name} - обновлено")
+            print(f"  [UPD] {table_name} - обновлено")
         else:
             # Создаём
             await conn.execute("""
                 INSERT INTO ai_knowledge_documents (document_type, title, content, content_hash, embedding, metadata)
                 VALUES ('schema', $1, $2, $3, $4, $5)
             """, title, content, content_hash, embedding, json.dumps(metadata))
-            print(f"  ✨ {table_name} - создано")
+            print(f"  [NEW] {table_name} - создано")
 
 
 async def load_markdown_knowledge(conn: asyncpg.Connection, doc_type: str, file_path: Path):
     """Загружает знания из markdown файла."""
     if not file_path.exists():
-        print(f"⚠️  File not found: {file_path}")
+        print(f"[WARN] File not found: {file_path}")
         return
     
-    print(f"📄 Загрузка {file_path.name}...")
+    print(f"[INFO] Загрузка {file_path.name}...")
     
     with open(file_path, "r", encoding="utf-8") as f:
         content = f.read()
@@ -194,11 +194,11 @@ async def load_markdown_knowledge(conn: asyncpg.Connection, doc_type: str, file_
         )
         
         if existing and existing["content_hash"] == content_hash:
-            print(f"  ✅ {title[:50]}... - без изменений")
+            print(f"  [OK] {title[:50]}... - без изменений")
             continue
         
         # Получаем embedding
-        print(f"  📝 {title[:50]}... - генерация embedding...")
+        print(f"  [GEN] {title[:50]}... - генерация embedding...")
         embedding = await get_embedding(content)
         
         metadata = {
@@ -212,18 +212,18 @@ async def load_markdown_knowledge(conn: asyncpg.Connection, doc_type: str, file_
                 SET content = $1, content_hash = $2, embedding = $3, metadata = $4, updated_at = NOW()
                 WHERE id = $5
             """, content, content_hash, embedding, json.dumps(metadata), existing["id"])
-            print(f"  🔄 {title[:50]}... - обновлено")
+            print(f"  [UPD] {title[:50]}... - обновлено")
         else:
             await conn.execute("""
                 INSERT INTO ai_knowledge_documents (document_type, source_path, title, content, content_hash, embedding, metadata)
                 VALUES ($1, $2, $3, $4, $5, $6, $7)
             """, doc_type, str(file_path), title, content, content_hash, embedding, json.dumps(metadata))
-            print(f"  ✨ {title[:50]}... - создано")
+            print(f"  [NEW] {title[:50]}... - создано")
 
 
 async def load_sql_examples(conn: asyncpg.Connection):
     """Загружает примеры SQL запросов."""
-    print("💾 Загрузка SQL примеров...")
+    print("[INFO] Загрузка SQL примеров...")
     
     examples = [
         {
@@ -375,11 +375,11 @@ ORDER BY 1""",
         )
         
         if existing:
-            print(f"  ✅ {ex['question'][:50]}... - уже есть")
+            print(f"  [OK] {ex['question'][:50]}... - уже есть")
             continue
         
         # Получаем embedding для вопроса
-        print(f"  📝 {ex['question'][:50]}... - генерация embedding...")
+        print(f"  [GEN] {ex['question'][:50]}... - генерация embedding...")
         embedding = await get_embedding(ex["question"])
         
         await conn.execute("""
@@ -387,19 +387,19 @@ ORDER BY 1""",
             VALUES ($1, $2, $3, $4, $5, $6, TRUE)
         """, ex["question"], embedding, ex["sql"], ex["tables_used"], ex["difficulty"], ex["tags"])
         
-        print(f"  ✨ {ex['question'][:50]}... - создано")
+        print(f"  [NEW] {ex['question'][:50]}... - создано")
 
 
 async def main():
     """Основная функция загрузки знаний."""
-    print("🤖 Загрузка базы знаний AI-ассистента\n")
+    print("[AI] Загрузка базы знаний AI-ассистента\n")
     
     if not DATABASE_URL:
-        print("❌ DATABASE_URL not set!")
+        print("[ERROR] DATABASE_URL not set!")
         return
     
     if not OPENAI_API_KEY:
-        print("❌ OPENAI_API_KEY not set!")
+        print("[ERROR] OPENAI_API_KEY not set!")
         return
     
     # Подключаемся к БД
@@ -441,12 +441,12 @@ async def main():
         
         sql_count = await conn.fetchval("SELECT COUNT(*) FROM ai_sql_examples")
         
-        print("✅ Загрузка завершена!")
-        print(f"   📊 Документов в базе знаний: {stats['total']}")
+        print("[DONE] Загрузка завершена!")
+        print(f"   Документов в базе знаний: {stats['total']}")
         print(f"      - Схема БД: {stats['schema_count']}")
         print(f"      - Глоссарий: {stats['glossary_count']}")
         print(f"      - Workflows: {stats['workflow_count']}")
-        print(f"   💾 SQL примеров: {sql_count}")
+        print(f"   SQL примеров: {sql_count}")
         
     finally:
         await conn.close()
