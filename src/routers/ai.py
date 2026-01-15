@@ -250,7 +250,7 @@ async def get_conversation_messages(
             m.executed_sql, m.sql_result, m.sql_error, m.created_at
         FROM ai_messages m
         JOIN ai_conversations c ON c.id = m.conversation_id
-        WHERE c.session_id = :session_id::uuid
+        WHERE c.session_id = CAST(:session_id AS uuid)
         ORDER BY m.created_at ASC
     """)
     
@@ -297,7 +297,7 @@ async def create_message(
         
         # Сначала получаем conversation_id по session_id
         conv_query = text("""
-            SELECT id FROM ai_conversations WHERE session_id = :session_id::uuid
+            SELECT id FROM ai_conversations WHERE session_id = CAST(:session_id AS uuid)
         """)
         conv_result = db.execute(conv_query, {"session_id": request.conversation_id})
         conv_row = conv_result.fetchone()
