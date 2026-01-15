@@ -711,6 +711,17 @@ async def root():
         "available_statuses": [status.value for status in SetupStatus]
     }
 
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for monitoring services (UptimeRobot, Railway, etc.)"""
+    return {
+        "status": "ok",
+        "service": "machine-logic-service",
+        "timestamp": datetime.now().isoformat()
+    }
+
+
 # === NEW: Update program cycle time by drawing_number ===
 class ProgramCycleUpdate(BaseModel):
     drawing_number: str
@@ -2723,20 +2734,8 @@ async def update_lot_assignment(
         logger.error(f"Ошибка при обновлении статуса лота {lot_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error while updating lot status")
 
-# <<< ЭНДПОИНТ ДЛЯ ПОЛУЧЕНИЯ ОДНОГО ЛОТА >>>
-@app.get("/lots/{lot_id}", response_model=LotResponse, tags=["Lots"])
-async def get_lot(lot_id: int, db: Session = Depends(get_db_session)):
-    """
-    Получить информацию о конкретном лоте.
-    """
-    lot = db.query(LotDB).options(selectinload(LotDB.part)).filter(LotDB.id == lot_id).first()
-    if not lot:
-        raise HTTPException(status_code=404, detail=f"Lot with id {lot_id} not found")
-    
-    return lot
-
-
 # <<< ENDPOINT FOR GETTING PRODUCED QUANTITY FROM MTCONNECT >>>
+# ВАЖНО: Этот endpoint должен быть ПЕРЕД /lots/{lot_id} чтобы FastAPI правильно маршрутизировал
 @app.get("/lots/{lot_id}/produced", tags=["Lots"])
 async def get_lot_produced(lot_id: int, db: Session = Depends(get_db_session)):
     """
@@ -2783,6 +2782,19 @@ async def get_lot_produced(lot_id: int, db: Session = Depends(get_db_session)):
         "last_reading_at": result.last_reading_at.isoformat() if result and result.last_reading_at else None,
         "source": "mtconnect"
     }
+
+
+# <<< ЭНДПОИНТ ДЛЯ ПОЛУЧЕНИЯ ОДНОГО ЛОТА >>>
+@app.get("/lots/{lot_id}", response_model=LotResponse, tags=["Lots"])
+async def get_lot(lot_id: int, db: Session = Depends(get_db_session)):
+    """
+    Получить информацию о конкретном лоте.
+    """
+    lot = db.query(LotDB).options(selectinload(LotDB.part)).filter(LotDB.id == lot_id).first()
+    if not lot:
+        raise HTTPException(status_code=404, detail=f"Lot with id {lot_id} not found")
+    
+    return lot
 
 
 @app.patch("/lots/{lot_id}/quantity")
