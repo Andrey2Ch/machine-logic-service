@@ -78,6 +78,17 @@ async def execute_sql(
     if not query:
         raise HTTPException(status_code=400, detail="Query cannot be empty")
     
+    # Если прислали несколько запросов через ; — берём только первый
+    clean_query = strip_sql_comments(query)
+    if ';' in clean_query:
+        # Разбиваем по ; и берём первый непустой SELECT
+        parts = [p.strip() for p in clean_query.split(';') if p.strip()]
+        select_parts = [p for p in parts if p.upper().startswith('SELECT') or p.upper().startswith('WITH')]
+        if select_parts:
+            query = select_parts[0]
+        else:
+            raise HTTPException(status_code=400, detail="No valid SELECT query found")
+    
     if not validate_query(query):
         raise HTTPException(
             status_code=400, 
