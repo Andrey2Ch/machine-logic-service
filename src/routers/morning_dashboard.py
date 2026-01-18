@@ -183,12 +183,14 @@ async def get_acceptance_discrepancies(
                 ), 0) as declared,
                 
                 -- Фактически принято складом (total_warehouse_quantity)
-                -- 2026-01-18: Убрали фильтр archived — дочерние батчи НЕ наследуют warehouse_received_at
+                -- 2026-01-18: Считаем только оригинальные батчи (parent_batch_id IS NULL)
+                -- Дочерние (после ОТК) наследуют warehouse_received_at, но их не считаем
                 COALESCE((
                     SELECT SUM(current_quantity)
                     FROM batches
                     WHERE lot_id = l.id
                       AND warehouse_received_at IS NOT NULL
+                      AND parent_batch_id IS NULL
                 ), 0) as accepted
                 
             FROM lots l
@@ -300,12 +302,13 @@ async def get_defect_rates(
                 m.name as machine_name,
                 sj.machine_id,
                 
-                -- Всего принято (дочерние не наследуют warehouse_received_at → archived учитываем)
+                -- Всего принято (только оригинальные батчи, parent_batch_id IS NULL)
                 COALESCE((
                     SELECT SUM(current_quantity)
                     FROM batches
                     WHERE lot_id = l.id
                       AND warehouse_received_at IS NOT NULL
+                      AND parent_batch_id IS NULL
                 ), 0) as total_accepted,
                 
                 -- Брак (всего)
