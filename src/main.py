@@ -2348,6 +2348,97 @@ async def accept_batch_on_warehouse(batch_id: int, payload: AcceptWarehousePaylo
 
 # --- END WAREHOUSE ACCEPTANCE ENDPOINTS ---
 
+# --- FINAL BATCH CHECK ENDPOINT ---
+
+class FinalBatchCheckResponse(BaseModel):
+    """Ответ проверки: является ли батч последним в наладке"""
+    is_setup_closed: bool  # Наладка уже завершена?
+    pending_siblings: int  # Сколько ещё непринятых батчей (кроме текущего)
+    is_final_batch: bool   # Это последний батч?
+    setup_job_id: Optional[int] = None
+    lot_number: Optional[str] = None
+
+@app.get("/batches/{batch_id}/final-check", response_model=FinalBatchCheckResponse)
+async def check_if_final_batch(batch_id: int, db: Session = Depends(get_db_session)):
+    """
+    Проверить, является ли батч последним для своей наладки.
+    Используется на складе при приемке, чтобы показать кладовщику
+    сообщение "Это последний батч этой наладки!".
+    
+    Логика:
+    1. Если наладка ещё не закрыта (end_time IS NULL) → не последний
+    2. Если есть другие непринятые батчи (current_location IN ('production', 'sorting')) → не последний
+    3. Иначе → последний!
+    """
+    try:
+        # Получаем батч с его setup_job и lot
+        batch = db.query(BatchDB).filter(BatchDB.id == batch_id).first()
+        if not batch:
+            raise HTTPException(status_code=404, detail="Batch not found")
+        
+        setup_job_id = batch.setup_job_id
+        
+        # Если у батча нет setup_job (ручной батч) - не можем определить
+        if not setup_job_id:
+            return FinalBatchCheckResponse(
+                is_setup_closed=False,
+                pending_siblings=0,
+                is_final_batch=False,
+                setup_job_id=None,
+                lot_number=None
+            )
+        
+        # Получаем setup_job
+        setup_job = db.query(SetupDB).filter(SetupDB.id == setup_job_id).first()
+        if not setup_job:
+            return FinalBatchCheckResponse(
+                is_setup_closed=False,
+                pending_siblings=0,
+                is_final_batch=False,
+                setup_job_id=setup_job_id,
+                lot_number=None
+            )
+        
+        # Проверяем закрыта ли наладка
+        is_setup_closed = setup_job.end_time is not None
+        
+        # Получаем lot_number для отображения
+        lot = db.query(LotDB).filter(LotDB.id == setup_job.lot_id).first()
+        lot_number = lot.lot_number if lot else None
+        
+        # Если наладка не закрыта - точно не последний
+        if not is_setup_closed:
+            return FinalBatchCheckResponse(
+                is_setup_closed=False,
+                pending_siblings=0,
+                is_final_batch=False,
+                setup_job_id=setup_job_id,
+                lot_number=lot_number
+            )
+        
+        # Считаем непринятые батчи этой наладки (кроме текущего)
+        pending_count = db.query(BatchDB).filter(
+            BatchDB.setup_job_id == setup_job_id,
+            BatchDB.id != batch_id,
+            BatchDB.current_location.in_(['production', 'sorting'])
+        ).count()
+        
+        is_final = pending_count == 0
+        
+        return FinalBatchCheckResponse(
+            is_setup_closed=True,
+            pending_siblings=pending_count,
+            is_final_batch=is_final,
+            setup_job_id=setup_job_id,
+            lot_number=lot_number
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error checking final batch status for batch {batch_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Error checking final batch status")
+
 # --- LOTS MANAGEMENT ENDPOINTS ---
 
 # <<< НОВЫЕ Pydantic МОДЕЛИ ДЛЯ LOT >>>
