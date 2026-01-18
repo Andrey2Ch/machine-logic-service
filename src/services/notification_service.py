@@ -129,7 +129,7 @@ async def send_setup_approval_notifications(db: Session, setup_id: int, notifica
                 notification_type="machine_free"
             )
             # Viewer - личные (TG + WhatsApp)
-            await _notify_viewer_personal(db, free_machine_message, notification_type="machine_available")
+            await _notify_viewer_personal(db, free_machine_message, notification_type="machine_free")
             logger.info(f"Sent 'machine free' notification to machinists + operators + viewers for machine {machine_name}")
 
         # 🔔 Уведомляем Viewer'ов (личные TG + личные WhatsApp)
