@@ -252,6 +252,69 @@ async def notify_setup_allowed(
         logger.error(f"Ошибка при отправке уведомления для наладки {setup_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера при отправке уведомления")
 
+
+@router.post("/setups/notify-completion", summary="Отправить уведомление о завершении наладки / освободившемся станке")
+async def notify_setup_completion(
+    request: NotifyRequest,
+    db: Session = Depends(get_db_session)
+):
+    """
+    Отправляет WhatsApp уведомление о завершении наладки и освободившемся станке.
+    Вызывается из TG бота при завершении работы оператором.
+    Основные TG уведомления отправляет сам бот - здесь только WhatsApp для Viewer.
+    """
+    setup_id = request.setup_id
+    logger.info(f"Получен запрос на уведомление о завершении для наладки ID: {setup_id}")
+    
+    try:
+        # 1. Найти наладку и связанную информацию
+        setup_info = db.query(
+            SetupDB.id,
+            SetupDB.status,
+            MachineDB.name.label("machine_name"),
+            PartDB.drawing_number,
+            LotDB.lot_number,
+            EmployeeDB.full_name.label("operator_name")
+        ).select_from(SetupDB)\
+         .join(MachineDB, SetupDB.machine_id == MachineDB.id)\
+         .join(LotDB, SetupDB.lot_id == LotDB.id)\
+         .join(PartDB, LotDB.part_id == PartDB.id)\
+         .outerjoin(EmployeeDB, SetupDB.employee_id == EmployeeDB.id)\
+         .filter(SetupDB.id == setup_id)\
+         .first()
+
+        if not setup_info:
+            logger.warning(f"Наладка с ID {setup_id} не найдена для уведомления о завершении.")
+            return {"success": False, "message": "Наладка не найдена"}
+
+        # 2. Отправить в WhatsApp (machine_free уведомление)
+        if WHATSAPP_ENABLED:
+            try:
+                wa_message = (
+                    f"🟢 Станок освободился!\n\n"
+                    f"🔧 Станок: {setup_info.machine_name}\n"
+                    f"📝 Чертёж: {setup_info.drawing_number}\n"
+                    f"🔢 Партия: {setup_info.lot_number}\n\n"
+                    f"Станок готов для новой наладки 🛠"
+                )
+                
+                # Отправляем всем включённым ролям для machine_free
+                wa_sent = await send_whatsapp_to_all_enabled_roles(db, wa_message, "machine_free")
+                logger.info(f"WhatsApp уведомления о завершении наладки {setup_id} отправлены ({wa_sent})")
+                
+                return {"success": True, "message": f"WhatsApp уведомления отправлены", "wa_sent": wa_sent}
+            except Exception as wa_err:
+                logger.warning(f"WhatsApp уведомление не отправлено: {wa_err}")
+                return {"success": False, "message": f"WhatsApp error: {str(wa_err)}"}
+        else:
+            logger.info("WhatsApp отключен, уведомление не отправлено")
+            return {"success": True, "message": "WhatsApp отключен"}
+
+    except Exception as e:
+        logger.error(f"Ошибка при отправке уведомления о завершении для наладки {setup_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера при отправке уведомления")
+
+
 @router.post("/defect/notify", summary="Отправить уведомление о браке")
 async def notify_defect_detected(
     request: DefectNotificationRequest,
