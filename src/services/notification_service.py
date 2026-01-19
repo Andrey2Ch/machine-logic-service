@@ -4,6 +4,7 @@ from .telegram_client import send_telegram_message
 from .whatsapp_client import send_whatsapp_to_role, send_whatsapp_to_role_personal, send_whatsapp_to_all_enabled_roles, WHATSAPP_ENABLED
 # Убираем RoleDB из импорта
 from src.models.models import SetupDB, EmployeeDB, MachineDB, LotDB, PartDB 
+from src.database import SessionLocal  # Для создания своей сессии в background tasks
 
 logger = logging.getLogger(__name__)
 
@@ -18,18 +19,24 @@ async def send_setup_approval_notifications(db: Session, setup_id: int, notifica
     """
     Отправляет уведомления о наладке разным ролям, используя SQLAlchemy.
     
+    ВАЖНО: Эта функция часто вызывается через asyncio.create_task() как фоновая задача.
+    Переданная сессия db может быть уже закрыта к моменту выполнения.
+    Поэтому функция создаёт СВОЮ сессию БД для надёжности.
+    
     Args:
-        db: Сессия базы данных
+        db: Сессия базы данных (игнорируется, используется своя)
         setup_id: ID наладки
         notification_type: Тип уведомления ("approval" или "completion")
     """
+    # Создаём свою сессию, т.к. переданная может быть закрыта (asyncio.create_task)
+    own_db = SessionLocal()
     try:
-        logger.info(f"Fetching data for {notification_type} notification (Setup ID: {setup_id}) using SQLAlchemy")
+        logger.info(f"Fetching data for {notification_type} notification (Setup ID: {setup_id}) using own DB session")
 
         Machinist = aliased(EmployeeDB)
         QAEmployee = aliased(EmployeeDB)
 
-        setup = db.query(
+        setup = own_db.query(
                 SetupDB,
                 MachineDB,
                 LotDB,
@@ -94,12 +101,12 @@ async def send_setup_approval_notifications(db: Session, setup_id: int, notifica
         notif_type = "setup_allowed" if notification_type == "approval" else "setup_completed"
         
         await _notify_role_by_id_sqlalchemy(
-            db, ADMIN_ROLE_ID, admin_message, 
+            own_db, ADMIN_ROLE_ID, admin_message, 
             exclude_id=machinist_obj.id if machinist_obj else None,
             notification_type=notif_type
         )
         await _notify_role_by_id_sqlalchemy(
-            db, OPERATOR_ROLE_ID, operator_message, 
+            own_db, OPERATOR_ROLE_ID, operator_message, 
             exclude_id=machinist_obj.id if machinist_obj else None,
             notification_type=notif_type
         )
@@ -115,7 +122,7 @@ async def send_setup_approval_notifications(db: Session, setup_id: int, notifica
                 f"<i>Станок готов для новой наладки 🛠</i>"
             )
             await _notify_role_by_id_sqlalchemy(
-                db, 
+                own_db, 
                 MACHINIST_ROLE_ID, 
                 free_machine_message, 
                 exclude_id=machinist_obj.id if machinist_obj else None,
@@ -123,17 +130,17 @@ async def send_setup_approval_notifications(db: Session, setup_id: int, notifica
             )
             # Операторам тоже
             await _notify_role_by_id_sqlalchemy(
-                db, 
+                own_db, 
                 OPERATOR_ROLE_ID, 
                 free_machine_message, 
                 notification_type="machine_free"
             )
             # Viewer - личные (TG + WhatsApp)
-            await _notify_viewer_personal(db, free_machine_message, notification_type="machine_free")
+            await _notify_viewer_personal(own_db, free_machine_message, notification_type="machine_free")
             logger.info(f"Sent 'machine free' notification to machinists + operators + viewers for machine {machine_name}")
 
         # 🔔 Уведомляем Viewer'ов (личные TG + личные WhatsApp)
-        await _notify_viewer_personal(db, base_message, notification_type=notif_type)
+        await _notify_viewer_personal(own_db, base_message, notification_type=notif_type)
         
         logger.info(f"Successfully processed {notification_type} notifications for setup {setup_id}")
         return True
@@ -141,6 +148,9 @@ async def send_setup_approval_notifications(db: Session, setup_id: int, notifica
     except Exception as e:
         logger.error(f"Error sending {notification_type} notifications for setup {setup_id}: {e}", exc_info=True)
         return False
+    finally:
+        own_db.close()
+        logger.debug(f"Closed own DB session for {notification_type} notification")
 
 async def _notify_role_by_id_sqlalchemy(
     db: Session, 
