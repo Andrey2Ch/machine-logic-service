@@ -194,6 +194,8 @@ async def _notify_viewer_personal(
     - WhatsApp личка (не группа!)
     """
     try:
+        logger.info(f"=== Notifying Viewers for '{notification_type}' ===")
+        
         # Telegram личка
         employees = db.query(EmployeeDB).filter(
             EmployeeDB.role_id == VIEWER_ROLE_ID,
@@ -201,11 +203,16 @@ async def _notify_viewer_personal(
             EmployeeDB.telegram_id != None
         ).all()
         
+        tg_sent = 0
         for emp in employees:
             if emp.telegram_id:
-                await send_telegram_message(emp.telegram_id, message)
+                try:
+                    await send_telegram_message(emp.telegram_id, message)
+                    tg_sent += 1
+                except Exception as tg_err:
+                    logger.warning(f"Failed to send TG to viewer {emp.full_name}: {tg_err}")
         
-        logger.debug(f"Sent TG to {len(employees)} viewers")
+        logger.info(f"Telegram sent to {tg_sent}/{len(employees)} viewers")
         
         # WhatsApp личка (с переводом)
         if WHATSAPP_ENABLED:
@@ -213,7 +220,9 @@ async def _notify_viewer_personal(
                 db, VIEWER_ROLE_ID, message,
                 notification_type=notification_type
             )
-            logger.info(f"WhatsApp personal sent to {wa_sent} viewers")
+            logger.info(f"WhatsApp personal sent to {wa_sent} viewers for '{notification_type}'")
+        else:
+            logger.debug("WhatsApp disabled, skipping viewer personal messages")
             
     except Exception as e:
         logger.error(f"Failed to notify viewers: {e}", exc_info=True)

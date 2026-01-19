@@ -220,11 +220,12 @@ async def send_whatsapp_to_role_personal(
         try:
             from src.routers.notification_settings import is_notification_enabled
             enabled = await is_notification_enabled(db, notification_type, lang_column)
+            logger.info(f"WhatsApp personal check: {lang_column}/{notification_type} = {enabled}")
             if not enabled:
-                logger.debug(f"WhatsApp personal disabled for {lang_column} on {notification_type}")
+                logger.info(f"WhatsApp personal DISABLED for {lang_column} on {notification_type} - skipping")
                 return 0
         except Exception as e:
-            logger.warning(f"Failed to check notification enabled: {e}")
+            logger.warning(f"Failed to check notification enabled: {e}, proceeding anyway")
     
     from src.models.models import EmployeeDB
     

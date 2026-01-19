@@ -288,6 +288,7 @@ async def is_notification_enabled(
     """
     Проверяет, включено ли уведомление для данного канала.
     Используется перед отправкой уведомлений.
+    NULL в БД трактуется как TRUE (по умолчанию разрешено).
     """
     try:
         column_name = f"enabled_{channel}"
@@ -295,17 +296,19 @@ async def is_notification_enabled(
                                'enabled_qa', 'enabled_admin', 'enabled_viewer', 'enabled_telegram']:
             return True  # По умолчанию разрешаем
         
+        # COALESCE обрабатывает NULL как TRUE
         result = db.execute(text(f"""
-            SELECT {column_name} 
+            SELECT COALESCE({column_name}, true) as enabled_value
             FROM notification_settings 
             WHERE notification_type = :notification_type
         """), {"notification_type": notification_type})
         
         row = result.fetchone()
         if row:
-            return bool(getattr(row, column_name, True))
+            return bool(row.enabled_value)
         
         # Если настройка не найдена, разрешаем по умолчанию
+        logger.debug(f"Notification type '{notification_type}' not found in settings, allowing by default")
         return True
         
     except Exception as e:
