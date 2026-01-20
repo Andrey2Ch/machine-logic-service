@@ -66,11 +66,6 @@ async def get_lot_analytics(lot_id: int, db: Session = Depends(get_db_session)):
             and batch.parent_batch_id is None  # Только оригинальные батчи, не дочерние
         ]
         
-        # Debug logging
-        logger.info(f"Lot {lot_id}: total batches={len(batches)}, warehouse_batches={len(warehouse_batches)}")
-        for wb in warehouse_batches[:5]:  # First 5 for debugging
-            logger.info(f"  Batch {wb.id}: initial={wb.initial_quantity}, current={wb.current_quantity}, recounted={wb.recounted_quantity}, parent_id={wb.parent_batch_id}")
-        
         # Принято на склад = сумма recounted_quantity (пересчитанное кладовщиком)
         # Если recounted_quantity нет, используем current_quantity как fallback
         total_warehouse_quantity = sum(
@@ -78,13 +73,27 @@ async def get_lot_analytics(lot_id: int, db: Session = Depends(get_db_session)):
             for batch in warehouse_batches
         )
         
-        # Заявлено операторами = сумма current_quantity батчей принятых на склад
-        # current_quantity = количество деталей в батче (разница показаний счётчика)
-        # initial_quantity = показание счётчика в НАЧАЛЕ батча (не используем!)
-        declared_quantity_at_warehouse_recount = sum(
-            batch.current_quantity or 0
-            for batch in warehouse_batches
-        )
+        # 🔧 ИСПРАВЛЕНО 2026-01-20: "из Y" = показание счётчика на момент последней приёмки склада
+        # НЕ сумма current_quantity батчей! (т.к. current_quantity может быть некорректным)
+        # Берём показание счётчика, которое было записано до/во время последней приёмки на склад
+        declared_result = db.execute(text("""
+            SELECT COALESCE(
+                (SELECT mr.reading 
+                 FROM machine_readings mr
+                 JOIN setup_jobs sj ON mr.setup_job_id = sj.id
+                 WHERE sj.lot_id = :lot_id 
+                   AND mr.setup_job_id IS NOT NULL
+                   AND mr.created_at <= (
+                       SELECT MAX(warehouse_received_at) 
+                       FROM batches 
+                       WHERE lot_id = :lot_id 
+                         AND warehouse_received_at IS NOT NULL
+                   )
+                 ORDER BY mr.created_at DESC
+                 LIMIT 1), 
+                0) as declared
+        """), {"lot_id": lot_id}).fetchone()
+        declared_quantity_at_warehouse_recount = declared_result.declared if declared_result else 0
         
         total_good_quantity = sum(batch.current_quantity for batch in batches 
                                 if batch.current_location == 'good')
