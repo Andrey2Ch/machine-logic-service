@@ -185,8 +185,9 @@ async def get_acceptance_discrepancies(
                 -- Фактически принято складом (total_warehouse_quantity)
                 -- 2026-01-18: Считаем только оригинальные батчи (parent_batch_id IS NULL)
                 -- Дочерние (после ОТК) наследуют warehouse_received_at, но их не считаем
+                -- Используем recounted_quantity (пересчёт кладовщика), fallback на current_quantity
                 COALESCE((
-                    SELECT SUM(current_quantity)
+                    SELECT SUM(COALESCE(recounted_quantity, current_quantity))
                     FROM batches
                     WHERE lot_id = l.id
                       AND warehouse_received_at IS NOT NULL
