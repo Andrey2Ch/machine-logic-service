@@ -97,13 +97,23 @@ async def create_setup(payload: CreateSetupPayload, db: Session = Depends(get_db
         if not lot:
             raise HTTPException(status_code=404, detail="Лот не найден")
 
+        # Проверяем есть ли активная наладка на станке
+        active_setup = db.query(SetupDB).filter(
+            SetupDB.machine_id == payload.machine_id,
+            SetupDB.status.in_(['created', 'started', 'pending_qc', 'allowed']),
+            SetupDB.end_time == None
+        ).first()
+        
+        # Если есть активная наладка — новая идёт в очередь
+        initial_status = 'queued' if active_setup else 'created'
+
         setup = SetupDB(
             employee_id=payload.employee_id,
             machine_id=payload.machine_id,
             lot_id=lot.id,
             part_id=lot.part_id,
             planned_quantity=payload.planned_quantity,
-            status='created'
+            status=initial_status
         )
         db.add(setup)
         db.flush()  # Flush to get setup.id
