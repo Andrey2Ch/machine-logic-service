@@ -969,13 +969,26 @@ async def save_reading(reading_input: ReadingInput, db: Session = Depends(get_db
                     .filter(BatchDB.current_location == 'production')\
                     .first()
                 
+                # 🔧 ИСПРАВЛЕНО 2026-01-20: Ищем ПРЕДЫДУЩЕЕ показание с этого станка
+                # Не предполагаем что счётчик был на 0 - он мог не сброситься!
+                prev_reading_zero_skip = db.query(ReadingDB.reading)\
+                    .filter(ReadingDB.machine_id == reading_input.machine_id)\
+                    .filter(ReadingDB.created_at < reading_db.created_at)\
+                    .order_by(ReadingDB.created_at.desc())\
+                    .first()
+                
+                baseline = prev_reading_zero_skip[0] if prev_reading_zero_skip else 0
+                actual_batch_quantity = reading_input.value - baseline
+                
+                logger.info(f"Zero skipped: baseline={baseline}, reading={reading_input.value}, batch_qty={actual_batch_quantity}")
+                
                 if not existing_batch:
                     logger.info(f"Creating initial production batch for setup {setup.id} (zero skipped)")
                     new_batch = BatchDB(
                         setup_job_id=setup.id,
                         lot_id=setup.lot_id,
-                        initial_quantity=0, 
-                        current_quantity=reading_input.value, # Текущее кол-во = показаниям
+                        initial_quantity=baseline, 
+                        current_quantity=actual_batch_quantity,  # Разница, а не полное показание!
                         current_location='production',
                         original_location='production',  # Сохраняем исходный статус
                         batch_time=reading_db.created_at,
@@ -985,7 +998,8 @@ async def save_reading(reading_input: ReadingInput, db: Session = Depends(get_db
                     db.add(new_batch)
                 else:
                      logger.warning(f"Found existing production batch {existing_batch.id} when zero was skipped. Updating quantity.")
-                     existing_batch.current_quantity = reading_input.value
+                     existing_batch.current_quantity = actual_batch_quantity  # Разница!
+                     existing_batch.initial_quantity = baseline
                      existing_batch.operator_id = reading_input.operator_id
                      existing_batch.batch_time = reading_db.created_at
 
