@@ -129,12 +129,12 @@ async def create_setup(payload: CreateSetupPayload, db: Session = Depends(get_db
         lot.assigned_machine_id = payload.machine_id
         lot.assigned_order = max_order + 1
 
-        # Перевод лота в производство + фиксация момента создания наладки
-        if lot.status == 'new':
-            lot.status = 'in_production'
-        elif lot.status == 'assigned':
-            # Если лот был assigned, переводим в in_production, так как наладка создана
-            lot.status = 'in_production'
+        # Перевод лота в производство ТОЛЬКО если наладка не в очереди
+        # queued = станок занят другой наладкой → лот остается assigned
+        if initial_status == 'created':
+            if lot.status in ('new', 'assigned'):
+                lot.status = 'in_production'
+        # Если initial_status == 'queued', лот остается assigned
         
         # УБРАНО: start_time НЕ должен устанавливаться при создании наладки!
         # start_time = начало РАБОТЫ (когда станок получает показания и статус -> 'started')
