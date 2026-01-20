@@ -380,7 +380,7 @@ async def send_whatsapp_to_all_enabled_roles(
             (2, 'machinists', False),   # Machinists - группа
             (3, 'admin', False),        # Admin - группа
             (5, 'qa', False),           # QA - группа
-            (7, 'viewer', True),        # Viewer - личные!
+            (7, 'viewer', False),       # Viewer - группа (WHATSAPP_GROUP_VIEWER)
         ]
         
         for role_id, channel, is_personal in roles_config:
