@@ -66,6 +66,11 @@ async def get_lot_analytics(lot_id: int, db: Session = Depends(get_db_session)):
             and batch.parent_batch_id is None  # Только оригинальные батчи, не дочерние
         ]
         
+        # Debug logging
+        logger.info(f"Lot {lot_id}: total batches={len(batches)}, warehouse_batches={len(warehouse_batches)}")
+        for wb in warehouse_batches[:5]:  # First 5 for debugging
+            logger.info(f"  Batch {wb.id}: initial={wb.initial_quantity}, current={wb.current_quantity}, recounted={wb.recounted_quantity}, parent_id={wb.parent_batch_id}")
+        
         # Принято на склад = сумма recounted_quantity (пересчитанное кладовщиком)
         # Если recounted_quantity нет, используем current_quantity как fallback
         total_warehouse_quantity = sum(
@@ -73,9 +78,11 @@ async def get_lot_analytics(lot_id: int, db: Session = Depends(get_db_session)):
             for batch in warehouse_batches
         )
         
-        # Заявлено операторами = сумма current_quantity батчей принятых на склад
+        # Заявлено операторами = сумма initial_quantity батчей принятых на склад
+        # Используем initial_quantity (что оператор заявил изначально), а не current_quantity
+        # т.к. current_quantity может измениться при объединении/разделении батчей
         declared_quantity_at_warehouse_recount = sum(
-            batch.current_quantity or 0
+            batch.initial_quantity or batch.current_quantity or 0
             for batch in warehouse_batches
         )
         
