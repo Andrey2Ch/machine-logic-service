@@ -78,11 +78,11 @@ async def get_lot_analytics(lot_id: int, db: Session = Depends(get_db_session)):
             for batch in warehouse_batches
         )
         
-        # Заявлено операторами = сумма initial_quantity батчей принятых на склад
-        # Используем initial_quantity (что оператор заявил изначально), а не current_quantity
-        # т.к. current_quantity может измениться при объединении/разделении батчей
+        # Заявлено операторами = сумма current_quantity батчей принятых на склад
+        # current_quantity = количество деталей в батче (разница показаний счётчика)
+        # initial_quantity = показание счётчика в НАЧАЛЕ батча (не используем!)
         declared_quantity_at_warehouse_recount = sum(
-            batch.initial_quantity or batch.current_quantity or 0
+            batch.current_quantity or 0
             for batch in warehouse_batches
         )
         
