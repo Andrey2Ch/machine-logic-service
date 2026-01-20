@@ -288,6 +288,9 @@ async def notify_setup_completion(
             return {"success": False, "message": "Наладка не найдена"}
 
         # 2. Отправить в WhatsApp (machine_free уведомление)
+        logger.info(f"=== notify-completion called for setup {setup_id} ===")
+        logger.info(f"WHATSAPP_ENABLED = {WHATSAPP_ENABLED}")
+        
         if WHATSAPP_ENABLED:
             try:
                 wa_message = (
@@ -298,9 +301,10 @@ async def notify_setup_completion(
                     f"Станок готов для новой наладки 🛠"
                 )
                 
+                logger.info(f"Calling send_whatsapp_to_all_enabled_roles for machine_free...")
                 # Отправляем всем включённым ролям для machine_free
                 wa_sent = await send_whatsapp_to_all_enabled_roles(db, wa_message, "machine_free")
-                logger.info(f"WhatsApp уведомления о завершении наладки {setup_id} отправлены ({wa_sent})")
+                logger.info(f"WhatsApp уведомления о завершении наладки {setup_id} отправлены (wa_sent={wa_sent})")
                 
                 return {"success": True, "message": f"WhatsApp уведомления отправлены", "wa_sent": wa_sent}
             except Exception as wa_err:

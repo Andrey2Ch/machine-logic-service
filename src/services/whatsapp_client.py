@@ -237,8 +237,12 @@ async def send_whatsapp_to_role_personal(
         EmployeeDB.whatsapp_phone != ''
     ).all()
     
+    logger.info(f"[PERSONAL] Found {len(employees)} employees with whatsapp_phone for role_id={role_id}")
+    for emp in employees:
+        logger.info(f"  - {emp.full_name}: {emp.whatsapp_phone[:6]}***")
+    
     if not employees:
-        logger.debug(f"No employees with whatsapp_phone for role_id: {role_id}")
+        logger.warning(f"No employees with whatsapp_phone for role_id: {role_id}")
         return 0
     
     # Переводим если нужно
@@ -382,20 +386,23 @@ async def send_whatsapp_to_all_enabled_roles(
         for role_id, channel, is_personal in roles_config:
             # Проверяем включено ли в настройках
             enabled = await is_notification_enabled(db, notification_type, channel)
+            logger.info(f"[{notification_type}] {channel}: enabled={enabled}, is_personal={is_personal}")
             
             if not enabled:
-                logger.debug(f"WhatsApp disabled for {channel} on {notification_type}")
+                logger.info(f"WhatsApp DISABLED for {channel} on {notification_type} - skipping")
                 continue
             
             if is_personal:
                 # Viewer - личные WhatsApp
+                logger.info(f"Sending PERSONAL WhatsApp to {channel} (role_id={role_id})...")
                 sent = await send_whatsapp_to_role_personal(db, role_id, message, notification_type)
+                logger.info(f"PERSONAL WhatsApp sent to {channel}: {sent} messages")
             else:
                 # Группы
                 sent = await send_whatsapp_to_role(db, role_id, message, notification_type=notification_type)
             
             total_sent += sent
-            logger.debug(f"WhatsApp sent to role {channel}: {sent}")
+            logger.info(f"WhatsApp sent to role {channel}: {sent}")
         
         logger.info(f"WhatsApp to all enabled roles for '{notification_type}': {total_sent} total")
         return total_sent
