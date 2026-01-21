@@ -528,6 +528,7 @@ async def recommend_with_queue_analysis(
     cycle_time_sec: Optional[int] = Query(None, description="Время цикла (сек)"),
     part_id: Optional[int] = Query(None, description="ID детали"),
     drawing_number: Optional[str] = Query(None, description="Номер чертежа"),
+    area_ids: Optional[str] = Query(None, description="ID участков через запятую (например: 1,2,3)"),
     db: Session = Depends(get_db_session)
 ):
     """
@@ -570,6 +571,14 @@ async def recommend_with_queue_analysis(
     now_utc = datetime.now(timezone.utc)
     due_days = (target_due_date - now_utc).days
     
+    # Парсим area_ids если переданы
+    parsed_area_ids = []
+    if area_ids:
+        try:
+            parsed_area_ids = [int(x.strip()) for x in area_ids.split(",") if x.strip()]
+        except ValueError:
+            raise HTTPException(status_code=400, detail="area_ids должны быть числами через запятую")
+    
     # 0. Проверяем закрепление детали за станком
     pinned_machine_id = None
     if part_id:
@@ -585,29 +594,69 @@ async def recommend_with_queue_analysis(
         machines_query = text("""
             SELECT 
                 m.id, m.name, m.min_diameter, m.max_diameter,
-                m.max_part_length, m.is_jbs
+                m.max_part_length, m.is_jbs, m.location_id
             FROM machines m
             WHERE m.id = :pinned_id AND m.is_active = true
               AND COALESCE(m.is_operational, true) = true
         """)
         machines = db.execute(machines_query, {"pinned_id": pinned_machine_id}).fetchall()
     else:
-        # Все подходящие по диаметру
-        machines_query = text("""
-            SELECT 
-                m.id, m.name, m.min_diameter, m.max_diameter,
-                m.max_part_length, m.is_jbs
-            FROM machines m
-            WHERE m.is_active = true
-              AND COALESCE(m.is_operational, true) = true
-              AND (m.min_diameter IS NULL OR m.min_diameter <= :diameter)
-              AND (m.max_diameter IS NULL OR m.max_diameter >= :diameter)
-            ORDER BY m.name
-        """)
-        machines = db.execute(machines_query, {"diameter": diameter}).fetchall()
+        # Все подходящие по диаметру (+ фильтр по участкам если указан)
+        if parsed_area_ids:
+            machines_query = text("""
+                SELECT 
+                    m.id, m.name, m.min_diameter, m.max_diameter,
+                    m.max_part_length, m.is_jbs, m.location_id
+                FROM machines m
+                WHERE m.is_active = true
+                  AND COALESCE(m.is_operational, true) = true
+                  AND (m.min_diameter IS NULL OR m.min_diameter <= :diameter)
+                  AND (m.max_diameter IS NULL OR m.max_diameter >= :diameter)
+                  AND m.location_id = ANY(:area_ids)
+                ORDER BY m.name
+            """)
+            machines = db.execute(machines_query, {"diameter": diameter, "area_ids": parsed_area_ids}).fetchall()
+        else:
+            machines_query = text("""
+                SELECT 
+                    m.id, m.name, m.min_diameter, m.max_diameter,
+                    m.max_part_length, m.is_jbs, m.location_id
+                FROM machines m
+                WHERE m.is_active = true
+                  AND COALESCE(m.is_operational, true) = true
+                  AND (m.min_diameter IS NULL OR m.min_diameter <= :diameter)
+                  AND (m.max_diameter IS NULL OR m.max_diameter >= :diameter)
+                ORDER BY m.name
+            """)
+            machines = db.execute(machines_query, {"diameter": diameter}).fetchall()
     
     if not machines:
+        if parsed_area_ids:
+            raise HTTPException(status_code=404, detail="Нет подходящих станков для данного диаметра в выбранных участках")
         raise HTTPException(status_code=404, detail="Нет подходящих станков для данного диаметра")
+    
+    # 1.1 Получаем историю изготовления детали (на каких станках делали раньше)
+    history = {}
+    if part_id or drawing_number:
+        history_query = text("""
+            SELECT 
+                sj.machine_id,
+                COUNT(*) as times_made
+            FROM setup_jobs sj
+            JOIN lots l ON sj.lot_id = l.id
+            JOIN parts p ON l.part_id = p.id
+            WHERE sj.status = 'completed'
+              AND (
+                  (:part_id IS NOT NULL AND p.id = :part_id)
+                  OR (:drawing_number IS NOT NULL AND p.drawing_number = :drawing_number)
+              )
+            GROUP BY sj.machine_id
+        """)
+        history_result = db.execute(history_query, {
+            "part_id": part_id,
+            "drawing_number": drawing_number
+        }).fetchall()
+        history = {row.machine_id: row.times_made for row in history_result}
     
     # 2. Получаем текущие диаметры на станках
     current_setup_query = text("""
@@ -866,6 +915,15 @@ async def recommend_with_queue_analysis(
         
         # Диаметр
         reasons.append(f"✅ Диаметр {diameter}мм подходит ({m.min_diameter or '?'}-{m.max_diameter or '?'})")
+        
+        # История изготовления (бонус до +30 баллов)
+        if m.id in history:
+            times = history[m.id]
+            bonus = min(30, times * 10)  # макс 30 баллов (3+ раза = максимум)
+            score += bonus
+            reasons.append(f"✅ Делали раньше ({times} раз, +{bonus})")
+        else:
+            reasons.append("🆕 Раньше не делали")
         
         # Очередь (используем effective_queue с учётом переналадки)
         if effective_queue == 0:
