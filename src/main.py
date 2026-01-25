@@ -24,6 +24,7 @@ from .routers import cards as cards_router
 from .routers import time_tracking as time_tracking_router
 from .routers import materials as materials_router
 from .routers import drawings as drawings_router
+from .routers import nc_programs as nc_programs_router
 from .routers import morning_dashboard as morning_dashboard_router
 from .routers import planning as planning_router
 from .routers import notification_settings as notification_settings_router
@@ -47,6 +48,10 @@ import httpx
 import aiohttp
 from src.services.notification_service import send_setup_approval_notifications, send_batch_discrepancy_alert
 from src.services.mtconnect_client import sync_counter_to_mtconnect, reset_counter_on_qa_approval
+from src.services.setup_program_handover import (
+    check_setup_program_handover_gate,
+    ensure_setup_program_handover_row,
+)
 from sqlalchemy import func, desc, case, text, or_, and_
 from sqlalchemy.exc import IntegrityError
 from src.services.metrics import install_sql_capture
@@ -1255,6 +1260,13 @@ async def create_setup(setup: SetupInput, db: Session = Depends(get_db_session))
     
     db.add(new_setup)
     db.flush()  # Flush to get new_setup.id
+
+    # Создаём/фиксируем запись гейта (idempotent, safe)
+    try:
+        ensure_setup_program_handover_row(db, next_setup_id=new_setup.id, machine_id=setup.machine_id)
+    except Exception as e:
+        # fail-open: не ломаем создание наладки
+        logger.warning("setup_program_handover init failed (non-critical): %s", e)
     
     # ОБНОВЛЕНИЕ ПРИВЯЗОК ЛОТА: независимо от предыдущего assigned, привязываем к станку, где создана наладка
     # Находим максимальный assigned_order для этого станка
@@ -1337,6 +1349,18 @@ async def approve_setup(
             raise HTTPException(
                 status_code=400,
                 detail=f"Нельзя разрешить наладку в статусе '{setup.status}'. Ожидался статус 'pending_qc' или 'created'"
+            )
+
+        # === Gate: не даём approve обойти send-to-qc / бота / дашборд ===
+        ok, row = check_setup_program_handover_gate(db, next_setup_id=setup.id, machine_id=setup.machine_id)
+        if not ok:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Нельзя разрешить наладку, пока не закрыт гейт по программе предыдущей наладки "
+                    "(confirmed/skip). "
+                    f"(handover_status={row.get('status')}, prev_setup_id={row.get('prev_setup_id')})"
+                ),
             )
 
         qa_employee_check = db.query(EmployeeDB).filter(EmployeeDB.id == payload.qa_id).first()
@@ -5348,6 +5372,7 @@ app.include_router(cards_router.router)
 app.include_router(time_tracking_router.router)
 app.include_router(materials_router.router)
 app.include_router(drawings_router.router)
+app.include_router(nc_programs_router.router)
 app.include_router(morning_dashboard_router.router)
 app.include_router(planning_router.router)
 app.include_router(notification_settings_router.router)

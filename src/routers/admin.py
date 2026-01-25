@@ -14,6 +14,7 @@ from ..models.models import MachineDB, CardDB, SetupDB, LotDB, PartDB, EmployeeD
 from ..services.mtconnect_client import reset_counter_on_qa_approval
 from ..services.telegram_client import send_telegram_message
 from ..services.whatsapp_client import send_whatsapp_to_all_enabled_roles, WHATSAPP_ENABLED
+from ..services.setup_program_handover import check_setup_program_handover_gate, ensure_setup_program_handover_row
 
 # Настройка логгера
 logger = logging.getLogger(__name__)
@@ -118,6 +119,13 @@ async def create_setup(payload: CreateSetupPayload, db: Session = Depends(get_db
         db.add(setup)
         db.flush()  # Flush to get setup.id
 
+        # Создаём/фиксируем запись гейта (idempotent, safe)
+        try:
+            ensure_setup_program_handover_row(db, next_setup_id=setup.id, machine_id=payload.machine_id)
+        except Exception as e:
+            # fail-open: не ломаем создание наладки
+            logger.warning("setup_program_handover init failed (non-critical): %s", e)
+
         # ОБНОВЛЕНИЕ ПРИВЯЗОК ЛОТА: независимо от предыдущего assigned, привязываем к станку, где создана наладка
         # Находим максимальный assigned_order для этого станка
         max_order = db.query(func.max(LotDB.assigned_order)).filter(
@@ -158,6 +166,19 @@ async def send_setup_to_qc(setup_id: int, db: Session = Depends(get_db_session))
             raise HTTPException(status_code=404, detail="Наладка не найдена")
         if setup.status != 'created':
             raise HTTPException(status_code=400, detail=f"Ожидался статус 'created', текущий: '{setup.status}'")
+
+        # === Gate: программа предыдущей наладки должна быть зафиксирована (или skip) ===
+        ok, row = check_setup_program_handover_gate(db, next_setup_id=setup.id, machine_id=setup.machine_id)
+        if not ok:
+            # 409 = конфликт состояния процесса
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Перед отправкой в ОТК нужно зафиксировать программу предыдущей наладки "
+                    "в базе (в дашборде) или пропустить с причиной. "
+                    f"(handover_status={row.get('status')}, prev_setup_id={row.get('prev_setup_id')})"
+                ),
+            )
 
         setup.status = 'pending_qc'
         # фиксируем момент передачи в ОТК
@@ -238,6 +259,18 @@ async def approve_setup(setup_id: int, payload: ApproveSetupPayload, db: Session
             raise HTTPException(status_code=404, detail="Наладка не найдена")
         if setup.status not in ("pending_qc", "created"):
             raise HTTPException(status_code=400, detail=f"Ожидался статус 'pending_qc' или 'created', текущий: '{setup.status}'")
+
+        # === Gate: не даём approve обойти send-to-qc ===
+        ok, row = check_setup_program_handover_gate(db, next_setup_id=setup.id, machine_id=setup.machine_id)
+        if not ok:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Нельзя разрешить наладку, пока не закрыт гейт по программе предыдущей наладки "
+                    "(confirmed/skip). "
+                    f"(handover_status={row.get('status')}, prev_setup_id={row.get('prev_setup_id')})"
+                ),
+            )
 
         setup.status = 'allowed'
         setup.qa_id = payload.qa_id
