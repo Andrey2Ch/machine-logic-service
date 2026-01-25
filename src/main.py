@@ -1753,7 +1753,8 @@ async def complete_setup(setup_id: int, db: Session = Depends(get_db_session)):
             db.rollback()
             raise HTTPException(status_code=500, detail="Database error while completing setup")
 
-        # Отправляем уведомление администраторам
+        # Отправляем уведомления (Telegram + WhatsApp) синхронно, чтобы не терять событие
+        send_summary = None
         try:
             admin_notification = {
                 "type": "setup_completed",
@@ -1769,21 +1770,20 @@ async def complete_setup(setup_id: int, db: Session = Depends(get_db_session)):
             }
             logger.info(f"Prepared admin notification: {admin_notification}")
 
-            # Отправляем уведомление через notification_service
-            asyncio.create_task(send_setup_approval_notifications(
-                db=db, 
-                setup_id=setup.id, 
+            send_summary = await send_setup_approval_notifications(
+                db=db,
+                setup_id=setup.id,
                 notification_type="completion"
-            ))
-            logger.info("Notification task created")
+            )
+            logger.info(f"Notifications for setup {setup.id} summary={send_summary}")
         except Exception as notification_error:
-            logger.error(f"Error preparing notification: {notification_error}")
-            # Не прерываем выполнение, если уведомление не удалось отправить
+            logger.error(f"Error sending completion notifications: {notification_error}", exc_info=True)
 
         logger.info("=== Setup completion successful ===")
         return {
             "success": True,
             "message": "Наладка успешно завершена",
+            "notifications": send_summary,
             "setup": {
                 "id": setup.id,
                 "status": setup.status,

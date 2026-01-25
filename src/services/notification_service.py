@@ -32,6 +32,11 @@ async def send_setup_approval_notifications(db: Session, setup_id: int, notifica
     own_db = SessionLocal()
     try:
         logger.info(f"Fetching data for {notification_type} notification (Setup ID: {setup_id}) using own DB session")
+        summary = {
+            "telegram_sent": 0,
+            "whatsapp_sent": 0,
+            "telegram_targets": 0
+        }
 
         Machinist = aliased(EmployeeDB)
         QAEmployee = aliased(EmployeeDB)
@@ -54,7 +59,7 @@ async def send_setup_approval_notifications(db: Session, setup_id: int, notifica
 
         if not setup:
             logger.error(f"Setup {setup_id} not found for notification.")
-            return False
+            return summary
         
         setup_obj, machine_obj, lot_obj, part_obj, machinist_obj, qa_obj = setup
 
@@ -95,21 +100,26 @@ async def send_setup_approval_notifications(db: Session, setup_id: int, notifica
             operator_message = base_message + "\n\n<i>Наладка завершена, можно приступать к следующей 🛠</i>"
 
         if machinist_obj and machinist_obj.telegram_id:
-            await send_telegram_message(machinist_obj.telegram_id, machinist_message)
+            summary["telegram_targets"] += 1
+            if await send_telegram_message(machinist_obj.telegram_id, machinist_message):
+                summary["telegram_sent"] += 1
 
         # Используем существующие типы из БД
         notif_type = "setup_allowed" if notification_type == "approval" else "setup_completed"
         
-        await _notify_role_by_id_sqlalchemy(
+        admin_counts = await _notify_role_by_id_sqlalchemy(
             own_db, ADMIN_ROLE_ID, admin_message, 
             exclude_id=machinist_obj.id if machinist_obj else None,
             notification_type=notif_type
         )
-        await _notify_role_by_id_sqlalchemy(
+        operator_counts = await _notify_role_by_id_sqlalchemy(
             own_db, OPERATOR_ROLE_ID, operator_message, 
             exclude_id=machinist_obj.id if machinist_obj else None,
             notification_type=notif_type
         )
+        summary["telegram_targets"] += admin_counts["telegram_targets"] + operator_counts["telegram_targets"]
+        summary["telegram_sent"] += admin_counts["telegram_sent"] + operator_counts["telegram_sent"]
+        summary["whatsapp_sent"] += admin_counts["whatsapp_sent"] + operator_counts["whatsapp_sent"]
 
         # 🔔 Если это завершение - уведомляем ВСЕХ наладчиков об освободившемся станке
         if notification_type == "completion":
@@ -121,7 +131,7 @@ async def send_setup_approval_notifications(db: Session, setup_id: int, notifica
                 f"<b>Время:</b> {completion_time}\n\n"
                 f"<i>Станок готов для новой наладки 🛠</i>"
             )
-            await _notify_role_by_id_sqlalchemy(
+            machinist_counts = await _notify_role_by_id_sqlalchemy(
                 own_db, 
                 MACHINIST_ROLE_ID, 
                 free_machine_message, 
@@ -129,25 +139,47 @@ async def send_setup_approval_notifications(db: Session, setup_id: int, notifica
                 notification_type="machine_free"
             )
             # Операторам тоже
-            await _notify_role_by_id_sqlalchemy(
+            operator_free_counts = await _notify_role_by_id_sqlalchemy(
                 own_db, 
                 OPERATOR_ROLE_ID, 
                 free_machine_message, 
                 notification_type="machine_free"
             )
             # Viewer - личные (TG + WhatsApp)
-            await _notify_viewer_personal(own_db, free_machine_message, notification_type="machine_free")
+            viewer_free_counts = await _notify_viewer_personal(own_db, free_machine_message, notification_type="machine_free")
+            summary["telegram_targets"] += (
+                machinist_counts["telegram_targets"]
+                + operator_free_counts["telegram_targets"]
+                + viewer_free_counts["telegram_targets"]
+            )
+            summary["telegram_sent"] += (
+                machinist_counts["telegram_sent"]
+                + operator_free_counts["telegram_sent"]
+                + viewer_free_counts["telegram_sent"]
+            )
+            summary["whatsapp_sent"] += (
+                machinist_counts["whatsapp_sent"]
+                + operator_free_counts["whatsapp_sent"]
+                + viewer_free_counts["whatsapp_sent"]
+            )
             logger.info(f"Sent 'machine free' notification to machinists + operators + viewers for machine {machine_name}")
 
         # 🔔 Уведомляем Viewer'ов (личные TG + личные WhatsApp)
-        await _notify_viewer_personal(own_db, base_message, notification_type=notif_type)
+        viewer_counts = await _notify_viewer_personal(own_db, base_message, notification_type=notif_type)
+        summary["telegram_targets"] += viewer_counts["telegram_targets"]
+        summary["telegram_sent"] += viewer_counts["telegram_sent"]
+        summary["whatsapp_sent"] += viewer_counts["whatsapp_sent"]
         
-        logger.info(f"Successfully processed {notification_type} notifications for setup {setup_id}")
-        return True
+        logger.info(f"Successfully processed {notification_type} notifications for setup {setup_id}: {summary}")
+        return summary
 
     except Exception as e:
         logger.error(f"Error sending {notification_type} notifications for setup {setup_id}: {e}", exc_info=True)
-        return False
+        return {
+            "telegram_sent": 0,
+            "whatsapp_sent": 0,
+            "telegram_targets": 0
+        }
     finally:
         own_db.close()
         logger.debug(f"Closed own DB session for {notification_type} notification")
@@ -170,13 +202,16 @@ async def _notify_role_by_id_sqlalchemy(
             query = query.filter(EmployeeDB.id != exclude_id)
             
         employees = query.all()
+        tg_sent = 0
+        wa_sent = 0
 
         logger.debug(f"Found {len(employees)} active employees with role_id '{role_id}' and Telegram ID to notify.")
 
         for emp in employees:
             if emp.telegram_id:
                  logger.debug(f"Sending notification to role_id {role_id}: {emp.full_name} (ID: {emp.id}, TG_ID: {emp.telegram_id})")
-                 await send_telegram_message(emp.telegram_id, message)
+                 if await send_telegram_message(emp.telegram_id, message):
+                     tg_sent += 1
 
         # 🔔 Дублируем в WhatsApp группу (с переводом если настроено)
         if WHATSAPP_ENABLED:
@@ -189,8 +224,19 @@ async def _notify_role_by_id_sqlalchemy(
             except Exception as wa_err:
                 logger.warning(f"WhatsApp send failed (non-critical): {wa_err}")
 
+        return {
+            "telegram_sent": tg_sent,
+            "whatsapp_sent": wa_sent,
+            "telegram_targets": len(employees)
+        }
+
     except Exception as e:
         logger.error(f"Failed to notify role_id '{role_id}': {e}", exc_info=True)
+        return {
+            "telegram_sent": 0,
+            "whatsapp_sent": 0,
+            "telegram_targets": 0
+        }
 
 
 async def _notify_viewer_personal(
@@ -217,14 +263,15 @@ async def _notify_viewer_personal(
         for emp in employees:
             if emp.telegram_id:
                 try:
-                    await send_telegram_message(emp.telegram_id, message)
-                    tg_sent += 1
+                    if await send_telegram_message(emp.telegram_id, message):
+                        tg_sent += 1
                 except Exception as tg_err:
                     logger.warning(f"Failed to send TG to viewer {emp.full_name}: {tg_err}")
         
         logger.info(f"Telegram sent to {tg_sent}/{len(employees)} viewers")
         
         # WhatsApp личка (с переводом)
+        wa_sent = 0
         if WHATSAPP_ENABLED:
             wa_sent = await send_whatsapp_to_role_personal(
                 db, VIEWER_ROLE_ID, message,
@@ -233,9 +280,20 @@ async def _notify_viewer_personal(
             logger.info(f"WhatsApp personal sent to {wa_sent} viewers for '{notification_type}'")
         else:
             logger.debug("WhatsApp disabled, skipping viewer personal messages")
+
+        return {
+            "telegram_sent": tg_sent,
+            "whatsapp_sent": wa_sent,
+            "telegram_targets": len(employees)
+        }
             
     except Exception as e:
         logger.error(f"Failed to notify viewers: {e}", exc_info=True)
+        return {
+            "telegram_sent": 0,
+            "whatsapp_sent": 0,
+            "telegram_targets": 0
+        }
 
 
 async def _notify_whatsapp_only(
