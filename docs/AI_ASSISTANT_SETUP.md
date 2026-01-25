@@ -5,7 +5,8 @@
 ### 1. База знаний (Knowledge Base)
 
 **Файлы:**
-- `isramat-dashboard/src/lib/ai-assistant/knowledge/schema/tables.json` — описание всех таблиц БД
+- `machine-logic-service/src/text2sql/docs/schema_docs.md` — **единый источник правды по схеме БД для AI** (отдаётся через `/ai/schema-docs`)
+- `isramat-dashboard/src/lib/ai-assistant/knowledge/schema/tables.json` — дополнительная статическая справка (может отставать)
 - `isramat-dashboard/src/lib/ai-assistant/knowledge/domain/glossary.md` — глоссарий терминов
 - `isramat-dashboard/src/lib/ai-assistant/knowledge/domain/workflows.md` — бизнес-процессы
 
@@ -43,6 +44,7 @@
 - Поддержка Claude Sonnet 4 и GPT-4o
 - RAG: автоматический поиск релевантных документов
 - Автоматическое выполнение SQL из ответа
+- **Схема БД подтягивается из MLS**: `/ai/schema-docs` (с кешированием по `/ai/schema-docs-info`)
 
 ### 5. UI Чата
 
@@ -143,11 +145,21 @@ python scripts/load_ai_knowledge.py
 
 ### System Prompt
 
-В файле `isramat-dashboard/src/app/api/ai/chat/route.ts` находится `SYSTEM_PROMPT` с описанием:
-- Схемы БД
+В файле `isramat-dashboard/src/app/api/ai/chat/route.ts` системный промпт включает:
+- **Схему БД (подгружается из MLS `/ai/schema-docs`)**
 - Ключевых формул
 - Статусов и их значений
 - Правил ответа
+
+### ВАЖНО: изменения БД и “знание схемы” у AI
+
+Если меняешь БД (новые таблицы/колонки/индексы/миграции), нужно обновить **сразу**:
+
+1) **Миграции** в `machine-logic-service/migrations/*.sql`  
+2) **Schema docs для AI**: `machine-logic-service/src/text2sql/docs/schema_docs.md`  
+   - либо вручную
+   - либо через генератор (см. `machine-logic-service/src/text2sql/scripts/generate_schema_docs_from_prisma.py` / `.../generate_schema_docs.py`)
+3) **Деплой MLS** (чтобы `/ai/schema-docs` отдавал новую схему)
 
 ### RAG параметры
 

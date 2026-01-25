@@ -227,3 +227,72 @@
 | description | character varying | YES |  |
 | created_at | timestamp without time zone | YES |  |
 
+## setup_program_handover
+
+Таблица для **гейта “программа предыдущей наладки”**.
+
+| column | type | nullable | description |
+|---|---|---|---|
+| id | bigint | NO | Primary key |
+| next_setup_id | integer | NO | ID “новой” наладки (setup_jobs.id), уникально |
+| prev_setup_id | integer | YES | ID “предыдущей” наладки на станке (setup_jobs.id) |
+| status | text | NO | pending / confirmed / skipped / not_required |
+| skip_reason | text | YES | Причина пропуска (если skipped) |
+| decided_by_employee_id | integer | YES | Кто подтвердил/пропустил (employees.id) |
+| decided_at | timestamp without time zone | YES | Когда подтвердил/пропустил |
+| created_at | timestamp without time zone | NO | Когда создана запись |
+
+## file_blobs
+
+Файловые блобы (хранилище на Railway Volume). **Файл НЕ хранится в Postgres**, тут только метадата + ключ пути.
+
+| column | type | nullable | description |
+|---|---|---|---|
+| id | bigint | NO | Primary key |
+| sha256 | character varying | NO | Хеш содержимого (dedup) |
+| size_bytes | bigint | NO | Размер файла в байтах |
+| storage_key | text | NO | Путь на volume, например `blobs/<sha256>` |
+| original_filename | text | YES | Оригинальное имя файла |
+| mime_type | text | YES | MIME тип (если известен) |
+| created_at | timestamp without time zone | NO | Когда blob добавлен |
+
+## nc_programs
+
+Логическая “программа” для детали (part) и типа станка.
+
+| column | type | nullable | description |
+|---|---|---|---|
+| id | bigint | NO | Primary key |
+| part_id | integer | NO | parts.id |
+| machine_type | character varying | NO | Тип станка/контроллера (MVP: строка) |
+| program_kind | character varying | NO | Вид программы (MVP: строка) |
+| title | text | YES | Название/метка |
+| comment | text | YES | Комментарий |
+| created_by_employee_id | integer | YES | employees.id |
+| created_at | timestamp without time zone | NO | Когда создана |
+
+## nc_program_revisions
+
+Ревизии программы. **Для MVP “последняя ревизия = текущая”** (берём max(rev_number)).
+
+| column | type | nullable | description |
+|---|---|---|---|
+| id | bigint | NO | Primary key |
+| program_id | bigint | NO | nc_programs.id |
+| rev_number | integer | NO | Номер ревизии (1..N) |
+| note | text | YES | Комментарий к ревизии |
+| created_by_employee_id | integer | YES | employees.id |
+| created_at | timestamp without time zone | NO | Когда создана ревизия |
+
+## nc_program_revision_files
+
+Файлы ревизии. **Swiss-type требование:** на одну ревизию 2 файла: `role=main` и `role=sub` (без ZIP).
+
+| column | type | nullable | description |
+|---|---|---|---|
+| id | bigint | NO | Primary key |
+| revision_id | bigint | NO | nc_program_revisions.id |
+| file_id | bigint | NO | file_blobs.id |
+| role | character varying | NO | main / sub |
+| created_at | timestamp without time zone | NO | Когда привязали файл |
+
