@@ -50,6 +50,33 @@ def _ensure_program_exists(db: Session, program_id: int) -> Dict[str, Any]:
     return dict(row)
 
 
+@router.get("/parts/resolve", summary="Найти деталь по drawing_number (семейство)")
+def resolve_part_by_drawing_number(
+    drawing_number: str,
+    db: Session = Depends(get_db_session),
+):
+    """
+    Resolve Part ID(s) by drawing_number.
+
+    Note: drawing_number in your system is the family number (e.g. "1002-11").
+    """
+    dn = (drawing_number or "").strip()
+    if not dn:
+        raise HTTPException(status_code=400, detail="drawing_number обязателен")
+
+    rows = db.execute(
+        text("""
+            select id, drawing_number, description
+            from parts
+            where drawing_number = :drawing_number
+            order by id asc
+        """),
+        {"drawing_number": dn},
+    ).mappings().all()
+
+    return {"drawing_number": dn, "parts": [dict(r) for r in rows]}
+
+
 @router.get("/parts/{part_id}/list", summary="Список CNC программ по детали (последняя ревизия = текущая)")
 def list_programs_for_part(
     part_id: int,
@@ -353,6 +380,64 @@ async def upload_revision(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Ошибка загрузки ревизии: {e}")
+
+
+@router.get("/programs/{program_id}/revisions", summary="Список ревизий программы (история)")
+def list_program_revisions(
+    program_id: int,
+    db: Session = Depends(get_db_session),
+):
+    """
+    Returns all revisions for a program with their files (main/sub) and sha256.
+    """
+    _ensure_program_exists(db, program_id)
+
+    rows = db.execute(
+        text("""
+            select
+                r.id as revision_id,
+                r.rev_number,
+                r.note,
+                r.created_at,
+                rf.role as file_role,
+                fb.id as file_id,
+                fb.sha256,
+                fb.size_bytes,
+                fb.original_filename
+            from nc_program_revisions r
+            left join nc_program_revision_files rf on rf.revision_id = r.id
+            left join file_blobs fb on fb.id = rf.file_id
+            where r.program_id = :program_id
+            order by r.rev_number asc, rf.role asc
+        """),
+        {"program_id": program_id},
+    ).mappings().all()
+
+    out: Dict[int, Dict[str, Any]] = {}
+    for row in rows:
+        rid = int(row["revision_id"])
+        rev = out.get(rid)
+        if not rev:
+            rev = {
+                "revision_id": rid,
+                "rev_number": int(row["rev_number"]),
+                "note": row["note"],
+                "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+                "files": {"main": None, "sub": None},
+            }
+            out[rid] = rev
+
+        if row["file_role"] and row["file_id"] and row["sha256"]:
+            role = row["file_role"]
+            if role in ("main", "sub"):
+                rev["files"][role] = {
+                    "file_id": int(row["file_id"]),
+                    "sha256": row["sha256"],
+                    "size_bytes": int(row["size_bytes"]) if row["size_bytes"] is not None else None,
+                    "original_filename": row["original_filename"],
+                }
+
+    return {"program_id": program_id, "revisions": list(out.values())}
 
 
 @router.get("/revisions/{revision_id}/files/{role}", summary="Скачать файл ревизии (main/sub)")
