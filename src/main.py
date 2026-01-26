@@ -1350,18 +1350,8 @@ async def approve_setup(
                 status_code=400,
                 detail=f"Нельзя разрешить наладку в статусе '{setup.status}'. Ожидался статус 'pending_qc' или 'created'"
             )
-
-        # === Gate: не даём approve обойти send-to-qc / бота / дашборд ===
-        ok, row = check_setup_program_handover_gate(db, next_setup_id=setup.id, machine_id=setup.machine_id)
-        if not ok:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "Нельзя разрешить наладку, пока не закрыт гейт по программе предыдущей наладки "
-                    "(confirmed/skip). "
-                    f"(handover_status={row.get('status')}, prev_setup_id={row.get('prev_setup_id')})"
-                ),
-            )
+        # Гейт блокируем ТОЛЬКО на этапе send-to-qc.
+        # Если наладка уже в pending_qc, блокировать approve — поздно и приводит к дедлокам.
 
         qa_employee_check = db.query(EmployeeDB).filter(EmployeeDB.id == payload.qa_id).first()
         if not qa_employee_check:

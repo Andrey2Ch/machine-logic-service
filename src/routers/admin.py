@@ -259,18 +259,8 @@ async def approve_setup(setup_id: int, payload: ApproveSetupPayload, db: Session
             raise HTTPException(status_code=404, detail="Наладка не найдена")
         if setup.status not in ("pending_qc", "created"):
             raise HTTPException(status_code=400, detail=f"Ожидался статус 'pending_qc' или 'created', текущий: '{setup.status}'")
-
-        # === Gate: не даём approve обойти send-to-qc ===
-        ok, row = check_setup_program_handover_gate(db, next_setup_id=setup.id, machine_id=setup.machine_id)
-        if not ok:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "Нельзя разрешить наладку, пока не закрыт гейт по программе предыдущей наладки "
-                    "(confirmed/skip). "
-                    f"(handover_status={row.get('status')}, prev_setup_id={row.get('prev_setup_id')})"
-                ),
-            )
+        # Гейт блокируем ТОЛЬКО на этапе send-to-qc.
+        # Если наладка уже в pending_qc, блокировать approve — поздно и приводит к дедлокам.
 
         setup.status = 'allowed'
         setup.qa_id = payload.qa_id
