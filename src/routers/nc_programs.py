@@ -64,17 +64,68 @@ def resolve_part_by_drawing_number(
     if not dn:
         raise HTTPException(status_code=400, detail="drawing_number обязателен")
 
+    # Try exact first, then prefix match for variants:
+    # - if catalog stores "1002-11-1" but request is "1002-11", we still want to resolve.
+    # - we keep it deterministic: exact matches first, then prefix matches.
     rows = db.execute(
         text("""
             select id, drawing_number, description
             from parts
-            where drawing_number = :drawing_number
-            order by id asc
+            where trim(drawing_number) = :drawing_number
+               or trim(drawing_number) like :drawing_prefix
+            order by
+                case when trim(drawing_number) = :drawing_number then 0 else 1 end,
+                id asc
         """),
-        {"drawing_number": dn},
+        {"drawing_number": dn, "drawing_prefix": f"{dn}-%"},
     ).mappings().all()
 
     return {"drawing_number": dn, "parts": [dict(r) for r in rows]}
+
+
+@router.post("/parts/ensure", summary="Создать (или получить) деталь по drawing_number")
+def ensure_part_by_drawing_number(
+    drawing_number: str = Form(...),
+    description: Optional[str] = Form(None),
+    db: Session = Depends(get_db_session),
+):
+    """
+    Idempotent: creates a minimal Part row if it doesn't exist yet.
+    In your schema the only required field is parts.drawing_number.
+    """
+    dn = (drawing_number or "").strip()
+    if not dn:
+        raise HTTPException(status_code=400, detail="drawing_number обязателен")
+
+    try:
+        created = db.execute(
+            text("""
+                insert into parts (drawing_number, description, created_at)
+                values (:drawing_number, :description, now())
+                on conflict (drawing_number) do nothing
+                returning id
+            """),
+            {"drawing_number": dn, "description": description},
+        ).fetchone()
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Ошибка создания детали: {e}")
+
+    if created and getattr(created, "id", None):
+        part_id = int(created.id)
+        was_created = True
+    else:
+        row = db.execute(
+            text("select id from parts where drawing_number = :drawing_number limit 1"),
+            {"drawing_number": dn},
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=500, detail="Не удалось создать/получить деталь")
+        part_id = int(row.id)
+        was_created = False
+
+    return {"part_id": part_id, "drawing_number": dn, "created": was_created}
 
 
 @router.get("/parts/{part_id}/list", summary="Список CNC программ по детали (последняя ревизия = текущая)")
