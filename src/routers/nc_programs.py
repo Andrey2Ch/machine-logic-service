@@ -126,8 +126,39 @@ class RevisionTextPayload(BaseModel):
     created_by_employee_id: Optional[int] = None
 
 
+class NcProgramVaultSettingsPayload(BaseModel):
+    default_history_limit: int
+    updated_by_employee_id: Optional[int] = None
+
+
+class NcMachineTypeProfilePayload(BaseModel):
+    channels: List[Dict[str, str]]
+    updated_by_employee_id: Optional[int] = None
+
+
 def _sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _get_default_history_limit(db: Session) -> int:
+    row = db.execute(
+        text(
+            """
+            select value
+            from app_settings
+            where key = 'nc_program_vault.default_history_limit'
+            limit 1
+            """
+        )
+    ).fetchone()
+    if not row:
+        return 5
+    val = getattr(row, "value", None)
+    try:
+        n = int(val)
+        return max(1, min(100, n))
+    except Exception:
+        return 5
 
 
 def _ensure_program_exists(db: Session, program_id: int) -> Dict[str, Any]:
@@ -221,6 +252,121 @@ def ensure_part_by_drawing_number(
         was_created = False
 
     return {"part_id": part_id, "drawing_number": dn, "created": was_created}
+
+
+@router.get("/settings", summary="Настройки Program Vault (public)")
+def get_nc_program_vault_settings(db: Session = Depends(get_db_session)):
+    return {"default_history_limit": _get_default_history_limit(db)}
+
+
+@router.put("/settings", summary="Обновить настройки Program Vault")
+def update_nc_program_vault_settings(payload: NcProgramVaultSettingsPayload, db: Session = Depends(get_db_session)):
+    limit = int(payload.default_history_limit)
+    if limit < 1 or limit > 100:
+        raise HTTPException(status_code=400, detail="default_history_limit должен быть в диапазоне 1..100")
+
+    try:
+        db.execute(
+            text(
+                """
+                insert into app_settings (key, value, updated_at, updated_by_employee_id)
+                values ('nc_program_vault.default_history_limit', to_jsonb(:limit), now(), :updated_by)
+                on conflict (key) do update
+                set value = excluded.value,
+                    updated_at = excluded.updated_at,
+                    updated_by_employee_id = excluded.updated_by_employee_id
+                """
+            ),
+            {"limit": limit, "updated_by": payload.updated_by_employee_id},
+        )
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Ошибка сохранения настроек: {e}")
+
+    return {"default_history_limit": limit}
+
+
+@router.get("/profiles", summary="Список профилей каналов по machine_type")
+def list_nc_machine_type_profiles(db: Session = Depends(get_db_session)):
+    rows = db.execute(
+        text(
+            """
+            select machine_type, channels, created_at, updated_at
+            from nc_machine_type_profiles
+            order by machine_type asc
+            """
+        )
+    ).mappings().all()
+    return {"profiles": [dict(r) for r in rows]}
+
+
+@router.put("/profiles/{machine_type}", summary="Создать/обновить профиль каналов для machine_type")
+def upsert_nc_machine_type_profile(
+    machine_type: str,
+    payload: NcMachineTypeProfilePayload,
+    db: Session = Depends(get_db_session),
+):
+    mt = (machine_type or "").strip()
+    if not mt:
+        raise HTTPException(status_code=400, detail="machine_type обязателен")
+
+    # Basic validation for channels payload.
+    channels_in = payload.channels or []
+    normalized: List[Dict[str, str]] = []
+    seen: set[str] = set()
+    for c in channels_in:
+        if not isinstance(c, dict):
+            continue
+        key = _normalize_channel_key(str(c.get("key") or ""))
+        label = str(c.get("label") or key)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        normalized.append({"key": key, "label": label})
+
+    if not normalized:
+        raise HTTPException(status_code=400, detail="channels должен содержать хотя бы один канал")
+
+    try:
+        db.execute(
+            text(
+                """
+                insert into nc_machine_type_profiles (machine_type, channels, created_at, updated_at)
+                values (:machine_type, :channels::jsonb, now(), now())
+                on conflict (machine_type) do update
+                set channels = excluded.channels,
+                    updated_at = now()
+                """
+            ),
+            {"machine_type": mt, "channels": json.dumps(normalized)},
+        )
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Ошибка сохранения профиля: {e}")
+
+    return {"machine_type": mt, "channels": normalized}
+
+
+@router.delete("/profiles/{machine_type}", summary="Удалить профиль каналов для machine_type")
+def delete_nc_machine_type_profile(machine_type: str, db: Session = Depends(get_db_session)):
+    mt = (machine_type or "").strip()
+    if not mt:
+        raise HTTPException(status_code=400, detail="machine_type обязателен")
+
+    try:
+        res = db.execute(
+            text("delete from nc_machine_type_profiles where machine_type = :machine_type"),
+            {"machine_type": mt},
+        )
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Ошибка удаления профиля: {e}")
+
+    # res.rowcount may be None depending on driver; don't hard fail.
+    return {"ok": True, "machine_type": mt}
 
 
 @router.get("/parts/{part_id}/list", summary="Список CNC программ по детали (последняя ревизия = текущая)")
