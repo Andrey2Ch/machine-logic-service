@@ -13,6 +13,7 @@ Swiss-type requirement:
 import hashlib
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -28,7 +29,14 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/nc-programs", tags=["NC Programs"])
 
-PROGRAMS_DIR = Path("/app/programs")
+# IMPORTANT (Railway Volume):
+# Drawings are stored on a Volume mounted at /app/drawings.
+# To avoid losing NC blobs on container restarts, store them under the same Volume by default:
+#   /app/drawings/programs/blobs/<sha256>
+#
+# You can override base dir via PROGRAM_VAULT_DIR if needed.
+PROGRAM_VAULT_BASE_DIR = Path(os.environ.get("PROGRAM_VAULT_DIR") or "/app/drawings")
+PROGRAMS_DIR = PROGRAM_VAULT_BASE_DIR / "programs"
 BLOBS_DIR = PROGRAMS_DIR / "blobs"
 BLOBS_DIR.mkdir(parents=True, exist_ok=True)
 
