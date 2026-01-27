@@ -689,12 +689,28 @@ GROUP BY current_location
 |---|---|---|---|
 | id | bigint | NO | Primary key |
 | part_id | integer | NO | parts.id |
-| machine_type | character varying | NO | Тип станка/контроллера (MVP: строка) |
-| program_kind | character varying | NO | Вид программы (MVP: строка) |
+| machine_type | character varying | NO | **Папка/тип станка** (например SR20/SR22/...). Это ключ для профиля каналов и “проводника” программ. |
+| program_kind | character varying | NO | Вид программы (служебное поле, в UI скрыто; на будущее) |
 | title | text | YES | Название/метка |
 | comment | text | YES | Комментарий |
 | created_by_employee_id | integer | YES | employees.id |
 | created_at | timestamp without time zone | NO | Когда создана |
+
+## nc_machine_type_profiles
+
+Профили каналов программ по `machine_type` (сколько файлов в ревизии и как они называются в UI).
+
+Примеры:
+- Swiss: `[{key:'ch1', label:'main'}, {key:'ch2', label:'sub'}]`
+- Citizen (1 файл): `[{key:'nc', label:'program'}]`
+- 3 канала: `[{key:'ch1', label:'ch1'}, {key:'ch2', label:'ch2'}, {key:'ch3', label:'ch3'}]`
+
+| column | type | nullable | description |
+|---|---|---|---|
+| machine_type | text | NO | Primary key, совпадает с nc_programs.machine_type |
+| channels | jsonb | NO | JSON array `{key,label}`; ключи: `ch1/ch2/ch3/...` или `nc` |
+| created_at | timestamp without time zone | NO | Когда создано |
+| updated_at | timestamp without time zone | NO | Когда обновлено |
 
 ## nc_program_revisions
 
@@ -711,13 +727,17 @@ GROUP BY current_location
 
 ## nc_program_revision_files
 
-Файлы ревизии. **Swiss-type требование:** на одну ревизию 2 файла: `role=main` и `role=sub` (без ZIP).
+Файлы (каналы) ревизии.
+
+Важно:
+- `role` используется как **ключ канала**: `ch1/ch2/ch3/...` или `nc` (single-file).
+- Для обратной совместимости в БД могут встречаться `main/sub`, но API нормализует их в `ch1/ch2`.
 
 | column | type | nullable | description |
 |---|---|---|---|
 | id | bigint | NO | Primary key |
 | revision_id | bigint | NO | nc_program_revisions.id |
 | file_id | bigint | NO | file_blobs.id |
-| role | character varying | NO | main / sub |
+| role | character varying | NO | channel_key: `ch1/ch2/ch3/...` или `nc` (legacy: main/sub) |
 | created_at | timestamp without time zone | NO | Когда привязали файл |
 

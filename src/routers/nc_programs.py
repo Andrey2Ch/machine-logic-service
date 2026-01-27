@@ -11,12 +11,14 @@ Swiss-type requirement:
 """
 
 import hashlib
+import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse, PlainTextResponse
+from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -29,6 +31,99 @@ router = APIRouter(prefix="/nc-programs", tags=["NC Programs"])
 PROGRAMS_DIR = Path("/app/programs")
 BLOBS_DIR = PROGRAMS_DIR / "blobs"
 BLOBS_DIR.mkdir(parents=True, exist_ok=True)
+
+# ------------------------------------------------------------
+# Channel model (v2)
+#
+# We use "role" column in nc_program_revision_files as a channel key:
+# - legacy (already stored in DB): main/sub
+# - new: ch1/ch2/ch3/... and nc (single-file)
+#
+# API returns normalized channel keys:
+# - main -> ch1
+# - sub  -> ch2
+# ------------------------------------------------------------
+
+LEGACY_TO_CHANNEL: Dict[str, str] = {"main": "ch1", "sub": "ch2"}
+CHANNEL_TO_LEGACY: Dict[str, str] = {"ch1": "main", "ch2": "sub"}
+
+
+def _normalize_channel_key(key: str) -> str:
+    k = (key or "").strip().lower()
+    return LEGACY_TO_CHANNEL.get(k, k)
+
+
+def _candidates_for_role_or_channel(key: str) -> List[str]:
+    """
+    For DB lookups we accept both legacy and new keys.
+    """
+    k = (key or "").strip().lower()
+    n = _normalize_channel_key(k)
+    candidates = []
+    if k:
+        candidates.append(k)
+    if n and n not in candidates:
+        candidates.append(n)
+    legacy = CHANNEL_TO_LEGACY.get(n)
+    if legacy and legacy not in candidates:
+        candidates.append(legacy)
+    return candidates
+
+
+def _default_profile_channels() -> List[Dict[str, str]]:
+    # Shop default for Swiss-like machines: ch1=main, ch2=sub
+    return [{"key": "ch1", "label": "main"}, {"key": "ch2", "label": "sub"}]
+
+
+def _load_machine_type_profile(db: Session, machine_type: str) -> List[Dict[str, str]]:
+    mt = (machine_type or "").strip()
+    if not mt:
+        return _default_profile_channels()
+
+    row = db.execute(
+        text(
+            """
+            select channels
+            from nc_machine_type_profiles
+            where machine_type = :machine_type
+            limit 1
+            """
+        ),
+        {"machine_type": mt},
+    ).fetchone()
+    if not row:
+        return _default_profile_channels()
+
+    channels = row.channels
+    if not isinstance(channels, list):
+        return _default_profile_channels()
+
+    out: List[Dict[str, str]] = []
+    for c in channels:
+        if not isinstance(c, dict):
+            continue
+        key = _normalize_channel_key(str(c.get("key") or ""))
+        label = str(c.get("label") or key)
+        if not key:
+            continue
+        out.append({"key": key, "label": label})
+    return out or _default_profile_channels()
+
+
+def _required_channel_keys(profile_channels: List[Dict[str, str]]) -> List[str]:
+    keys: List[str] = []
+    for c in profile_channels or []:
+        k = _normalize_channel_key(str(c.get("key") or ""))
+        if k and k not in keys:
+            keys.append(k)
+    return keys or ["ch1", "ch2"]
+
+
+class RevisionTextPayload(BaseModel):
+    # channels: {"ch1": "O0001...\n...", "ch2": "..."}  OR legacy {"main": "...", "sub": "..."}
+    channels: Dict[str, str]
+    note: Optional[str] = None
+    created_by_employee_id: Optional[int] = None
 
 
 def _sha256_hex(data: bytes) -> str:
@@ -179,12 +274,24 @@ def list_programs_for_part(
         params,
     ).mappings().all()
 
-    # Assemble into { program -> current_revision -> files{main,sub} }
+    # Preload machine_type profiles (small count: per part)
+    machine_types: List[str] = []
+    for r in rows:
+        mt = (r.get("machine_type") or "").strip()
+        if mt and mt not in machine_types:
+            machine_types.append(mt)
+    profiles_by_machine_type: Dict[str, List[Dict[str, str]]] = {
+        mt: _load_machine_type_profile(db, mt) for mt in machine_types
+    }
+
+    # Assemble into { program -> current_revision -> files{ch1,ch2,...} }
     out: Dict[int, Dict[str, Any]] = {}
     for row in rows:
         pid = int(row["program_id"])
         prog = out.get(pid)
         if not prog:
+            mt = row["machine_type"]
+            profile_channels = profiles_by_machine_type.get((mt or "").strip()) or _default_profile_channels()
             prog = {
                 "program_id": pid,
                 "part_id": row["part_id"],
@@ -192,6 +299,7 @@ def list_programs_for_part(
                 "program_kind": row["program_kind"],
                 "title": row["title"],
                 "comment": row["comment"],
+                "channels_profile": profile_channels,
                 "current_revision": None,
             }
             out[pid] = prog
@@ -200,25 +308,33 @@ def list_programs_for_part(
             continue
 
         if prog["current_revision"] is None:
+            required_keys = _required_channel_keys(prog.get("channels_profile") or _default_profile_channels())
             prog["current_revision"] = {
                 "revision_id": int(row["revision_id"]),
                 "rev_number": int(row["rev_number"]),
                 "note": row["revision_note"],
                 "created_at": row["revision_created_at"].isoformat() if row["revision_created_at"] else None,
-                "files": {"main": None, "sub": None},
+                "files": {k: None for k in required_keys},
             }
 
         if row["file_role"] and row["file_id"]:
-            role = row["file_role"]
-            if role in ("main", "sub"):
-                prog["current_revision"]["files"][role] = {
+            channel_key = _normalize_channel_key(row["file_role"])
+            # If file contains extra channels beyond profile, keep it too.
+            if channel_key and channel_key not in prog["current_revision"]["files"]:
+                prog["current_revision"]["files"][channel_key] = None
+            if channel_key:
+                prog["current_revision"]["files"][channel_key] = {
                     "file_id": int(row["file_id"]),
                     "sha256": row["sha256"],
                     "size_bytes": int(row["size_bytes"]) if row["size_bytes"] is not None else None,
                     "original_filename": row["original_filename"],
                 }
 
-    return {"part_id": part_id, "programs": list(out.values())}
+    return {
+        "part_id": part_id,
+        "programs": list(out.values()),
+        "profiles_by_machine_type": profiles_by_machine_type,
+    }
 
 
 @router.post("/parts/{part_id}/create", summary="Создать (или получить) CNC программу по детали + machine_type")
@@ -298,7 +414,11 @@ async def upload_revision(
     db: Session = Depends(get_db_session),
 ):
     """
-    Creates new revision with two files (main, sub).
+    Legacy upload endpoint (2 files: main/sub).
+
+    We store files as channels:
+    - main -> ch1
+    - sub  -> ch2
     No ZIP. Files are stored separately and linked via role.
     """
     _ensure_program_exists(db, program_id)
@@ -407,14 +527,14 @@ async def upload_revision(
                 insert into nc_program_revision_files (revision_id, file_id, role)
                 values (:revision_id, :file_id, :role)
             """),
-            {"revision_id": revision_id, "file_id": int(main_file_id.id), "role": "main"},
+            {"revision_id": revision_id, "file_id": int(main_file_id.id), "role": "ch1"},
         )
         db.execute(
             text("""
                 insert into nc_program_revision_files (revision_id, file_id, role)
                 values (:revision_id, :file_id, :role)
             """),
-            {"revision_id": revision_id, "file_id": int(sub_file_id.id), "role": "sub"},
+            {"revision_id": revision_id, "file_id": int(sub_file_id.id), "role": "ch2"},
         )
 
         db.commit()
@@ -424,8 +544,274 @@ async def upload_revision(
             "program_id": program_id,
             "revision_id": revision_id,
             "rev_number": rev_number,
-            "files": {"main_sha256": main_sha, "sub_sha256": sub_sha},
+            "files": {"ch1_sha256": main_sha, "ch2_sha256": sub_sha},
         }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Ошибка загрузки ревизии: {e}")
+
+
+@router.post("/programs/{program_id}/revisions/multi", summary="Загрузить новую ревизию (multi-channel: ch1/ch2/ch3/nc)")
+async def upload_revision_multi(
+    program_id: int,
+    channel_keys_json: str = Form(..., description="JSON array of channel keys, aligned with uploaded files order"),
+    files: List[UploadFile] = File(...),
+    note: Optional[str] = Form(None),
+    created_by_employee_id: Optional[int] = Form(None),
+    db: Session = Depends(get_db_session),
+):
+    """
+    Multi-channel upload endpoint.
+
+    Example FormData:
+    - channel_keys_json = '["ch1","ch2"]'
+    - files = [<file ch1>, <file ch2>]
+    """
+    prog = _ensure_program_exists(db, program_id)
+
+    try:
+        raw = json.loads(channel_keys_json or "[]")
+        if not isinstance(raw, list):
+            raise Exception("channel_keys_json must be a JSON array")
+        channel_keys = [_normalize_channel_key(str(x)) for x in raw]
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Некорректный channel_keys_json: {e}")
+
+    if not channel_keys or not files:
+        raise HTTPException(status_code=400, detail="Нужно передать channel_keys_json и files")
+    if len(channel_keys) != len(files):
+        raise HTTPException(status_code=400, detail="Количество channel keys должно совпадать с количеством файлов")
+
+    profile = _load_machine_type_profile(db, prog.get("machine_type") or "")
+    required = set(_required_channel_keys(profile))
+    provided = set(channel_keys)
+    if required != provided:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Набор каналов не совпадает с профилем machine_type. required={sorted(required)} provided={sorted(provided)}",
+        )
+
+    # Read bytes + validate non-empty
+    file_bytes_by_channel: Dict[str, bytes] = {}
+    filenames_by_channel: Dict[str, str] = {}
+    mime_by_channel: Dict[str, Optional[str]] = {}
+    for ch, f in zip(channel_keys, files):
+        if not f.filename:
+            raise HTTPException(status_code=400, detail=f"Пустое имя файла для {ch}")
+        b = await f.read()
+        if not b:
+            raise HTTPException(status_code=400, detail=f"Пустой файл для {ch}")
+        file_bytes_by_channel[ch] = b
+        filenames_by_channel[ch] = f.filename
+        mime_by_channel[ch] = f.content_type
+
+    # Persist blobs + create revision
+    try:
+        # Ensure file_blobs rows exist + save to volume
+        sha_by_channel: Dict[str, str] = {}
+        file_id_by_channel: Dict[str, int] = {}
+
+        for ch, b in file_bytes_by_channel.items():
+            sha = _sha256_hex(b)
+            sha_by_channel[ch] = sha
+            key = f"blobs/{sha}"
+            path = PROGRAMS_DIR / key
+            if not path.exists():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b)
+
+            db.execute(
+                text("""
+                    insert into file_blobs (sha256, size_bytes, storage_key, original_filename, mime_type)
+                    values (:sha256, :size_bytes, :storage_key, :original_filename, :mime_type)
+                    on conflict (sha256) do nothing
+                """),
+                {
+                    "sha256": sha,
+                    "size_bytes": len(b),
+                    "storage_key": key,
+                    "original_filename": filenames_by_channel.get(ch),
+                    "mime_type": mime_by_channel.get(ch),
+                },
+            )
+
+        # Next rev number
+        next_rev = db.execute(
+            text("""
+                select coalesce(max(rev_number), 0) + 1 as next_rev
+                from nc_program_revisions
+                where program_id = :program_id
+            """),
+            {"program_id": program_id},
+        ).fetchone()
+        rev_number = int(next_rev.next_rev) if next_rev else 1
+
+        revision_row = db.execute(
+            text("""
+                insert into nc_program_revisions (program_id, rev_number, note, created_by_employee_id)
+                values (:program_id, :rev_number, :note, :created_by_employee_id)
+                returning id
+            """),
+            {
+                "program_id": program_id,
+                "rev_number": rev_number,
+                "note": note,
+                "created_by_employee_id": created_by_employee_id,
+            },
+        ).fetchone()
+        if not revision_row or not getattr(revision_row, "id", None):
+            raise Exception("Не удалось создать ревизию")
+        revision_id = int(revision_row.id)
+
+        # Resolve file IDs + insert links
+        for ch, sha in sha_by_channel.items():
+            row = db.execute(
+                text("select id from file_blobs where sha256 = :sha256 limit 1"),
+                {"sha256": sha},
+            ).fetchone()
+            if not row:
+                raise Exception(f"Не удалось получить file_id по sha256 для {ch}")
+            file_id_by_channel[ch] = int(row.id)
+
+        for ch, fid in file_id_by_channel.items():
+            db.execute(
+                text("""
+                    insert into nc_program_revision_files (revision_id, file_id, role)
+                    values (:revision_id, :file_id, :role)
+                """),
+                {"revision_id": revision_id, "file_id": fid, "role": ch},
+            )
+
+        db.commit()
+        return {
+            "success": True,
+            "program_id": program_id,
+            "revision_id": revision_id,
+            "rev_number": rev_number,
+            "files": {ch: sha for ch, sha in sha_by_channel.items()},
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Ошибка загрузки ревизии: {e}")
+
+
+@router.post("/programs/{program_id}/revisions/text", summary="Сохранить новую ревизию из текста (browser editor)")
+def upload_revision_from_text(
+    program_id: int,
+    payload: RevisionTextPayload = Body(...),
+    db: Session = Depends(get_db_session),
+):
+    """
+    Create a new revision by providing channel texts (UTF-8).
+    """
+    prog = _ensure_program_exists(db, program_id)
+    profile = _load_machine_type_profile(db, prog.get("machine_type") or "")
+    required = _required_channel_keys(profile)
+
+    # Normalize and validate channel set
+    channels_norm: Dict[str, str] = {}
+    for k, v in (payload.channels or {}).items():
+        ck = _normalize_channel_key(k)
+        if ck:
+            channels_norm[ck] = v or ""
+    provided = sorted(channels_norm.keys())
+    if sorted(required) != provided:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Набор каналов должен совпадать с профилем machine_type. required={sorted(required)} provided={provided}",
+        )
+
+    try:
+        # Next rev number
+        next_rev = db.execute(
+            text("""
+                select coalesce(max(rev_number), 0) + 1 as next_rev
+                from nc_program_revisions
+                where program_id = :program_id
+            """),
+            {"program_id": program_id},
+        ).fetchone()
+        rev_number = int(next_rev.next_rev) if next_rev else 1
+
+        revision_row = db.execute(
+            text("""
+                insert into nc_program_revisions (program_id, rev_number, note, created_by_employee_id)
+                values (:program_id, :rev_number, :note, :created_by_employee_id)
+                returning id
+            """),
+            {
+                "program_id": program_id,
+                "rev_number": rev_number,
+                "note": payload.note,
+                "created_by_employee_id": payload.created_by_employee_id,
+            },
+        ).fetchone()
+        if not revision_row or not getattr(revision_row, "id", None):
+            raise Exception("Не удалось создать ревизию")
+        revision_id = int(revision_row.id)
+
+        sha_by_channel: Dict[str, str] = {}
+        for ch, text_value in channels_norm.items():
+            b = (text_value or "").encode("utf-8", errors="replace")
+            if not b:
+                raise HTTPException(status_code=400, detail=f"Пустой текст для {ch}")
+            sha = _sha256_hex(b)
+            sha_by_channel[ch] = sha
+            key = f"blobs/{sha}"
+            path = PROGRAMS_DIR / key
+            if not path.exists():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b)
+
+            filename = f"{prog.get('machine_type') or 'machine'}__program{program_id}__rev{rev_number}__{ch}.nc"
+            db.execute(
+                text("""
+                    insert into file_blobs (sha256, size_bytes, storage_key, original_filename, mime_type)
+                    values (:sha256, :size_bytes, :storage_key, :original_filename, :mime_type)
+                    on conflict (sha256) do nothing
+                """),
+                {
+                    "sha256": sha,
+                    "size_bytes": len(b),
+                    "storage_key": key,
+                    "original_filename": filename,
+                    "mime_type": "text/plain",
+                },
+            )
+
+        for ch, sha in sha_by_channel.items():
+            row = db.execute(
+                text("select id from file_blobs where sha256 = :sha256 limit 1"),
+                {"sha256": sha},
+            ).fetchone()
+            if not row:
+                raise Exception(f"Не удалось получить file_id по sha256 для {ch}")
+            db.execute(
+                text("""
+                    insert into nc_program_revision_files (revision_id, file_id, role)
+                    values (:revision_id, :file_id, :role)
+                """),
+                {"revision_id": revision_id, "file_id": int(row.id), "role": ch},
+            )
+
+        db.commit()
+        return {
+            "success": True,
+            "program_id": program_id,
+            "revision_id": revision_id,
+            "rev_number": rev_number,
+            "files": {ch: sha for ch, sha in sha_by_channel.items()},
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Ошибка сохранения ревизии: {e}")
+
     except HTTPException:
         raise
     except Exception as e:
@@ -439,7 +825,7 @@ def list_program_revisions(
     db: Session = Depends(get_db_session),
 ):
     """
-    Returns all revisions for a program with their files (main/sub) and sha256.
+    Returns all revisions for a program with their files (channels) and sha256.
     """
     _ensure_program_exists(db, program_id)
 
@@ -464,6 +850,10 @@ def list_program_revisions(
         {"program_id": program_id},
     ).mappings().all()
 
+    prog = _ensure_program_exists(db, program_id)
+    profile = _load_machine_type_profile(db, prog.get("machine_type") or "")
+    required_keys = _required_channel_keys(profile)
+
     out: Dict[int, Dict[str, Any]] = {}
     for row in rows:
         rid = int(row["revision_id"])
@@ -474,24 +864,31 @@ def list_program_revisions(
                 "rev_number": int(row["rev_number"]),
                 "note": row["note"],
                 "created_at": row["created_at"].isoformat() if row["created_at"] else None,
-                "files": {"main": None, "sub": None},
+                "files": {k: None for k in required_keys},
             }
             out[rid] = rev
 
         if row["file_role"] and row["file_id"] and row["sha256"]:
-            role = row["file_role"]
-            if role in ("main", "sub"):
-                rev["files"][role] = {
+            channel_key = _normalize_channel_key(row["file_role"])
+            if channel_key and channel_key not in rev["files"]:
+                rev["files"][channel_key] = None
+            if channel_key:
+                rev["files"][channel_key] = {
                     "file_id": int(row["file_id"]),
                     "sha256": row["sha256"],
                     "size_bytes": int(row["size_bytes"]) if row["size_bytes"] is not None else None,
                     "original_filename": row["original_filename"],
                 }
 
-    return {"program_id": program_id, "revisions": list(out.values())}
+    return {
+        "program_id": program_id,
+        "machine_type": prog.get("machine_type"),
+        "channels_profile": profile,
+        "revisions": list(out.values()),
+    }
 
 
-@router.get("/revisions/{revision_id}/files/{role}", summary="Скачать файл ревизии (main/sub)")
+@router.get("/revisions/{revision_id}/files/{role}", summary="Скачать файл ревизии (legacy: main/sub)")
 def download_revision_file(
     revision_id: int,
     role: str,
@@ -501,6 +898,8 @@ def download_revision_file(
     if role not in ("main", "sub"):
         raise HTTPException(status_code=400, detail="role должен быть main или sub")
 
+    candidates = _candidates_for_role_or_channel(role)
+
     row = db.execute(
         text("""
             select
@@ -509,10 +908,10 @@ def download_revision_file(
             from nc_program_revision_files rf
             join file_blobs fb on fb.id = rf.file_id
             where rf.revision_id = :revision_id
-              and rf.role = :role
+              and rf.role = any(:roles)
             limit 1
         """),
-        {"revision_id": revision_id, "role": role},
+        {"revision_id": revision_id, "roles": candidates},
     ).fetchone()
 
     if not row:
@@ -530,4 +929,84 @@ def download_revision_file(
         media_type="application/octet-stream",
         filename=filename,
     )
+
+
+@router.get("/revisions/{revision_id}/channels/{channel_key}", summary="Скачать файл ревизии (channel_key)")
+def download_revision_channel(
+    revision_id: int,
+    channel_key: str,
+    db: Session = Depends(get_db_session),
+):
+    ch = _normalize_channel_key(channel_key)
+    if not ch:
+        raise HTTPException(status_code=400, detail="channel_key обязателен")
+
+    candidates = _candidates_for_role_or_channel(ch)
+    row = db.execute(
+        text("""
+            select
+                fb.storage_key,
+                fb.original_filename
+            from nc_program_revision_files rf
+            join file_blobs fb on fb.id = rf.file_id
+            where rf.revision_id = :revision_id
+              and rf.role = any(:roles)
+            limit 1
+        """),
+        {"revision_id": revision_id, "roles": candidates},
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Файл не найден")
+
+    storage_key = row.storage_key
+    filename = row.original_filename or f"revision-{revision_id}-{ch}.nc"
+    file_path = PROGRAMS_DIR / storage_key
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Файл отсутствует в хранилище")
+
+    return FileResponse(path=file_path, media_type="application/octet-stream", filename=filename)
+
+
+@router.get("/revisions/{revision_id}/channels/{channel_key}/text", summary="Текстовый просмотр канала ревизии (preview)")
+def preview_revision_channel_text(
+    revision_id: int,
+    channel_key: str,
+    limit_bytes: int = 250_000,
+    db: Session = Depends(get_db_session),
+):
+    """
+    Returns plain text for browser preview. Files are treated as UTF-8/ASCII.
+    limit_bytes protects against huge files.
+    """
+    ch = _normalize_channel_key(channel_key)
+    if not ch:
+        raise HTTPException(status_code=400, detail="channel_key обязателен")
+    if limit_bytes < 1:
+        limit_bytes = 1
+    if limit_bytes > 2_000_000:
+        limit_bytes = 2_000_000
+
+    candidates = _candidates_for_role_or_channel(ch)
+    row = db.execute(
+        text("""
+            select fb.storage_key
+            from nc_program_revision_files rf
+            join file_blobs fb on fb.id = rf.file_id
+            where rf.revision_id = :revision_id
+              and rf.role = any(:roles)
+            limit 1
+        """),
+        {"revision_id": revision_id, "roles": candidates},
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Файл не найден")
+
+    file_path = PROGRAMS_DIR / row.storage_key
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Файл отсутствует в хранилище")
+
+    with open(file_path, "rb") as f:
+        data = f.read(limit_bytes)
+    text_value = data.decode("utf-8", errors="replace")
+    return PlainTextResponse(text_value, media_type="text/plain; charset=utf-8")
 
