@@ -189,6 +189,7 @@ class PartUpdate(BaseModel):
 class PartResponse(PartBase):
     id: int
     created_at: Optional[datetime] # <--- СДЕЛАНО ОПЦИОНАЛЬНЫМ
+    has_nc_program: Optional[bool] = None
 
     class Config:
         orm_mode = True
@@ -256,6 +257,28 @@ async def get_parts(
 
         parts = query.order_by(PartDB.drawing_number).offset(skip).limit(limit).all()
         logger.info(f"Запрос списка деталей: search='{search}', skip={skip}, limit={limit}. Возвращено {len(parts)} из {total_count} деталей.")
+
+        # Enrich parts with NC presence (fast, single query).
+        # This enables client-side filtering without per-part requests.
+        if parts:
+            try:
+                from sqlalchemy import text, bindparam
+
+                ids = [p.id for p in parts]
+                stmt = text(
+                    "select part_id, count(*) as cnt "
+                    "from nc_programs "
+                    "where part_id in :ids "
+                    "group by part_id"
+                ).bindparams(bindparam("ids", expanding=True))
+
+                rows = db.execute(stmt, {"ids": ids}).fetchall()
+                cnt_by_part_id = {int(r[0]): int(r[1]) for r in rows}
+                for p in parts:
+                    setattr(p, "has_nc_program", cnt_by_part_id.get(p.id, 0) > 0)
+            except Exception as e:
+                # Don't fail /parts if NC tables are unavailable for some reason
+                logger.warning(f"Не удалось обогатить /parts has_nc_program: {e}")
         
         response.headers["X-Total-Count"] = str(total_count)
         # УДАЛЕНО: response.headers["Access-Control-Expose-Headers"] = "X-Total-Count"
