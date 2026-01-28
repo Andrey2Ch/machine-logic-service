@@ -17,7 +17,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile, Query
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel
 from sqlalchemy import text
@@ -217,6 +217,161 @@ def resolve_part_by_drawing_number(
     return {"drawing_number": dn, "parts": [dict(r) for r in rows]}
 
 
+def _list_programs_for_part_impl(part_id: int, machine_type: Optional[str], db: Session) -> Dict[str, Any]:
+    """
+    Shared implementation for listing programs for a part.
+    Used by both /parts/{part_id}/list and /parts/by-drawing.
+    """
+    params: Dict[str, Any] = {"part_id": part_id}
+    mt_filter = ""
+    if machine_type:
+        mt_filter = "and p.machine_type = :machine_type"
+        params["machine_type"] = machine_type
+
+    rows = db.execute(
+        text(f"""
+            select
+                p.id as program_id,
+                p.part_id,
+                p.machine_type,
+                p.program_kind,
+                p.title,
+                p.comment,
+                r.id as revision_id,
+                r.rev_number,
+                r.note as revision_note,
+                r.created_at as revision_created_at,
+                rf.role as file_role,
+                fb.id as file_id,
+                fb.sha256,
+                fb.size_bytes,
+                fb.original_filename,
+                fb.created_at as file_created_at
+            from nc_programs p
+            left join lateral (
+                select id, rev_number, note, created_at
+                from nc_program_revisions
+                where program_id = p.id
+                order by rev_number desc
+                limit 1
+            ) r on true
+            left join nc_program_revision_files rf on rf.revision_id = r.id
+            left join file_blobs fb on fb.id = rf.file_id
+            where p.part_id = :part_id
+            {mt_filter}
+            order by p.id desc
+        """),
+        params,
+    ).mappings().all()
+
+    # Preload machine_type profiles (small count: per part)
+    machine_types: List[str] = []
+    for r in rows:
+        mt = (r.get("machine_type") or "").strip()
+        if mt and mt not in machine_types:
+            machine_types.append(mt)
+    profiles_by_machine_type: Dict[str, List[Dict[str, str]]] = {mt: _load_machine_type_profile(db, mt) for mt in machine_types}
+
+    # Assemble into { program -> current_revision -> files{ch1,ch2,...} }
+    out: Dict[int, Dict[str, Any]] = {}
+    for row in rows:
+        pid = int(row["program_id"])
+        prog = out.get(pid)
+        if not prog:
+            mt = row["machine_type"]
+            profile_channels = profiles_by_machine_type.get((mt or "").strip()) or _default_profile_channels()
+            prog = {
+                "program_id": pid,
+                "part_id": row["part_id"],
+                "machine_type": row["machine_type"],
+                "program_kind": row["program_kind"],
+                "title": row["title"],
+                "comment": row["comment"],
+                "channels_profile": profile_channels,
+                "current_revision": None,
+            }
+            out[pid] = prog
+
+        if row["revision_id"] is None:
+            continue
+
+        if prog["current_revision"] is None:
+            required_keys = _required_channel_keys(prog.get("channels_profile") or _default_profile_channels())
+            prog["current_revision"] = {
+                "revision_id": int(row["revision_id"]),
+                "rev_number": int(row["rev_number"]),
+                "note": row["revision_note"],
+                "created_at": row["revision_created_at"].isoformat() if row["revision_created_at"] else None,
+                "files": {k: None for k in required_keys},
+            }
+
+        if row["file_role"] and row["file_id"]:
+            channel_key = _normalize_channel_key(row["file_role"])
+            # If file contains extra channels beyond profile, keep it too.
+            if channel_key and channel_key not in prog["current_revision"]["files"]:
+                prog["current_revision"]["files"][channel_key] = None
+            if channel_key:
+                prog["current_revision"]["files"][channel_key] = {
+                    "file_id": int(row["file_id"]),
+                    "sha256": row["sha256"],
+                    "size_bytes": int(row["size_bytes"]) if row["size_bytes"] is not None else None,
+                    "original_filename": row["original_filename"],
+                }
+
+    return {
+        "part_id": part_id,
+        "programs": list(out.values()),
+        "profiles_by_machine_type": profiles_by_machine_type,
+    }
+
+
+@router.get("/parts/by-drawing", summary="Найти деталь по drawing_number + сразу вернуть NC программы (оптимизация)")
+def list_programs_by_drawing_number(
+    drawing_number: str = Query(...),
+    limit_parts: int = Query(10, ge=1, le=100),
+    include_empty_parts: bool = Query(True),
+    db: Session = Depends(get_db_session),
+):
+    """
+    Optimized endpoint for UI:
+    - resolves parts by drawing_number (exact + prefix)
+    - returns programs for each resolved part (current revisions)
+    """
+    dn = (drawing_number or "").strip()
+    if not dn:
+        raise HTTPException(status_code=400, detail="drawing_number обязателен")
+
+    rows = db.execute(
+        text("""
+            select id, drawing_number, description
+            from parts
+            where trim(drawing_number) = :drawing_number
+               or trim(drawing_number) like :drawing_prefix
+            order by
+                case when trim(drawing_number) = :drawing_number then 0 else 1 end,
+                id asc
+            limit :limit_parts
+        """),
+        {"drawing_number": dn, "drawing_prefix": f"{dn}-%", "limit_parts": limit_parts},
+    ).mappings().all()
+
+    parts_out: List[Dict[str, Any]] = []
+    for r in rows:
+        pid = int(r["id"])
+        payload = _list_programs_for_part_impl(pid, None, db)
+        if (payload.get("programs") or []) or include_empty_parts:
+            parts_out.append(
+                {
+                    "id": pid,
+                    "drawing_number": r.get("drawing_number"),
+                    "description": r.get("description"),
+                    "programs_payload": payload,
+                }
+            )
+
+    return {"drawing_number": dn, "parts": parts_out}
+
+
 @router.post("/parts/ensure", summary="Создать (или получить) деталь по drawing_number")
 def ensure_part_by_drawing_number(
     drawing_number: str = Form(...),
@@ -383,112 +538,7 @@ def list_programs_for_part(
     machine_type: Optional[str] = None,
     db: Session = Depends(get_db_session),
 ):
-    """
-    Returns programs for a part with their current revision (max rev_number) and files (main/sub) if present.
-    """
-    params: Dict[str, Any] = {"part_id": part_id}
-    mt_filter = ""
-    if machine_type:
-        mt_filter = "and p.machine_type = :machine_type"
-        params["machine_type"] = machine_type
-
-    rows = db.execute(
-        text(f"""
-            select
-                p.id as program_id,
-                p.part_id,
-                p.machine_type,
-                p.program_kind,
-                p.title,
-                p.comment,
-                r.id as revision_id,
-                r.rev_number,
-                r.note as revision_note,
-                r.created_at as revision_created_at,
-                rf.role as file_role,
-                fb.id as file_id,
-                fb.sha256,
-                fb.size_bytes,
-                fb.original_filename,
-                fb.created_at as file_created_at
-            from nc_programs p
-            left join lateral (
-                select id, rev_number, note, created_at
-                from nc_program_revisions
-                where program_id = p.id
-                order by rev_number desc
-                limit 1
-            ) r on true
-            left join nc_program_revision_files rf on rf.revision_id = r.id
-            left join file_blobs fb on fb.id = rf.file_id
-            where p.part_id = :part_id
-            {mt_filter}
-            order by p.id desc
-        """),
-        params,
-    ).mappings().all()
-
-    # Preload machine_type profiles (small count: per part)
-    machine_types: List[str] = []
-    for r in rows:
-        mt = (r.get("machine_type") or "").strip()
-        if mt and mt not in machine_types:
-            machine_types.append(mt)
-    profiles_by_machine_type: Dict[str, List[Dict[str, str]]] = {
-        mt: _load_machine_type_profile(db, mt) for mt in machine_types
-    }
-
-    # Assemble into { program -> current_revision -> files{ch1,ch2,...} }
-    out: Dict[int, Dict[str, Any]] = {}
-    for row in rows:
-        pid = int(row["program_id"])
-        prog = out.get(pid)
-        if not prog:
-            mt = row["machine_type"]
-            profile_channels = profiles_by_machine_type.get((mt or "").strip()) or _default_profile_channels()
-            prog = {
-                "program_id": pid,
-                "part_id": row["part_id"],
-                "machine_type": row["machine_type"],
-                "program_kind": row["program_kind"],
-                "title": row["title"],
-                "comment": row["comment"],
-                "channels_profile": profile_channels,
-                "current_revision": None,
-            }
-            out[pid] = prog
-
-        if row["revision_id"] is None:
-            continue
-
-        if prog["current_revision"] is None:
-            required_keys = _required_channel_keys(prog.get("channels_profile") or _default_profile_channels())
-            prog["current_revision"] = {
-                "revision_id": int(row["revision_id"]),
-                "rev_number": int(row["rev_number"]),
-                "note": row["revision_note"],
-                "created_at": row["revision_created_at"].isoformat() if row["revision_created_at"] else None,
-                "files": {k: None for k in required_keys},
-            }
-
-        if row["file_role"] and row["file_id"]:
-            channel_key = _normalize_channel_key(row["file_role"])
-            # If file contains extra channels beyond profile, keep it too.
-            if channel_key and channel_key not in prog["current_revision"]["files"]:
-                prog["current_revision"]["files"][channel_key] = None
-            if channel_key:
-                prog["current_revision"]["files"][channel_key] = {
-                    "file_id": int(row["file_id"]),
-                    "sha256": row["sha256"],
-                    "size_bytes": int(row["size_bytes"]) if row["size_bytes"] is not None else None,
-                    "original_filename": row["original_filename"],
-                }
-
-    return {
-        "part_id": part_id,
-        "programs": list(out.values()),
-        "profiles_by_machine_type": profiles_by_machine_type,
-    }
+    return _list_programs_for_part_impl(part_id, machine_type, db)
 
 
 @router.post("/parts/{part_id}/create", summary="Создать (или получить) CNC программу по детали + machine_type")
