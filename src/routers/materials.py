@@ -6,12 +6,15 @@
 @updated: 2025-12-01 - Добавлены endpoints для управления материалом (add-bars, return, history)
 """
 import logging
+import os
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import and_, or_, func
+from sqlalchemy import and_, or_, func, text
 from src.database import get_db_session
 from typing import List, Optional
 from pydantic import BaseModel
+import math
 from src.models.models import (
     MaterialTypeDB, 
     LotMaterialDB, 
@@ -32,6 +35,138 @@ router = APIRouter(
     responses={404: {"description": "Not found"}},
 )
 
+# Дефолтные параметры расчета материала (fallback)
+DEFAULT_BAR_LENGTH_MM = 3000.0
+DEFAULT_BLADE_WIDTH_MM = 3.0
+DEFAULT_FACING_ALLOWANCE_MM = 0.5
+DEFAULT_MIN_REMAINDER_MM = 300.0
+
+
+def _resolve_calc_params(
+    *,
+    machine: Optional[MachineDB],
+    request: Optional[object],
+    lot_material: Optional[LotMaterialDB]
+) -> dict:
+    return {
+        "bar_length_mm": (
+            (request.bar_length_mm if request else None)
+            or (lot_material.bar_length_mm if lot_material else None)
+        ),
+        "blade_width_mm": (
+            (request.blade_width_mm if request else None)
+            or (lot_material.blade_width_mm if lot_material else None)
+            or (machine.material_blade_width_mm if machine else None)
+            or DEFAULT_BLADE_WIDTH_MM
+        ),
+        "facing_allowance_mm": (
+            (request.facing_allowance_mm if request else None)
+            or (lot_material.facing_allowance_mm if lot_material else None)
+            or (machine.material_facing_allowance_mm if machine else None)
+            or DEFAULT_FACING_ALLOWANCE_MM
+        ),
+        "min_remainder_mm": (
+            (request.min_remainder_mm if request else None)
+            or (lot_material.min_remainder_mm if lot_material else None)
+            or (machine.material_min_remainder_mm if machine else None)
+            or DEFAULT_MIN_REMAINDER_MM
+        ),
+    }
+
+
+def _calculate_bars_needed(
+    *,
+    part_length_mm: Optional[float],
+    quantity_parts: int,
+    bar_length_mm: Optional[float],
+    blade_width_mm: float,
+    facing_allowance_mm: float,
+    min_remainder_mm: float
+) -> Optional[int]:
+    if not part_length_mm or not bar_length_mm or quantity_parts <= 0:
+        return None
+    usable_length = bar_length_mm - min_remainder_mm
+    length_per_part = part_length_mm + facing_allowance_mm + blade_width_mm
+    if usable_length <= 0 or length_per_part <= 0:
+        return None
+    parts_per_bar = math.floor(usable_length / length_per_part)
+    if parts_per_bar <= 0:
+        return None
+    return int(math.ceil(quantity_parts / parts_per_bar))
+
+
+def _normalize_machine_name(name: Optional[str]) -> str:
+    if not name:
+        return ""
+    normalized = name
+    if normalized.startswith('M_') and '_' in normalized[2:]:
+        parts = normalized.split('_', 2)
+        if len(parts) >= 3:
+            normalized = parts[2]
+    return normalized.replace('_', '-').upper()
+
+
+def _fetch_mtconnect_counts() -> dict:
+    mtconnect_api_url = os.getenv('MTCONNECT_API_URL', 'https://mtconnect-core-production.up.railway.app')
+    counts: dict[str, Optional[int]] = {}
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            response = client.get(f"{mtconnect_api_url}/api/machines")
+            if response.status_code != 200:
+                return counts
+            data = response.json()
+            all_machines = []
+            if data.get('machines', {}).get('mtconnect'):
+                all_machines.extend(data['machines']['mtconnect'])
+            if data.get('machines', {}).get('adam'):
+                all_machines.extend(data['machines']['adam'])
+            for m in all_machines:
+                name = _normalize_machine_name(m.get('name', ''))
+                counts[name] = m.get('data', {}).get('displayPartCount')
+    except Exception as e:
+        logger.warning(f"MTConnect API unavailable: {e}")
+    return counts
+
+
+def _get_produced_for_lot(
+    *,
+    db: Session,
+    lot_id: int,
+    fallback_machine_name: Optional[str],
+    mtconnect_counts: dict
+) -> int:
+    setup_query = text("""
+        SELECT sj.id as setup_job_id, m.name as machine_name
+        FROM setup_jobs sj
+        JOIN machines m ON m.id = sj.machine_id
+        WHERE sj.lot_id = :lot_id
+          AND sj.end_time IS NULL
+        ORDER BY sj.id DESC
+        LIMIT 1
+    """)
+    setup_result = db.execute(setup_query, {"lot_id": lot_id}).fetchone()
+    machine_name = setup_result.machine_name if setup_result else fallback_machine_name
+    setup_job_id = setup_result.setup_job_id if setup_result else None
+
+    produced = None
+    if machine_name:
+        normalized = _normalize_machine_name(machine_name)
+        produced = mtconnect_counts.get(normalized)
+
+    if produced is None and setup_job_id:
+        fallback_query = text("""
+            SELECT reading
+            FROM machine_readings
+            WHERE setup_job_id = :setup_job_id
+            ORDER BY id DESC
+            LIMIT 1
+        """)
+        fallback_result = db.execute(fallback_query, {"setup_job_id": setup_job_id}).fetchone()
+        if fallback_result:
+            produced = fallback_result.reading
+
+    return int(produced or 0)
+
 # ========== Pydantic схемы ==========
 
 class MaterialTypeOut(BaseModel):
@@ -50,6 +185,10 @@ class IssueToMachineRequest(BaseModel):
     material_type: Optional[str] = None  # סוג חומר - теперь необязательный
     diameter: float  # диаметр
     quantity_bars: int  # כמות במוטות
+    bar_length_mm: Optional[float] = None
+    blade_width_mm: Optional[float] = None
+    facing_allowance_mm: Optional[float] = None
+    min_remainder_mm: Optional[float] = None
     material_receipt_id: Optional[int] = None
     notes: Optional[str] = None
 
@@ -74,6 +213,10 @@ class MaterialOperationOut(BaseModel):
     operation_type: str
     quantity_bars: int
     diameter: Optional[float] = None
+    bar_length_mm: Optional[float] = None
+    blade_width_mm: Optional[float] = None
+    facing_allowance_mm: Optional[float] = None
+    min_remainder_mm: Optional[float] = None
     performed_by: Optional[int] = None
     performer_name: Optional[str] = None
     performed_at: Optional[datetime] = None
@@ -92,10 +235,16 @@ class LotMaterialOut(BaseModel):
     drawing_number: Optional[str] = None
     material_type: Optional[str] = None
     diameter: Optional[float] = None
+    bar_length_mm: Optional[float] = None
+    blade_width_mm: Optional[float] = None
+    facing_allowance_mm: Optional[float] = None
+    min_remainder_mm: Optional[float] = None
     issued_bars: int
     returned_bars: int
     defect_bars: int = 0
     used_bars: int  # issued - returned - defect
+    remaining_bars: Optional[int] = None  # Остаток к выдаче (если можно рассчитать)
+    planned_bars_remaining: Optional[int] = None  # План прутков для завершения
     issued_at: Optional[datetime] = None
     status: str
     notes: Optional[str] = None
@@ -166,30 +315,49 @@ def issue_material_to_machine(
             if part:
                 drawing_number = part.drawing_number
         
-        # Ищем существующую запись с таким же lot_id + machine_id + diameter
-        existing = db.query(LotMaterialDB).filter(
+        # Ищем существующую запись с таким же lot_id + machine_id + diameter (+ bar_length, если задан)
+        existing_query = db.query(LotMaterialDB).filter(
             and_(
                 LotMaterialDB.lot_id == request.lot_id,
                 LotMaterialDB.machine_id == request.machine_id,
                 LotMaterialDB.diameter == request.diameter
             )
-        ).first()
+        )
+        if request.bar_length_mm is not None:
+            existing_query = existing_query.filter(LotMaterialDB.bar_length_mm == request.bar_length_mm)
+        else:
+            existing_query = existing_query.filter(LotMaterialDB.bar_length_mm == None)
+        existing = existing_query.first()
         
         if existing:
+            calc_params = _resolve_calc_params(machine=machine, request=request, lot_material=existing)
             # Добавляем к существующей записи (used_bars вычисляется автоматически в PostgreSQL)
             existing.issued_bars = (existing.issued_bars or 0) + request.quantity_bars
             if request.notes:
                 existing.notes = f"{existing.notes or ''}\n{request.notes}".strip()
+            if request.bar_length_mm is not None and existing.bar_length_mm is None:
+                existing.bar_length_mm = request.bar_length_mm
+            if existing.blade_width_mm is None:
+                existing.blade_width_mm = calc_params["blade_width_mm"]
+            if existing.facing_allowance_mm is None:
+                existing.facing_allowance_mm = calc_params["facing_allowance_mm"]
+            if existing.min_remainder_mm is None:
+                existing.min_remainder_mm = calc_params["min_remainder_mm"]
             
             lot_material = existing
             operation_type = "add"
         else:
+            calc_params = _resolve_calc_params(machine=machine, request=request, lot_material=None)
             # Создаём новую запись (НЕ включаем used_bars - это generated column в PostgreSQL!)
             lot_material = LotMaterialDB(
                 lot_id=request.lot_id,
                 machine_id=request.machine_id,
                 material_type=request.material_type,
                 diameter=request.diameter,
+                bar_length_mm=calc_params["bar_length_mm"],
+                blade_width_mm=calc_params["blade_width_mm"],
+                facing_allowance_mm=calc_params["facing_allowance_mm"],
+                min_remainder_mm=calc_params["min_remainder_mm"],
                 issued_bars=request.quantity_bars,
                 returned_bars=0,
                 issued_at=datetime.now(timezone.utc),
@@ -217,6 +385,10 @@ def issue_material_to_machine(
             operation_type=operation_type,
             quantity_bars=request.quantity_bars,
             diameter=request.diameter,
+            bar_length_mm=calc_params["bar_length_mm"],
+            blade_width_mm=calc_params["blade_width_mm"],
+            facing_allowance_mm=calc_params["facing_allowance_mm"],
+            min_remainder_mm=calc_params["min_remainder_mm"],
             notes=request.notes,
             performed_at=datetime.now(timezone.utc)
         )
@@ -234,10 +406,16 @@ def issue_material_to_machine(
             "drawing_number": drawing_number,
             "material_type": lot_material.material_type,
             "diameter": lot_material.diameter,
+            "bar_length_mm": lot_material.bar_length_mm,
+            "blade_width_mm": lot_material.blade_width_mm,
+            "facing_allowance_mm": lot_material.facing_allowance_mm,
+            "min_remainder_mm": lot_material.min_remainder_mm,
             "issued_bars": lot_material.issued_bars or 0,
             "returned_bars": lot_material.returned_bars or 0,
             "defect_bars": lot_material.defect_bars or 0,
             "used_bars": (lot_material.issued_bars or 0) - (lot_material.returned_bars or 0) - (lot_material.defect_bars or 0),
+            "remaining_bars": None,
+            "planned_bars_remaining": None,
             "issued_at": lot_material.issued_at,
             "status": lot_material.status,
             "notes": lot_material.notes,
@@ -281,6 +459,10 @@ def add_bars_to_material(
             operation_type="add",
             quantity_bars=request.quantity_bars,
             diameter=lot_material.diameter,
+            bar_length_mm=lot_material.bar_length_mm,
+            blade_width_mm=lot_material.blade_width_mm,
+            facing_allowance_mm=lot_material.facing_allowance_mm,
+            min_remainder_mm=lot_material.min_remainder_mm,
             performed_by=request.performed_by,
             notes=request.notes,
             performed_at=datetime.now(timezone.utc)
@@ -302,9 +484,16 @@ def add_bars_to_material(
             "machine_name": machine.name if machine else None,
             "material_type": lot_material.material_type,
             "diameter": lot_material.diameter,
+            "bar_length_mm": lot_material.bar_length_mm,
+            "blade_width_mm": lot_material.blade_width_mm,
+            "facing_allowance_mm": lot_material.facing_allowance_mm,
+            "min_remainder_mm": lot_material.min_remainder_mm,
             "issued_bars": lot_material.issued_bars or 0,
             "returned_bars": lot_material.returned_bars or 0,
-            "used_bars": (lot_material.issued_bars or 0) - (lot_material.returned_bars or 0),
+            "defect_bars": lot_material.defect_bars or 0,
+            "used_bars": (lot_material.issued_bars or 0) - (lot_material.returned_bars or 0) - (lot_material.defect_bars or 0),
+            "remaining_bars": None,
+            "planned_bars_remaining": None,
             "issued_at": lot_material.issued_at,
             "status": lot_material.status,
             "notes": lot_material.notes,
@@ -361,6 +550,10 @@ def return_bars(
             operation_type="return",
             quantity_bars=-request.quantity_bars,  # Отрицательное для возврата
             diameter=lot_material.diameter,
+            bar_length_mm=lot_material.bar_length_mm,
+            blade_width_mm=lot_material.blade_width_mm,
+            facing_allowance_mm=lot_material.facing_allowance_mm,
+            min_remainder_mm=lot_material.min_remainder_mm,
             performed_by=request.performed_by,
             notes=request.notes,
             performed_at=datetime.now(timezone.utc)
@@ -382,9 +575,16 @@ def return_bars(
             "machine_name": machine.name if machine else None,
             "material_type": lot_material.material_type,
             "diameter": lot_material.diameter,
+            "bar_length_mm": lot_material.bar_length_mm,
+            "blade_width_mm": lot_material.blade_width_mm,
+            "facing_allowance_mm": lot_material.facing_allowance_mm,
+            "min_remainder_mm": lot_material.min_remainder_mm,
             "issued_bars": lot_material.issued_bars or 0,
             "returned_bars": lot_material.returned_bars or 0,
-            "used_bars": (lot_material.issued_bars or 0) - (lot_material.returned_bars or 0),
+            "defect_bars": lot_material.defect_bars or 0,
+            "used_bars": (lot_material.issued_bars or 0) - (lot_material.returned_bars or 0) - (lot_material.defect_bars or 0),
+            "remaining_bars": None,
+            "planned_bars_remaining": None,
             "issued_at": lot_material.issued_at,
             "status": lot_material.status,
             "notes": lot_material.notes,
@@ -465,10 +665,16 @@ def close_material(
             "drawing_number": drawing_number,
             "material_type": lot_material.material_type,
             "diameter": lot_material.diameter,
+            "bar_length_mm": lot_material.bar_length_mm,
+            "blade_width_mm": lot_material.blade_width_mm,
+            "facing_allowance_mm": lot_material.facing_allowance_mm,
+            "min_remainder_mm": lot_material.min_remainder_mm,
             "issued_bars": lot_material.issued_bars or 0,
             "returned_bars": lot_material.returned_bars or 0,
             "defect_bars": lot_material.defect_bars or 0,
             "used_bars": (lot_material.issued_bars or 0) - (lot_material.returned_bars or 0) - (lot_material.defect_bars or 0),
+            "remaining_bars": None,
+            "planned_bars_remaining": None,
             "issued_at": lot_material.issued_at,
             "status": lot_material.status,
             "notes": lot_material.notes,
@@ -567,10 +773,16 @@ def check_pending_materials(
                 "drawing_number": drawing_number,
                 "material_type": m.material_type,
                 "diameter": m.diameter,
+                "bar_length_mm": m.bar_length_mm,
+                "blade_width_mm": m.blade_width_mm,
+                "facing_allowance_mm": m.facing_allowance_mm,
+                "min_remainder_mm": m.min_remainder_mm,
                 "issued_bars": m.issued_bars or 0,
                 "returned_bars": m.returned_bars or 0,
                 "defect_bars": m.defect_bars or 0,
                 "used_bars": (m.issued_bars or 0) - (m.returned_bars or 0) - (m.defect_bars or 0),
+                "remaining_bars": None,
+                "planned_bars_remaining": None,
                 "issued_at": m.issued_at,
                 "status": m.status,
                 "notes": m.notes,
@@ -622,8 +834,14 @@ def get_lot_materials(
                 LotMaterialDB,
                 LotDB.lot_number,
                 LotDB.status.label('lot_status'),
+                LotDB.total_planned_quantity,
+                LotDB.initial_planned_quantity,
                 MachineDB.name.label('machine_name'),
+                MachineDB.material_blade_width_mm,
+                MachineDB.material_facing_allowance_mm,
+                MachineDB.material_min_remainder_mm,
                 PartDB.drawing_number,
+                PartDB.part_length,
                 latest_setup_subq.c.setup_status
             )
             .outerjoin(LotDB, LotMaterialDB.lot_id == LotDB.id)
@@ -647,10 +865,52 @@ def get_lot_materials(
         
         # Выполняем запрос (ОДИН запрос вместо N+1!)
         results = query.order_by(LotMaterialDB.created_at.desc()).all()
+        mtconnect_counts = _fetch_mtconnect_counts()
         
         # Формируем результат
         output = []
-        for m, lot_number, lot_status, machine_name, drawing_number, setup_status in results:
+        for (
+            m,
+            lot_number,
+            lot_status,
+            total_planned_quantity,
+            initial_planned_quantity,
+            machine_name,
+            machine_blade_width_mm,
+            machine_facing_allowance_mm,
+            machine_min_remainder_mm,
+            drawing_number,
+            part_length,
+            setup_status
+        ) in results:
+            total_planned = total_planned_quantity or initial_planned_quantity or 0
+            net_issued = (m.issued_bars or 0) - (m.returned_bars or 0) - (m.defect_bars or 0)
+            blade_width_mm = m.blade_width_mm or machine_blade_width_mm or DEFAULT_BLADE_WIDTH_MM
+            facing_allowance_mm = m.facing_allowance_mm or machine_facing_allowance_mm or DEFAULT_FACING_ALLOWANCE_MM
+            min_remainder_mm = m.min_remainder_mm or machine_min_remainder_mm or DEFAULT_MIN_REMAINDER_MM
+            bar_length_mm = m.bar_length_mm
+
+            remaining_parts = 0
+            planned_bars_remaining = None
+            remaining_bars = None
+            if total_planned and part_length and bar_length_mm:
+                produced = _get_produced_for_lot(
+                    db=db,
+                    lot_id=m.lot_id,
+                    fallback_machine_name=machine_name,
+                    mtconnect_counts=mtconnect_counts
+                )
+                remaining_parts = max(0, total_planned - produced)
+                planned_bars_remaining = _calculate_bars_needed(
+                    part_length_mm=part_length,
+                    quantity_parts=remaining_parts,
+                    bar_length_mm=bar_length_mm,
+                    blade_width_mm=blade_width_mm,
+                    facing_allowance_mm=facing_allowance_mm,
+                    min_remainder_mm=min_remainder_mm
+                )
+                if planned_bars_remaining is not None:
+                    remaining_bars = max(0, planned_bars_remaining - net_issued)
             output.append({
                 "id": m.id,
                 "lot_id": m.lot_id,
@@ -660,10 +920,16 @@ def get_lot_materials(
                 "drawing_number": drawing_number,
                 "material_type": m.material_type,
                 "diameter": m.diameter,
+                "bar_length_mm": bar_length_mm,
+                "blade_width_mm": blade_width_mm,
+                "facing_allowance_mm": facing_allowance_mm,
+                "min_remainder_mm": min_remainder_mm,
                 "issued_bars": m.issued_bars or 0,
                 "returned_bars": m.returned_bars or 0,
                 "defect_bars": m.defect_bars or 0,
-                "used_bars": (m.issued_bars or 0) - (m.returned_bars or 0) - (m.defect_bars or 0),
+                "used_bars": net_issued,
+                "remaining_bars": remaining_bars,
+                "planned_bars_remaining": planned_bars_remaining,
                 "issued_at": m.issued_at,
                 "status": m.status,
                 "notes": m.notes,
@@ -715,6 +981,10 @@ def get_lot_material_detail(
                 "operation_type": op.operation_type,
                 "quantity_bars": op.quantity_bars,
                 "diameter": op.diameter,
+                "bar_length_mm": op.bar_length_mm,
+                "blade_width_mm": op.blade_width_mm,
+                "facing_allowance_mm": op.facing_allowance_mm,
+                "min_remainder_mm": op.min_remainder_mm,
                 "performed_by": op.performed_by,
                 "performer_name": performer.full_name if performer else None,
                 "performed_at": op.performed_at,
@@ -731,9 +1001,16 @@ def get_lot_material_detail(
             "drawing_number": drawing_number,
             "material_type": lot_material.material_type,
             "diameter": lot_material.diameter,
+            "bar_length_mm": lot_material.bar_length_mm,
+            "blade_width_mm": lot_material.blade_width_mm,
+            "facing_allowance_mm": lot_material.facing_allowance_mm,
+            "min_remainder_mm": lot_material.min_remainder_mm,
             "issued_bars": lot_material.issued_bars or 0,
             "returned_bars": lot_material.returned_bars or 0,
-            "used_bars": (lot_material.issued_bars or 0) - (lot_material.returned_bars or 0),
+            "defect_bars": lot_material.defect_bars or 0,
+            "used_bars": (lot_material.issued_bars or 0) - (lot_material.returned_bars or 0) - (lot_material.defect_bars or 0),
+            "remaining_bars": None,
+            "planned_bars_remaining": None,
             "issued_at": lot_material.issued_at,
             "status": lot_material.status,
             "notes": lot_material.notes,
@@ -777,6 +1054,10 @@ def get_material_history(
                 "operation_type": op.operation_type,
                 "quantity_bars": op.quantity_bars,
                 "diameter": op.diameter,
+                "bar_length_mm": op.bar_length_mm,
+                "blade_width_mm": op.blade_width_mm,
+                "facing_allowance_mm": op.facing_allowance_mm,
+                "min_remainder_mm": op.min_remainder_mm,
                 "performed_by": op.performed_by,
                 "performer_name": performer.full_name if performer else None,
                 "performed_at": op.performed_at,

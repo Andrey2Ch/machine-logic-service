@@ -30,6 +30,10 @@ class MachineDB(Base):
     serial_number = Column(String(255), nullable=True)
     notes = Column(Text, nullable=True)
     display_order = Column(Integer, nullable=True)
+    # Параметры расчета материала (по станку)
+    material_blade_width_mm = Column(Float, nullable=True)
+    material_facing_allowance_mm = Column(Float, nullable=True)
+    material_min_remainder_mm = Column(Float, nullable=True)
     
     # Добавляем связь с карточками
     cards = relationship("CardDB", back_populates="machine")
@@ -245,6 +249,11 @@ class LotMaterialDB(Base):
     material_receipt_id = Column(Integer, nullable=True)  # будет FK позже
     material_type = Column(String(100), nullable=True)
     diameter = Column(Float, nullable=True)
+    # Длина прутка и параметры расчета (для конкретной выдачи/работы)
+    bar_length_mm = Column(Float, nullable=True)
+    blade_width_mm = Column(Float, nullable=True)
+    facing_allowance_mm = Column(Float, nullable=True)
+    min_remainder_mm = Column(Float, nullable=True)
     calculated_bars_needed = Column(Integer, nullable=True)
     calculated_weight_kg = Column(Float, nullable=True)
     issued_bars = Column(Integer, default=0)
@@ -289,6 +298,11 @@ class MaterialOperationDB(Base):
     operation_type = Column(String(20), nullable=False)  # issue, add, return, correction
     quantity_bars = Column(Integer, nullable=False)  # положительное = выдача, отрицательное = возврат
     diameter = Column(Float, nullable=True)  # диаметр (для справки)
+    # Снимок параметров расчета на момент операции
+    bar_length_mm = Column(Float, nullable=True)
+    blade_width_mm = Column(Float, nullable=True)
+    facing_allowance_mm = Column(Float, nullable=True)
+    min_remainder_mm = Column(Float, nullable=True)
     performed_by = Column(Integer, ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
     performed_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     notes = Column(Text, nullable=True)
