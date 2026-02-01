@@ -1,6 +1,9 @@
 import logging
 import math
+import os
+import httpx
 from datetime import datetime, timezone, timedelta
+from sqlalchemy import text
 from sqlalchemy.orm import Session, aliased
 from .telegram_client import send_telegram_message
 from .whatsapp_client import send_whatsapp_to_role, send_whatsapp_to_role_personal, send_whatsapp_to_all_enabled_roles, WHATSAPP_ENABLED
@@ -91,6 +94,29 @@ async def check_low_materials_and_notify():
             .all()
         )
 
+        mtconnect_counts = {}
+        try:
+            mtconnect_api_url = os.getenv('MTCONNECT_API_URL', 'https://mtconnect-core-production.up.railway.app')
+            with httpx.Client(timeout=5.0) as client:
+                response = client.get(f"{mtconnect_api_url}/api/machines")
+                if response.status_code == 200:
+                    data = response.json()
+                    all_machines = []
+                    if data.get('machines', {}).get('mtconnect'):
+                        all_machines.extend(data['machines']['mtconnect'])
+                    if data.get('machines', {}).get('adam'):
+                        all_machines.extend(data['machines']['adam'])
+                    for m in all_machines:
+                        name = m.get('name', '')
+                        normalized = name.replace('_', '-').upper()
+                        if normalized.startswith('M-'):
+                            parts = normalized.split('-', 2)
+                            if len(parts) >= 3:
+                                normalized = parts[2]
+                        mtconnect_counts[normalized] = m.get('data', {}).get('displayPartCount')
+        except Exception as e:
+            logger.warning(f"MTConnect API unavailable: {e}")
+
         for lot_material, lot, machine, part in items:
             net_issued = (lot_material.issued_bars or 0) - (lot_material.returned_bars or 0) - (lot_material.defect_bars or 0)
             if net_issued <= 0:
@@ -125,7 +151,22 @@ async def check_low_materials_and_notify():
             parts_per_bar = math.floor(usable_length / length_per_part)
             if parts_per_bar <= 0:
                 continue
-            remaining_parts_by_material = net_issued * parts_per_bar
+            # produced parts (MTConnect -> fallback to machine_readings)
+            produced = None
+            if machine and machine.name:
+                normalized = machine.name.replace('_', '-').upper()
+                if normalized.startswith('M-'):
+                    parts = normalized.split('-', 2)
+                    if len(parts) >= 3:
+                        normalized = parts[2]
+                produced = mtconnect_counts.get(normalized)
+
+            if produced is None:
+                # MTConnect недоступен - пропускаем
+                continue
+
+            produced = int(produced)
+            remaining_parts_by_material = max(0, (net_issued * parts_per_bar) - produced)
             hours = round((remaining_parts_by_material * cycle_time) / 3600.0, 2)
 
             if hours <= 12:

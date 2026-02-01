@@ -136,7 +136,7 @@ def _get_produced_for_lot(
     lot_id: int,
     fallback_machine_name: Optional[str],
     mtconnect_counts: dict
-) -> int:
+) -> Optional[int]:
     setup_query = text("""
         SELECT sj.id as setup_job_id, m.name as machine_name
         FROM setup_jobs sj
@@ -155,19 +155,10 @@ def _get_produced_for_lot(
         normalized = _normalize_machine_name(machine_name)
         produced = mtconnect_counts.get(normalized)
 
-    if produced is None and setup_job_id:
-        fallback_query = text("""
-            SELECT reading
-            FROM machine_readings
-            WHERE setup_job_id = :setup_job_id
-            ORDER BY id DESC
-            LIMIT 1
-        """)
-        fallback_result = db.execute(fallback_query, {"setup_job_id": setup_job_id}).fetchone()
-        if fallback_result:
-            produced = fallback_result.reading
+    if produced is None:
+        return None
 
-    return int(produced or 0)
+    return int(produced)
 
 
 def _get_cycle_time_seconds(
@@ -201,7 +192,8 @@ def _calculate_hours_by_material(
     blade_width_mm: float,
     facing_allowance_mm: float,
     min_remainder_mm: float,
-    cycle_time_sec: Optional[int]
+    cycle_time_sec: Optional[int],
+    produced_parts: int = 0
 ) -> Optional[float]:
     if not bar_length_mm or not part_length_mm or not cycle_time_sec or net_issued_bars <= 0:
         return None
@@ -212,7 +204,7 @@ def _calculate_hours_by_material(
     parts_per_bar = math.floor(usable_length / length_per_part)
     if parts_per_bar <= 0:
         return None
-    remaining_parts_by_material = net_issued_bars * parts_per_bar
+    remaining_parts_by_material = max(0, (net_issued_bars * parts_per_bar) - produced_parts)
     hours = (remaining_parts_by_material * cycle_time_sec) / 3600.0
     return round(hours, 2)
 
@@ -456,15 +448,25 @@ def issue_material_to_machine(
                 part_id=lot.part_id if lot else None
             )
             net_issued = (lot_material.issued_bars or 0) - (lot_material.returned_bars or 0) - (lot_material.defect_bars or 0)
-            hours = _calculate_hours_by_material(
-                net_issued_bars=net_issued,
-                part_length_mm=part_length_mm,
-                bar_length_mm=lot_material.bar_length_mm,
-                blade_width_mm=lot_material.blade_width_mm or (machine.material_blade_width_mm if machine else None) or DEFAULT_BLADE_WIDTH_MM,
-                facing_allowance_mm=lot_material.facing_allowance_mm or (machine.material_facing_allowance_mm if machine else None) or DEFAULT_FACING_ALLOWANCE_MM,
-                min_remainder_mm=lot_material.min_remainder_mm or (machine.material_min_remainder_mm if machine else None) or DEFAULT_MIN_REMAINDER_MM,
-                cycle_time_sec=cycle_time_sec
+            produced = _get_produced_for_lot(
+                db=db,
+                lot_id=lot_material.lot_id,
+                fallback_machine_name=machine.name if machine else None,
+                mtconnect_counts=_fetch_mtconnect_counts()
             )
+            if produced is None:
+                hours = None
+            else:
+                hours = _calculate_hours_by_material(
+                    net_issued_bars=net_issued,
+                    part_length_mm=part_length_mm,
+                    bar_length_mm=lot_material.bar_length_mm,
+                    blade_width_mm=lot_material.blade_width_mm or (machine.material_blade_width_mm if machine else None) or DEFAULT_BLADE_WIDTH_MM,
+                    facing_allowance_mm=lot_material.facing_allowance_mm or (machine.material_facing_allowance_mm if machine else None) or DEFAULT_FACING_ALLOWANCE_MM,
+                    min_remainder_mm=lot_material.min_remainder_mm or (machine.material_min_remainder_mm if machine else None) or DEFAULT_MIN_REMAINDER_MM,
+                    cycle_time_sec=cycle_time_sec,
+                    produced_parts=produced
+                )
             if hours is not None and hours <= 12:
                 try:
                     asyncio.run(send_material_low_notification(
@@ -1001,17 +1003,18 @@ def get_lot_materials(
                     fallback_machine_name=machine_name,
                     mtconnect_counts=mtconnect_counts
                 )
-                remaining_parts = max(0, total_planned - produced)
-                planned_bars_remaining = _calculate_bars_needed(
-                    part_length_mm=part_length,
-                    quantity_parts=remaining_parts,
-                    bar_length_mm=bar_length_mm,
-                    blade_width_mm=blade_width_mm,
-                    facing_allowance_mm=facing_allowance_mm,
-                    min_remainder_mm=min_remainder_mm
-                )
-                if planned_bars_remaining is not None:
-                    remaining_bars = max(0, planned_bars_remaining - net_issued)
+                if produced is not None:
+                    remaining_parts = max(0, total_planned - produced)
+                    planned_bars_remaining = _calculate_bars_needed(
+                        part_length_mm=part_length,
+                        quantity_parts=remaining_parts,
+                        bar_length_mm=bar_length_mm,
+                        blade_width_mm=blade_width_mm,
+                        facing_allowance_mm=facing_allowance_mm,
+                        min_remainder_mm=min_remainder_mm
+                    )
+                    if planned_bars_remaining is not None:
+                        remaining_bars = max(0, planned_bars_remaining - net_issued)
             output.append({
                 "id": m.id,
                 "lot_id": m.lot_id,
@@ -1155,15 +1158,24 @@ def get_material_hours(
     )
     part_length_mm = part.part_length if part else None
 
-    hours = _calculate_hours_by_material(
-        net_issued_bars=net_issued,
-        part_length_mm=part_length_mm,
-        bar_length_mm=bar_length_mm,
-        blade_width_mm=blade_width_mm,
-        facing_allowance_mm=facing_allowance_mm,
-        min_remainder_mm=min_remainder_mm,
-        cycle_time_sec=cycle_time_sec
+    produced = _get_produced_for_lot(
+        db=db,
+        lot_id=lot_material.lot_id,
+        fallback_machine_name=machine.name if machine else None,
+        mtconnect_counts=_fetch_mtconnect_counts()
     )
+    hours = None
+    if produced is not None:
+        hours = _calculate_hours_by_material(
+            net_issued_bars=net_issued,
+            part_length_mm=part_length_mm,
+            bar_length_mm=bar_length_mm,
+            blade_width_mm=blade_width_mm,
+            facing_allowance_mm=facing_allowance_mm,
+            min_remainder_mm=min_remainder_mm,
+            cycle_time_sec=cycle_time_sec,
+            produced_parts=produced
+        )
 
     return {
         "lot_material_id": lot_material.id,
@@ -1175,6 +1187,7 @@ def get_material_hours(
         "bar_length_mm": bar_length_mm,
         "cycle_time_sec": cycle_time_sec,
         "net_issued_bars": net_issued,
+        "produced_parts": produced,
         "hours_remaining": hours
     }
 
