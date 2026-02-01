@@ -8,6 +8,7 @@
 import logging
 import os
 import httpx
+import asyncio
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import and_, or_, func, text
@@ -25,6 +26,7 @@ from src.models.models import (
     MaterialOperationDB,
     SetupDB
 )
+from src.services.notification_service import send_material_low_notification
 from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger(__name__)
@@ -166,6 +168,53 @@ def _get_produced_for_lot(
             produced = fallback_result.reading
 
     return int(produced or 0)
+
+
+def _get_cycle_time_seconds(
+    *,
+    db: Session,
+    lot_id: int,
+    machine_id: Optional[int],
+    part_id: Optional[int]
+) -> Optional[int]:
+    cycle_time = None
+    if machine_id:
+        setup = db.query(SetupDB.cycle_time).filter(
+            SetupDB.lot_id == lot_id,
+            SetupDB.machine_id == machine_id,
+            SetupDB.end_time == None
+        ).order_by(SetupDB.id.desc()).first()
+        if setup and setup[0]:
+            cycle_time = setup[0]
+    if not cycle_time and part_id:
+        part = db.query(PartDB.avg_cycle_time).filter(PartDB.id == part_id).first()
+        if part and part[0]:
+            cycle_time = part[0]
+    return int(cycle_time) if cycle_time else None
+
+
+def _calculate_hours_by_material(
+    *,
+    net_issued_bars: int,
+    part_length_mm: Optional[float],
+    bar_length_mm: Optional[float],
+    blade_width_mm: float,
+    facing_allowance_mm: float,
+    min_remainder_mm: float,
+    cycle_time_sec: Optional[int]
+) -> Optional[float]:
+    if not bar_length_mm or not part_length_mm or not cycle_time_sec or net_issued_bars <= 0:
+        return None
+    usable_length = bar_length_mm - min_remainder_mm
+    length_per_part = part_length_mm + facing_allowance_mm + blade_width_mm
+    if usable_length <= 0 or length_per_part <= 0:
+        return None
+    parts_per_bar = math.floor(usable_length / length_per_part)
+    if parts_per_bar <= 0:
+        return None
+    remaining_parts_by_material = net_issued_bars * parts_per_bar
+    hours = (remaining_parts_by_material * cycle_time_sec) / 3600.0
+    return round(hours, 2)
 
 # ========== Pydantic схемы ==========
 
@@ -396,6 +445,58 @@ def issue_material_to_machine(
         
         db.commit()
         db.refresh(lot_material)
+
+        # Если есть данные для расчета — проверяем, хватит ли материала на 12 часов
+        try:
+            part_length_mm = part.part_length if part else None
+            cycle_time_sec = _get_cycle_time_seconds(
+                db=db,
+                lot_id=lot_material.lot_id,
+                machine_id=lot_material.machine_id,
+                part_id=lot.part_id if lot else None
+            )
+            net_issued = (lot_material.issued_bars or 0) - (lot_material.returned_bars or 0) - (lot_material.defect_bars or 0)
+            hours = _calculate_hours_by_material(
+                net_issued_bars=net_issued,
+                part_length_mm=part_length_mm,
+                bar_length_mm=lot_material.bar_length_mm,
+                blade_width_mm=lot_material.blade_width_mm or (machine.material_blade_width_mm if machine else None) or DEFAULT_BLADE_WIDTH_MM,
+                facing_allowance_mm=lot_material.facing_allowance_mm or (machine.material_facing_allowance_mm if machine else None) or DEFAULT_FACING_ALLOWANCE_MM,
+                min_remainder_mm=lot_material.min_remainder_mm or (machine.material_min_remainder_mm if machine else None) or DEFAULT_MIN_REMAINDER_MM,
+                cycle_time_sec=cycle_time_sec
+            )
+            if hours is not None and hours <= 12:
+                try:
+                    asyncio.run(send_material_low_notification(
+                        db,
+                        lot_material=lot_material,
+                        machine_name=machine.name,
+                        lot_number=lot.lot_number,
+                        drawing_number=drawing_number or "—",
+                        hours_remaining=hours,
+                        net_issued_bars=net_issued,
+                        bar_length_mm=lot_material.bar_length_mm
+                    ))
+                except Exception:
+                    # fallback: if event loop already running or any error
+                    try:
+                        loop = asyncio.get_event_loop()
+                        loop.create_task(send_material_low_notification(
+                            db,
+                            lot_material=lot_material,
+                            machine_name=machine.name,
+                            lot_number=lot.lot_number,
+                            drawing_number=drawing_number or "—",
+                            hours_remaining=hours,
+                            net_issued_bars=net_issued,
+                            bar_length_mm=lot_material.bar_length_mm
+                        ))
+                    except Exception as e:
+                        logger.warning(f"Failed to schedule material low notification: {e}")
+                lot_material.material_low_notified_at = datetime.now(timezone.utc)
+                db.commit()
+        except Exception as e:
+            logger.warning(f"Material hours check failed: {e}")
         
         return {
             "id": lot_material.id,
@@ -1022,6 +1123,60 @@ def get_lot_material_detail(
     except Exception as e:
         logger.error(f"Error fetching lot material detail: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Ошибка: {str(e)}")
+
+
+@router.get("/lot-materials/{id}/material-hours")
+def get_material_hours(
+    id: int,
+    db: Session = Depends(get_db_session)
+):
+    """
+    Рассчитать, на сколько часов хватит выданного материала.
+    Возвращает None, если данных недостаточно (нет длины прутка/цикла/длины детали).
+    """
+    lot_material = db.query(LotMaterialDB).filter(LotMaterialDB.id == id).first()
+    if not lot_material:
+        raise HTTPException(status_code=404, detail=f"Запись материала {id} не найдена")
+
+    lot = db.query(LotDB).filter(LotDB.id == lot_material.lot_id).first()
+    part = db.query(PartDB).filter(PartDB.id == lot.part_id).first() if lot and lot.part_id else None
+    machine = db.query(MachineDB).filter(MachineDB.id == lot_material.machine_id).first() if lot_material.machine_id else None
+
+    bar_length_mm = lot_material.bar_length_mm
+    blade_width_mm = lot_material.blade_width_mm or (machine.material_blade_width_mm if machine else None) or DEFAULT_BLADE_WIDTH_MM
+    facing_allowance_mm = lot_material.facing_allowance_mm or (machine.material_facing_allowance_mm if machine else None) or DEFAULT_FACING_ALLOWANCE_MM
+    min_remainder_mm = lot_material.min_remainder_mm or (machine.material_min_remainder_mm if machine else None) or DEFAULT_MIN_REMAINDER_MM
+    net_issued = (lot_material.issued_bars or 0) - (lot_material.returned_bars or 0) - (lot_material.defect_bars or 0)
+    cycle_time_sec = _get_cycle_time_seconds(
+        db=db,
+        lot_id=lot_material.lot_id,
+        machine_id=lot_material.machine_id,
+        part_id=lot.part_id if lot else None
+    )
+    part_length_mm = part.part_length if part else None
+
+    hours = _calculate_hours_by_material(
+        net_issued_bars=net_issued,
+        part_length_mm=part_length_mm,
+        bar_length_mm=bar_length_mm,
+        blade_width_mm=blade_width_mm,
+        facing_allowance_mm=facing_allowance_mm,
+        min_remainder_mm=min_remainder_mm,
+        cycle_time_sec=cycle_time_sec
+    )
+
+    return {
+        "lot_material_id": lot_material.id,
+        "lot_id": lot_material.lot_id,
+        "lot_number": lot.lot_number if lot else None,
+        "machine_id": lot_material.machine_id,
+        "machine_name": machine.name if machine else None,
+        "part_length_mm": part_length_mm,
+        "bar_length_mm": bar_length_mm,
+        "cycle_time_sec": cycle_time_sec,
+        "net_issued_bars": net_issued,
+        "hours_remaining": hours
+    }
 
 
 @router.get("/history", response_model=List[MaterialOperationOut])

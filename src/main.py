@@ -47,7 +47,7 @@ from src.utils.sheets_handler import save_to_sheets
 import asyncio
 import httpx
 import aiohttp
-from src.services.notification_service import send_setup_approval_notifications, send_batch_discrepancy_alert
+from src.services.notification_service import send_setup_approval_notifications, send_batch_discrepancy_alert, check_low_materials_and_notify
 from src.services.mtconnect_client import sync_counter_to_mtconnect, reset_counter_on_qa_approval
 from src.services.setup_program_handover import (
     check_setup_program_handover_gate,
@@ -141,6 +141,29 @@ async def startup_event():
         trigger=CronTrigger(hour=7, minute=0, timezone=SCHEDULER_TZ),
         id="auto_checkout_morning",
         name="Автоматический выход для ночных смен (07:00)",
+        replace_existing=True
+    )
+
+    # Проверка: хватает ли материала на 12 часов (утро/день/вечер)
+    scheduler.add_job(
+        check_low_materials_and_notify,
+        trigger=CronTrigger(hour=6, minute=30, timezone=SCHEDULER_TZ),
+        id="material_low_morning",
+        name="Проверка материала (06:30)",
+        replace_existing=True
+    )
+    scheduler.add_job(
+        check_low_materials_and_notify,
+        trigger=CronTrigger(hour=15, minute=0, timezone=SCHEDULER_TZ),
+        id="material_low_afternoon",
+        name="Проверка материала (15:00)",
+        replace_existing=True
+    )
+    scheduler.add_job(
+        check_low_materials_and_notify,
+        trigger=CronTrigger(hour=18, minute=0, timezone=SCHEDULER_TZ),
+        id="material_low_evening",
+        name="Проверка материала (18:00)",
         replace_existing=True
     )
     

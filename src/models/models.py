@@ -269,6 +269,7 @@ class LotMaterialDB(Base):
     # Вычисляется автоматически: issued_bars - returned_bars - defect_bars
     status = Column(String(20), default="pending")
     notes = Column(Text, nullable=True)
+    material_low_notified_at = Column(DateTime, nullable=True)
     closed_at = Column(DateTime, nullable=True)  # Дата закрытия записи кладовщиком
     closed_by = Column(Integer, ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)  # Кто закрыл
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))

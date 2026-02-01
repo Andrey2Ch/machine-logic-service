@@ -1,9 +1,12 @@
 import logging
+import math
+from datetime import datetime, timezone, timedelta
 from sqlalchemy.orm import Session, aliased
 from .telegram_client import send_telegram_message
 from .whatsapp_client import send_whatsapp_to_role, send_whatsapp_to_role_personal, send_whatsapp_to_all_enabled_roles, WHATSAPP_ENABLED
 # Убираем RoleDB из импорта
-from src.models.models import SetupDB, EmployeeDB, MachineDB, LotDB, PartDB 
+from src.models.models import SetupDB, EmployeeDB, MachineDB, LotDB, PartDB, LotMaterialDB
+from src.routers.notification_settings import is_notification_enabled
 from src.database import SessionLocal  # Для создания своей сессии в background tasks
 
 logger = logging.getLogger(__name__)
@@ -14,6 +17,135 @@ OPERATOR_ROLE_ID = 1 # Correct
 MACHINIST_ROLE_ID = 2 # Correct
 QA_ROLE_ID = 5 # ОТК
 VIEWER_ROLE_ID = 7 # Viewer (мониторинг)
+
+MATERIAL_LOW_NOTIFICATION_TYPE = "material_low"
+DEFAULT_BLADE_WIDTH_MM = 3.0
+DEFAULT_FACING_ALLOWANCE_MM = 0.5
+DEFAULT_MIN_REMAINDER_MM = 300.0
+
+
+async def send_material_low_notification(
+    db: Session,
+    *,
+    lot_material: LotMaterialDB,
+    machine_name: str,
+    lot_number: str,
+    drawing_number: str,
+    hours_remaining: float,
+    net_issued_bars: int,
+    bar_length_mm: float
+):
+    """
+    Отправить уведомление о недостатке материала (<=12 часов).
+    Отправляется админам и наладчикам при включенных настройках.
+    """
+    message = (
+        f"<b>⚠️ Материал заканчивается</b>\n\n"
+        f"<b>Станок:</b> {machine_name}\n"
+        f"<b>Чертёж:</b> {drawing_number}\n"
+        f"<b>Партия:</b> {lot_number}\n"
+        f"<b>Осталось:</b> ~{hours_remaining} ч\n"
+        f"<b>Выдано (нетто):</b> {net_issued_bars} прутков\n"
+        f"<b>Длина прутка:</b> {bar_length_mm} мм"
+    )
+
+    telegram_enabled = await is_notification_enabled(db, MATERIAL_LOW_NOTIFICATION_TYPE, 'telegram')
+    summary = {"telegram_sent": 0, "whatsapp_sent": 0, "telegram_targets": 0}
+
+    if telegram_enabled and await is_notification_enabled(db, MATERIAL_LOW_NOTIFICATION_TYPE, 'machinists'):
+        machinist_counts = await _notify_role_by_id_sqlalchemy(
+            db, MACHINIST_ROLE_ID, message,
+            notification_type=MATERIAL_LOW_NOTIFICATION_TYPE
+        )
+        summary["telegram_targets"] += machinist_counts["telegram_targets"]
+        summary["telegram_sent"] += machinist_counts["telegram_sent"]
+        summary["whatsapp_sent"] += machinist_counts["whatsapp_sent"]
+
+    if telegram_enabled and await is_notification_enabled(db, MATERIAL_LOW_NOTIFICATION_TYPE, 'admin'):
+        admin_counts = await _notify_role_by_id_sqlalchemy(
+            db, ADMIN_ROLE_ID, message,
+            notification_type=MATERIAL_LOW_NOTIFICATION_TYPE
+        )
+        summary["telegram_targets"] += admin_counts["telegram_targets"]
+        summary["telegram_sent"] += admin_counts["telegram_sent"]
+        summary["whatsapp_sent"] += admin_counts["whatsapp_sent"]
+
+    logger.info(f"Material low notification sent for lot_material={lot_material.id}: {summary}")
+    return summary
+
+
+async def check_low_materials_and_notify():
+    """
+    Периодическая проверка: если материала осталось <=12 часов — отправляем уведомления.
+    Пропускаем если нет длины прутка или нет времени цикла.
+    """
+    own_db = SessionLocal()
+    try:
+        items = (
+            own_db.query(LotMaterialDB, LotDB, MachineDB, PartDB)
+            .join(LotDB, LotMaterialDB.lot_id == LotDB.id)
+            .join(MachineDB, LotMaterialDB.machine_id == MachineDB.id)
+            .outerjoin(PartDB, LotDB.part_id == PartDB.id)
+            .filter(LotMaterialDB.closed_at == None)
+            .filter(LotMaterialDB.bar_length_mm != None)
+            .all()
+        )
+
+        for lot_material, lot, machine, part in items:
+            net_issued = (lot_material.issued_bars or 0) - (lot_material.returned_bars or 0) - (lot_material.defect_bars or 0)
+            if net_issued <= 0:
+                continue
+
+            if lot_material.material_low_notified_at and lot_material.material_low_notified_at > datetime.now(timezone.utc) - timedelta(hours=12):
+                continue
+
+            # cycle_time: active setup -> part avg
+            cycle_time = None
+            setup = own_db.query(SetupDB.cycle_time).filter(
+                SetupDB.lot_id == lot.id,
+                SetupDB.machine_id == machine.id,
+                SetupDB.end_time == None
+            ).order_by(SetupDB.id.desc()).first()
+            if setup and setup[0]:
+                cycle_time = setup[0]
+            elif part and part.avg_cycle_time:
+                cycle_time = part.avg_cycle_time
+            if not cycle_time or not part or not part.part_length:
+                continue
+
+            bar_length_mm = lot_material.bar_length_mm
+            blade_width_mm = lot_material.blade_width_mm or machine.material_blade_width_mm or DEFAULT_BLADE_WIDTH_MM
+            facing_allowance_mm = lot_material.facing_allowance_mm or machine.material_facing_allowance_mm or DEFAULT_FACING_ALLOWANCE_MM
+            min_remainder_mm = lot_material.min_remainder_mm or machine.material_min_remainder_mm or DEFAULT_MIN_REMAINDER_MM
+
+            usable_length = bar_length_mm - min_remainder_mm
+            length_per_part = part.part_length + facing_allowance_mm + blade_width_mm
+            if usable_length <= 0 or length_per_part <= 0:
+                continue
+            parts_per_bar = math.floor(usable_length / length_per_part)
+            if parts_per_bar <= 0:
+                continue
+            remaining_parts_by_material = net_issued * parts_per_bar
+            hours = round((remaining_parts_by_material * cycle_time) / 3600.0, 2)
+
+            if hours <= 12:
+                await send_material_low_notification(
+                    own_db,
+                    lot_material=lot_material,
+                    machine_name=machine.name,
+                    lot_number=lot.lot_number,
+                    drawing_number=part.drawing_number if part else "—",
+                    hours_remaining=hours,
+                    net_issued_bars=net_issued,
+                    bar_length_mm=bar_length_mm
+                )
+                lot_material.material_low_notified_at = datetime.now(timezone.utc)
+                own_db.commit()
+
+    except Exception as e:
+        logger.error(f"Material low check failed: {e}", exc_info=True)
+    finally:
+        own_db.close()
 
 async def send_setup_approval_notifications(db: Session, setup_id: int, notification_type: str = "approval"):
     """
