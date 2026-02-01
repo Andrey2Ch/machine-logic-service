@@ -907,6 +907,7 @@ def get_lot_materials(
     lot_id: Optional[int] = Query(None, description="ID лота"),
     machine_id: Optional[int] = Query(None, description="ID станка"),
     status: Optional[str] = Query(None, description="Статус (pending/issued/partially_returned/completed/returned)"),
+    status_group: Optional[str] = Query(None, description="active/pending/closed/all"),
     db: Session = Depends(get_db_session)
 ):
     """Получить материалы по лоту, станку или статусу (ОПТИМИЗИРОВАНО - один SQL запрос)"""
@@ -965,6 +966,15 @@ def get_lot_materials(
             query = query.filter(LotMaterialDB.machine_id == machine_id)
         if status:
             query = query.filter(LotMaterialDB.status == status)
+        if status_group and status_group != "all":
+            if status_group == "active":
+                query = query.filter(LotMaterialDB.closed_at == None)
+                query = query.filter(or_(latest_setup_subq.c.setup_status != 'completed', latest_setup_subq.c.setup_status == None))
+            elif status_group == "pending":
+                query = query.filter(LotMaterialDB.closed_at == None)
+                query = query.filter(latest_setup_subq.c.setup_status == 'completed')
+            elif status_group == "closed":
+                query = query.filter(LotMaterialDB.closed_at != None)
         
         # Выполняем запрос (ОДИН запрос вместо N+1!)
         results = query.order_by(LotMaterialDB.created_at.desc()).all()
