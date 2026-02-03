@@ -911,6 +911,9 @@ def get_lot_materials(
     db: Session = Depends(get_db_session)
 ):
     """Получить материалы по лоту, станку или статусу (ОПТИМИЗИРОВАНО v2 - без ROW_NUMBER)"""
+    import time
+    t_start = time.time()
+    
     try:
         from sqlalchemy import func
         
@@ -947,6 +950,8 @@ def get_lot_materials(
             base_query = base_query.filter(LotMaterialDB.closed_at == None)
         
         base_results = base_query.order_by(LotMaterialDB.created_at.desc()).all()
+        t_base = time.time()
+        logger.info(f"[lot-materials] base_query took {(t_base - t_start)*1000:.0f}ms, rows={len(base_results)}")
         
         if not base_results:
             return []
@@ -989,6 +994,9 @@ def get_lot_materials(
             
             for lot_id_val, machine_id_val, setup_status in setup_rows:
                 setup_statuses[(lot_id_val, machine_id_val)] = setup_status
+        
+        t_setups = time.time()
+        logger.info(f"[lot-materials] setup_query took {(t_setups - t_base)*1000:.0f}ms, pairs={len(pairs)}")
         
         # ШАГ 4: Объединяем и фильтруем по status_group
         results = []
@@ -1077,6 +1085,8 @@ def get_lot_materials(
                 "setup_status": setup_status
             })
         
+        t_end = time.time()
+        logger.info(f"[lot-materials] TOTAL {(t_end - t_start)*1000:.0f}ms, status_group={status_group}, output={len(output)}")
         return output
     except Exception as e:
         logger.error(f"Error fetching lot materials: {e}", exc_info=True)
