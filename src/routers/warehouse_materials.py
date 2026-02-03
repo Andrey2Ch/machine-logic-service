@@ -20,6 +20,7 @@ from datetime import date
 import os
 import json
 import httpx
+import re
 
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_OCR_MODEL = os.getenv("ANTHROPIC_OCR_MODEL", "claude-sonnet-4-5-20250929")
@@ -283,7 +284,12 @@ def ocr_label(payload: OcrLabelIn):
     prompt = (
         "Extract fields from this Hebrew material label image and return JSON with keys: "
         "batch_id, supplier, supplier_doc_number, date_received, material_type, diameter, "
-        "bar_length, quantity_received, drawing_numbers, preferred_drawing. "
+        "bar_length, quantity_received, drawing_numbers, preferred_drawing, diameter_fraction. "
+        "Rules: batch_id must be the internal batch number (מס מנה) like 26000132-1. "
+        "drawing_numbers should include part numbers (מס חלק) like 756-22 (can be multiple). "
+        "diameter should be in millimeters if possible. If the diameter is shown as a fraction "
+        '(e.g. עגול 3/4), put that in diameter_fraction as "3/4". '
+        "bar_length is the bar length (אורך מוט). "
         "If a field is missing, return null. Use numeric types for diameter/bar_length/quantity. "
         "Return ONLY valid JSON."
     )
@@ -332,4 +338,59 @@ def ocr_label(payload: OcrLabelIn):
     except Exception:
         return OcrLabelOut(raw_text=text)
 
+    parsed = _postprocess_ocr(parsed, text)
     return OcrLabelOut(**parsed)
+
+
+def _postprocess_ocr(parsed: dict, raw_text: str) -> dict:
+    # Normalize batch_id using Hebrew label field if model mixed it with part number
+    batch_match = re.search(r"מס מנה[:\s]*([0-9]{5,}(?:-\d+)?)", raw_text)
+    if batch_match:
+        parsed["batch_id"] = batch_match.group(1)
+
+    # Ensure drawing_numbers include part number(s)
+    part_match = re.search(r"מס חלק[:\s]*([0-9]+(?:-\d+)?)", raw_text)
+    if part_match:
+        drawings = parsed.get("drawing_numbers") or []
+        if part_match.group(1) not in drawings:
+            drawings.append(part_match.group(1))
+        parsed["drawing_numbers"] = drawings
+
+    # Extract bar length if present in text
+    length_match = re.search(r"אורך מוט[:\s]*([0-9]+(?:\.[0-9]+)?)", raw_text)
+    if length_match and parsed.get("bar_length") is None:
+        parsed["bar_length"] = float(length_match.group(1))
+
+    # If diameter equals bar length, clear it (likely mis-mapped)
+    if parsed.get("bar_length") is not None and parsed.get("diameter") == parsed.get("bar_length"):
+        parsed["diameter"] = None
+
+    # Parse diameter from fraction in inches
+    fraction = parsed.get("diameter_fraction")
+    if not fraction:
+        fraction_match = re.search(r"עגול\s*([0-9]+)\s*/\s*([0-9]+)", raw_text)
+        if fraction_match:
+            fraction = f"{fraction_match.group(1)}/{fraction_match.group(2)}"
+
+    if parsed.get("diameter") is None and fraction:
+        mm = _fraction_to_mm(fraction)
+        if mm:
+            parsed["diameter"] = mm
+
+    # Remove helper field if present
+    if "diameter_fraction" in parsed:
+        parsed.pop("diameter_fraction", None)
+
+    return parsed
+
+
+def _fraction_to_mm(value: str) -> Optional[float]:
+    match = re.match(r"^\s*(\d+)\s*/\s*(\d+)\s*$", value)
+    if not match:
+        return None
+    numerator = int(match.group(1))
+    denominator = int(match.group(2))
+    if denominator == 0:
+        return None
+    mm = (numerator / denominator) * 25.4
+    return round(mm, 2)
