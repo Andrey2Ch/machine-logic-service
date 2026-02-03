@@ -377,6 +377,7 @@ psql $DATABASE_URL -f scripts/seed_demo.sql
 
 📱 TG бот: @IsramatDemoBot
    Код оператора: DEMO-004
+
    Код админа: DEMO-001
 ```
 
