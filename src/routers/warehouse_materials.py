@@ -22,7 +22,7 @@ import json
 import httpx
 
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
-ANTHROPIC_OCR_MODEL = os.getenv("ANTHROPIC_OCR_MODEL", "claude-4-5-sonnet")
+ANTHROPIC_OCR_MODEL = os.getenv("ANTHROPIC_OCR_MODEL", "claude-sonnet-4-5-20250929")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
 router = APIRouter(
