@@ -11,7 +11,7 @@ import httpx
 import asyncio
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import and_, or_, func, text
+from sqlalchemy import and_, or_, func, text, tuple_
 from src.database import get_db_session
 from typing import List, Optional
 from pydantic import BaseModel
@@ -910,30 +910,12 @@ def get_lot_materials(
     status_group: Optional[str] = Query(None, description="active/pending/closed/all"),
     db: Session = Depends(get_db_session)
 ):
-    """Получить материалы по лоту, станку или статусу (ОПТИМИЗИРОВАНО - один SQL запрос)"""
+    """Получить материалы по лоту, станку или статусу (ОПТИМИЗИРОВАНО v2 - без ROW_NUMBER)"""
     try:
-        # ОПТИМИЗАЦИЯ: Используем LEFT JOIN LATERAL для получения статуса наладки
-        # вместо N+1 запросов в цикле Python
+        from sqlalchemy import func
         
-        from sqlalchemy import func, literal_column
-        from sqlalchemy.orm import aliased
-        
-        # Подзапрос: последняя наладка для каждой пары (lot_id, machine_id)
-        latest_setup_subq = (
-            db.query(
-                SetupDB.lot_id,
-                SetupDB.machine_id,
-                SetupDB.status.label('setup_status'),
-                func.row_number().over(
-                    partition_by=[SetupDB.lot_id, SetupDB.machine_id],
-                    order_by=SetupDB.created_at.desc()
-                ).label('rn')
-            )
-            .subquery()
-        )
-        
-        # Основной запрос с JOIN к подзапросу
-        query = (
+        # ШАГ 1: Получаем материалы БЕЗ статуса наладки (быстрый запрос)
+        base_query = (
             db.query(
                 LotMaterialDB,
                 LotDB.lot_number,
@@ -946,55 +928,104 @@ def get_lot_materials(
                 MachineDB.material_min_remainder_mm,
                 PartDB.drawing_number,
                 PartDB.part_length,
-                latest_setup_subq.c.setup_status
             )
             .outerjoin(LotDB, LotMaterialDB.lot_id == LotDB.id)
             .outerjoin(MachineDB, LotMaterialDB.machine_id == MachineDB.id)
             .outerjoin(PartDB, LotDB.part_id == PartDB.id)
-            .outerjoin(
-                latest_setup_subq,
-                (latest_setup_subq.c.lot_id == LotMaterialDB.lot_id) &
-                (latest_setup_subq.c.machine_id == LotMaterialDB.machine_id) &
-                (latest_setup_subq.c.rn == 1)
-            )
         )
         
-        # Применяем фильтры
+        # Применяем базовые фильтры (без status_group пока)
         if lot_id:
-            query = query.filter(LotMaterialDB.lot_id == lot_id)
+            base_query = base_query.filter(LotMaterialDB.lot_id == lot_id)
         if machine_id:
-            query = query.filter(LotMaterialDB.machine_id == machine_id)
+            base_query = base_query.filter(LotMaterialDB.machine_id == machine_id)
         if status:
-            query = query.filter(LotMaterialDB.status == status)
-        if status_group and status_group != "all":
-            if status_group == "active":
-                query = query.filter(LotMaterialDB.closed_at == None)
-                query = query.filter(or_(latest_setup_subq.c.setup_status != 'completed', latest_setup_subq.c.setup_status == None))
-            elif status_group == "pending":
-                query = query.filter(LotMaterialDB.closed_at == None)
-                query = query.filter(latest_setup_subq.c.setup_status == 'completed')
-            elif status_group == "closed":
-                query = query.filter(LotMaterialDB.closed_at != None)
+            base_query = base_query.filter(LotMaterialDB.status == status)
+        if status_group == "closed":
+            base_query = base_query.filter(LotMaterialDB.closed_at != None)
+        elif status_group in ("active", "pending"):
+            base_query = base_query.filter(LotMaterialDB.closed_at == None)
         
-        # Выполняем запрос (ОДИН запрос, без MTConnect!)
-        results = query.order_by(LotMaterialDB.created_at.desc()).all()
+        base_results = base_query.order_by(LotMaterialDB.created_at.desc()).all()
+        
+        if not base_results:
+            return []
+        
+        # ШАГ 2: Собираем уникальные пары (lot_id, machine_id)
+        pairs = set()
+        for row in base_results:
+            m = row[0]  # LotMaterialDB
+            pairs.add((m.lot_id, m.machine_id))
+        
+        # ШАГ 3: Получаем последний статус наладки ТОЛЬКО для нужных пар
+        # Используем подзапрос с MAX(created_at) - намного быстрее ROW_NUMBER
+        setup_statuses = {}
+        if pairs:
+            # Подзапрос: максимальная дата для каждой пары
+            max_dates_subq = (
+                db.query(
+                    SetupDB.lot_id,
+                    SetupDB.machine_id,
+                    func.max(SetupDB.created_at).label('max_created')
+                )
+                .filter(
+                    tuple_(SetupDB.lot_id, SetupDB.machine_id).in_(list(pairs))
+                )
+                .group_by(SetupDB.lot_id, SetupDB.machine_id)
+                .subquery()
+            )
+            
+            # Основной запрос: получаем статус по максимальной дате
+            setup_rows = (
+                db.query(SetupDB.lot_id, SetupDB.machine_id, SetupDB.status)
+                .join(
+                    max_dates_subq,
+                    (SetupDB.lot_id == max_dates_subq.c.lot_id) &
+                    (SetupDB.machine_id == max_dates_subq.c.machine_id) &
+                    (SetupDB.created_at == max_dates_subq.c.max_created)
+                )
+                .all()
+            )
+            
+            for lot_id_val, machine_id_val, setup_status in setup_rows:
+                setup_statuses[(lot_id_val, machine_id_val)] = setup_status
+        
+        # ШАГ 4: Объединяем и фильтруем по status_group
+        results = []
+        for row in base_results:
+            m = row[0]
+            setup_status = setup_statuses.get((m.lot_id, m.machine_id))
+            
+            # Фильтрация по status_group
+            if status_group == "active":
+                if setup_status == 'completed':
+                    continue  # Пропускаем - это pending
+            elif status_group == "pending":
+                if setup_status != 'completed':
+                    continue  # Пропускаем - это active
+            
+            results.append((*row, setup_status))
+        
+        if not results:
+            return []
         
         # Формируем результат (расчет как в MaterialCalculator - без MTConnect)
         output = []
-        for (
-            m,
-            lot_number,
-            lot_status,
-            total_planned_quantity,
-            initial_planned_quantity,
-            machine_name,
-            machine_blade_width_mm,
-            machine_facing_allowance_mm,
-            machine_min_remainder_mm,
-            drawing_number,
-            part_length,
-            setup_status
-        ) in results:
+        for row in results:
+            (
+                m,
+                lot_number,
+                lot_status,
+                total_planned_quantity,
+                initial_planned_quantity,
+                machine_name,
+                machine_blade_width_mm,
+                machine_facing_allowance_mm,
+                machine_min_remainder_mm,
+                drawing_number,
+                part_length,
+                setup_status
+            ) = row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[9], row[10], row[11]
             total_planned = total_planned_quantity or initial_planned_quantity or 0
             net_issued = (m.issued_bars or 0) - (m.returned_bars or 0) - (m.defect_bars or 0)
             blade_width_mm = m.blade_width_mm or machine_blade_width_mm or DEFAULT_BLADE_WIDTH_MM
