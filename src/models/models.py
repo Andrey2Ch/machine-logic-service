@@ -1,4 +1,5 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Enum, Boolean, Float, Text, BigInteger, CheckConstraint, Index
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Enum, Boolean, Float, Text, BigInteger, CheckConstraint, Index, Date, Numeric
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
 from .setup import SetupStatus
@@ -318,3 +319,82 @@ class MaterialOperationDB(Base):
         Index('idx_material_operations_performed_at', 'performed_at'),
         CheckConstraint("operation_type IN ('issue', 'add', 'return', 'correction')", name='check_operation_type'),
     )
+
+
+class MaterialBatchDB(Base):
+    """Партии материалов (склад)"""
+    __tablename__ = "material_batches"
+
+    batch_id = Column(String, primary_key=True)
+    material_type = Column(Text, nullable=True)
+    diameter = Column(Numeric(10, 3), nullable=True)
+    bar_length = Column(Numeric(10, 3), nullable=True)
+    quantity_received = Column(Integer, nullable=True)
+    supplier = Column(Text, nullable=True)
+    supplier_doc_number = Column(Text, nullable=True)
+    date_received = Column(Date, nullable=True)
+    cert_folder = Column(Text, nullable=True)
+    allowed_drawings = Column(ARRAY(String), nullable=True)
+    preferred_drawing = Column(Text, nullable=True)
+    status = Column(String, nullable=False, default="active")
+    created_by = Column(Integer, ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    creator = relationship("EmployeeDB", foreign_keys=[created_by])
+
+
+class StorageLocationDB(Base):
+    """Адреса хранения"""
+    __tablename__ = "storage_locations"
+
+    code = Column(String, primary_key=True)
+    name = Column(String, nullable=False)
+    type = Column(String, nullable=False)
+    capacity = Column(Integer, nullable=True)
+    status = Column(String, nullable=False, default="active")
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class StorageLocationSegmentDB(Base):
+    """Сегменты адресации (справочник)"""
+    __tablename__ = "storage_location_segments"
+
+    segment_type = Column(String, primary_key=True)  # RACK/LEVEL/BIN/SUB/ZONE
+    code = Column(String, primary_key=True)
+    name = Column(String, nullable=False)
+    sort_order = Column(Integer, default=0)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class InventoryPositionDB(Base):
+    """Остатки партии в конкретном адресе"""
+    __tablename__ = "inventory_positions"
+
+    batch_id = Column(String, ForeignKey("material_batches.batch_id", ondelete="CASCADE"), primary_key=True)
+    location_code = Column(String, ForeignKey("storage_locations.code", ondelete="RESTRICT"), primary_key=True)
+    quantity = Column(Integer, nullable=False, default=0)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    batch = relationship("MaterialBatchDB")
+    location = relationship("StorageLocationDB")
+
+
+class WarehouseMovementDB(Base):
+    """Движения склада"""
+    __tablename__ = "warehouse_movements"
+
+    movement_id = Column(BigInteger, primary_key=True, autoincrement=True)
+    batch_id = Column(String, ForeignKey("material_batches.batch_id", ondelete="CASCADE"), nullable=False)
+    movement_type = Column(String, nullable=False)  # receive/move/issue/return/writeoff
+    quantity = Column(Integer, nullable=False)
+    from_location = Column(String, ForeignKey("storage_locations.code", ondelete="SET NULL"), nullable=True)
+    to_location = Column(String, ForeignKey("storage_locations.code", ondelete="SET NULL"), nullable=True)
+    related_lot_id = Column(Integer, ForeignKey("lots.id", ondelete="SET NULL"), nullable=True)
+    cut_factor = Column(Integer, nullable=True)
+    performed_by = Column(Integer, ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
+    performed_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    notes = Column(Text, nullable=True)
+
+    batch = relationship("MaterialBatchDB")
+    performer = relationship("EmployeeDB", foreign_keys=[performed_by])

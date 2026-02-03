@@ -23,6 +23,7 @@ from .routers import employees as employees_router
 from .routers import cards as cards_router
 from .routers import time_tracking as time_tracking_router
 from .routers import materials as materials_router
+from .routers import warehouse_materials as warehouse_materials_router
 from .routers import drawings as drawings_router
 from .routers import nc_programs as nc_programs_router
 from .routers import morning_dashboard as morning_dashboard_router
@@ -5408,6 +5409,7 @@ app.include_router(employees_router.router)
 app.include_router(cards_router.router)
 app.include_router(time_tracking_router.router)
 app.include_router(materials_router.router)
+app.include_router(warehouse_materials_router.router)
 app.include_router(drawings_router.router)
 app.include_router(nc_programs_router.router)
 app.include_router(morning_dashboard_router.router)
