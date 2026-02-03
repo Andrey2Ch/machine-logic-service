@@ -976,11 +976,10 @@ def get_lot_materials(
             elif status_group == "closed":
                 query = query.filter(LotMaterialDB.closed_at != None)
         
-        # Выполняем запрос (ОДИН запрос вместо N+1!)
+        # Выполняем запрос (ОДИН запрос, без MTConnect!)
         results = query.order_by(LotMaterialDB.created_at.desc()).all()
-        mtconnect_counts = _fetch_mtconnect_counts()
         
-        # Формируем результат
+        # Формируем результат (расчет как в MaterialCalculator - без MTConnect)
         output = []
         for (
             m,
@@ -1003,28 +1002,21 @@ def get_lot_materials(
             min_remainder_mm = m.min_remainder_mm or machine_min_remainder_mm or DEFAULT_MIN_REMAINDER_MM
             bar_length_mm = m.bar_length_mm
 
-            remaining_parts = 0
-            planned_bars_remaining = None
+            # Расчет прутков для ВСЕГО заказа (без MTConnect)
+            total_bars_needed = None
             remaining_bars = None
             if total_planned and part_length and bar_length_mm:
-                produced = _get_produced_for_lot(
-                    db=db,
-                    lot_id=m.lot_id,
-                    fallback_machine_name=machine_name,
-                    mtconnect_counts=mtconnect_counts
+                total_bars_needed = _calculate_bars_needed(
+                    part_length_mm=part_length,
+                    quantity_parts=total_planned,
+                    bar_length_mm=bar_length_mm,
+                    blade_width_mm=blade_width_mm,
+                    facing_allowance_mm=facing_allowance_mm,
+                    min_remainder_mm=min_remainder_mm
                 )
-                if produced is not None:
-                    remaining_parts = max(0, total_planned - produced)
-                    planned_bars_remaining = _calculate_bars_needed(
-                        part_length_mm=part_length,
-                        quantity_parts=remaining_parts,
-                        bar_length_mm=bar_length_mm,
-                        blade_width_mm=blade_width_mm,
-                        facing_allowance_mm=facing_allowance_mm,
-                        min_remainder_mm=min_remainder_mm
-                    )
-                    if planned_bars_remaining is not None:
-                        remaining_bars = max(0, planned_bars_remaining - net_issued)
+                if total_bars_needed is not None:
+                    # remaining_bars = сколько еще нужно выдать
+                    remaining_bars = max(0, total_bars_needed - net_issued)
             output.append({
                 "id": m.id,
                 "lot_id": m.lot_id,
@@ -1043,7 +1035,7 @@ def get_lot_materials(
                 "defect_bars": m.defect_bars or 0,
                 "used_bars": net_issued,
                 "remaining_bars": remaining_bars,
-                "planned_bars_remaining": planned_bars_remaining,
+                "planned_bars_remaining": total_bars_needed,  # Всего прутков на заказ
                 "issued_at": m.issued_at,
                 "status": m.status,
                 "notes": m.notes,
