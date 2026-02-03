@@ -323,8 +323,12 @@ def ocr_label(payload: OcrLabelIn):
         data = resp.json()
 
     text = data.get("content", [{}])[0].get("text", "")
+    cleaned_text = text.strip()
+    if cleaned_text.startswith("```"):
+        cleaned_text = cleaned_text.strip("`")
+        cleaned_text = cleaned_text.replace("json", "", 1).strip()
     try:
-        parsed = json.loads(text)
+        parsed = json.loads(cleaned_text)
     except Exception:
         return OcrLabelOut(raw_text=text)
 
