@@ -18,7 +18,7 @@ from src.models.models import (
     InventoryPositionDB,
     WarehouseMovementDB,
 )
-from datetime import date
+from datetime import date, datetime
 import os
 import json
 import httpx
@@ -82,7 +82,7 @@ class MaterialGroupIn(BaseModel):
 
 class MaterialGroupOut(MaterialGroupIn):
     id: int
-    created_at: Optional[str] = None
+    created_at: Optional[datetime] = None
 
 
 class MaterialSubgroupIn(BaseModel):
@@ -94,7 +94,7 @@ class MaterialSubgroupIn(BaseModel):
 
 class MaterialSubgroupOut(MaterialSubgroupIn):
     id: int
-    created_at: Optional[str] = None
+    created_at: Optional[datetime] = None
 
 
 class StorageLocationIn(BaseModel):
