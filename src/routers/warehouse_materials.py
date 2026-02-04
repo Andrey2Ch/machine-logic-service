@@ -11,6 +11,8 @@ from pydantic import BaseModel
 from src.database import get_db_session
 from src.models.models import (
     MaterialBatchDB,
+    MaterialGroupDB,
+    MaterialSubgroupDB,
     StorageLocationDB,
     StorageLocationSegmentDB,
     InventoryPositionDB,
@@ -36,6 +38,8 @@ router = APIRouter(
 class MaterialBatchIn(BaseModel):
     batch_id: str
     material_type: Optional[str] = None
+    material_group_id: Optional[int] = None
+    material_subgroup_id: Optional[int] = None
     diameter: Optional[float] = None
     bar_length: Optional[float] = None
     quantity_received: Optional[int] = None
@@ -51,6 +55,8 @@ class MaterialBatchIn(BaseModel):
 
 class MaterialBatchUpdate(BaseModel):
     material_type: Optional[str] = None
+    material_group_id: Optional[int] = None
+    material_subgroup_id: Optional[int] = None
     diameter: Optional[float] = None
     bar_length: Optional[float] = None
     quantity_received: Optional[int] = None
@@ -65,6 +71,29 @@ class MaterialBatchUpdate(BaseModel):
 
 
 class MaterialBatchOut(MaterialBatchIn):
+    created_at: Optional[str] = None
+
+
+class MaterialGroupIn(BaseModel):
+    code: str
+    name: str
+    is_active: Optional[bool] = True
+
+
+class MaterialGroupOut(MaterialGroupIn):
+    id: int
+    created_at: Optional[str] = None
+
+
+class MaterialSubgroupIn(BaseModel):
+    group_id: int
+    code: str
+    name: str
+    is_active: Optional[bool] = True
+
+
+class MaterialSubgroupOut(MaterialSubgroupIn):
+    id: int
     created_at: Optional[str] = None
 
 
@@ -145,7 +174,8 @@ def create_batch(payload: MaterialBatchIn, db: Session = Depends(get_db_session)
     if existing:
         raise HTTPException(status_code=409, detail="Batch already exists")
 
-    batch = MaterialBatchDB(**payload.dict())
+    payload_data = _normalize_material_catalog(payload.dict(), db)
+    batch = MaterialBatchDB(**payload_data)
     db.add(batch)
     db.commit()
     db.refresh(batch)
@@ -183,11 +213,66 @@ def update_batch(batch_id: str, payload: MaterialBatchUpdate, db: Session = Depe
     batch = db.query(MaterialBatchDB).filter(MaterialBatchDB.batch_id == batch_id).first()
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found")
-    for k, v in payload.dict(exclude_unset=True).items():
+    payload_data = payload.dict(exclude_unset=True)
+    payload_data = _normalize_material_catalog(payload_data, db, partial=True)
+    for k, v in payload_data.items():
         setattr(batch, k, v)
     db.commit()
     db.refresh(batch)
     return batch
+
+
+# --- Material catalogs ---
+@router.get("/material-groups", response_model=List[MaterialGroupOut])
+def list_material_groups(is_active: Optional[bool] = Query(None), db: Session = Depends(get_db_session)):
+    query = db.query(MaterialGroupDB)
+    if is_active is not None:
+        query = query.filter(MaterialGroupDB.is_active == is_active)
+    return query.order_by(MaterialGroupDB.name.asc()).all()
+
+
+@router.post("/material-groups", response_model=MaterialGroupOut)
+def create_material_group(payload: MaterialGroupIn, db: Session = Depends(get_db_session)):
+    existing = db.query(MaterialGroupDB).filter(MaterialGroupDB.code == payload.code).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="Material group already exists")
+    group = MaterialGroupDB(**payload.dict())
+    db.add(group)
+    db.commit()
+    db.refresh(group)
+    return group
+
+
+@router.get("/material-subgroups", response_model=List[MaterialSubgroupOut])
+def list_material_subgroups(
+    group_id: Optional[int] = Query(None),
+    is_active: Optional[bool] = Query(None),
+    db: Session = Depends(get_db_session)
+):
+    query = db.query(MaterialSubgroupDB)
+    if group_id is not None:
+        query = query.filter(MaterialSubgroupDB.group_id == group_id)
+    if is_active is not None:
+        query = query.filter(MaterialSubgroupDB.is_active == is_active)
+    return query.order_by(MaterialSubgroupDB.name.asc()).all()
+
+
+@router.post("/material-subgroups", response_model=MaterialSubgroupOut)
+def create_material_subgroup(payload: MaterialSubgroupIn, db: Session = Depends(get_db_session)):
+    group = db.query(MaterialGroupDB).filter(MaterialGroupDB.id == payload.group_id).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="Material group not found")
+    existing = db.query(MaterialSubgroupDB).filter(
+        MaterialSubgroupDB.group_id == payload.group_id,
+        MaterialSubgroupDB.code == payload.code
+    ).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="Material subgroup already exists")
+    subgroup = MaterialSubgroupDB(**payload.dict())
+    db.add(subgroup)
+    db.commit()
+    db.refresh(subgroup)
+    return subgroup
 
 
 # --- Locations ---
@@ -273,6 +358,30 @@ def list_movements(
     if batch_id:
         query = query.filter(WarehouseMovementDB.batch_id == batch_id)
     return query.order_by(WarehouseMovementDB.performed_at.desc()).limit(limit).all()
+
+
+def _normalize_material_catalog(payload: dict, db: Session, partial: bool = False) -> dict:
+    group_id = payload.get("material_group_id")
+    subgroup_id = payload.get("material_subgroup_id")
+
+    if subgroup_id:
+        subgroup = db.query(MaterialSubgroupDB).filter(MaterialSubgroupDB.id == subgroup_id).first()
+        if not subgroup:
+            raise HTTPException(status_code=404, detail="Material subgroup not found")
+        if group_id and subgroup.group_id != group_id:
+            raise HTTPException(status_code=400, detail="Subgroup does not belong to group")
+        payload["material_group_id"] = subgroup.group_id
+
+    if group_id:
+        group = db.query(MaterialGroupDB).filter(MaterialGroupDB.id == group_id).first()
+        if not group:
+            raise HTTPException(status_code=404, detail="Material group not found")
+
+    if not partial:
+        payload.setdefault("material_group_id", group_id)
+        payload.setdefault("material_subgroup_id", subgroup_id)
+
+    return payload
 
 
 # --- OCR ---

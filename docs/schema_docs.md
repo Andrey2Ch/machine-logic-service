@@ -118,6 +118,95 @@
 | status | character varying | NO |  |
 | created_at | timestamp without time zone | YES |  |
 | order_manager_id | bigint | YES | ID ?????????? (????????? ???????), ?????????? ? ???? ?????. |
+
+## material_batches
+
+| column | type | nullable | description |
+|---|---|---|---|
+| batch_id | text | NO |  |
+| material_type | text | YES |  |
+| material_group_id | integer | YES |  |
+| material_subgroup_id | integer | YES |  |
+| diameter | numeric(10,3) | YES |  |
+| bar_length | numeric(10,3) | YES |  |
+| quantity_received | integer | YES |  |
+| supplier | text | YES |  |
+| supplier_doc_number | text | YES |  |
+| date_received | date | YES |  |
+| cert_folder | text | YES |  |
+| allowed_drawings | text[] | YES |  |
+| preferred_drawing | text | YES |  |
+| status | text | NO |  |
+| created_by | integer | YES |  |
+| created_at | timestamp with time zone | NO |  |
+
+## material_groups
+
+| column | type | nullable | description |
+|---|---|---|---|
+| id | integer | NO |  |
+| code | text | NO |  |
+| name | text | NO |  |
+| is_active | boolean | NO |  |
+| created_at | timestamp with time zone | NO |  |
+
+## material_subgroups
+
+| column | type | nullable | description |
+|---|---|---|---|
+| id | integer | NO |  |
+| group_id | integer | NO |  |
+| code | text | NO |  |
+| name | text | NO |  |
+| is_active | boolean | NO |  |
+| created_at | timestamp with time zone | NO |  |
+
+## storage_locations
+
+| column | type | nullable | description |
+|---|---|---|---|
+| code | text | NO |  |
+| name | text | NO |  |
+| type | text | NO |  |
+| capacity | integer | YES |  |
+| status | text | NO |  |
+| created_at | timestamp with time zone | NO |  |
+
+## storage_location_segments
+
+| column | type | nullable | description |
+|---|---|---|---|
+| segment_type | text | NO |  |
+| code | text | NO |  |
+| name | text | NO |  |
+| sort_order | integer | YES |  |
+| is_active | boolean | NO |  |
+| created_at | timestamp with time zone | NO |  |
+
+## inventory_positions
+
+| column | type | nullable | description |
+|---|---|---|---|
+| batch_id | text | NO |  |
+| location_code | text | NO |  |
+| quantity | integer | NO |  |
+| updated_at | timestamp with time zone | NO |  |
+
+## warehouse_movements
+
+| column | type | nullable | description |
+|---|---|---|---|
+| movement_id | bigint | NO |  |
+| batch_id | text | NO |  |
+| movement_type | text | NO |  |
+| quantity | integer | NO |  |
+| from_location | text | YES |  |
+| to_location | text | YES |  |
+| related_lot_id | integer | YES |  |
+| cut_factor | integer | YES |  |
+| performed_by | integer | YES |  |
+| performed_at | timestamp with time zone | NO |  |
+| notes | text | YES |  |
 | created_by_order_manager_at | timestamp with time zone | YES | ????? ???????? ???? ?????????? ???????. |
 | due_date | timestamp with time zone | YES | ??????????? ???? ???????? ????. |
 | initial_planned_quantity | integer | YES | ?????????????? ???????? ??????????, ????????? ?????????? ???????. |

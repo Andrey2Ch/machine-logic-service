@@ -62,6 +62,18 @@ print(result['sql'])  # SELECT COUNT(*) as open_batches FROM batches WHERE statu
 2. Обновление схемы: `scripts/generate_schema_docs.py`
 3. Тестирование: `GET /api/text2sql/evaluate`
 
+## Автогенерация schema_docs.md
+
+Скрипт `scripts/generate_schema_docs.py` читает структуру БД из `DATABASE_URL`
+и обновляет `src/text2sql/docs/schema_docs.md`. Если в файле есть раздел
+`## Таблицы`, скрипт сохраняет весь текст **до** этого раздела и перегенерирует
+только таблицы. Это позволяет держать бизнес-правила в начале файла.
+
+Пример запуска:
+```bash
+DATABASE_URL=postgresql://... python src/text2sql/scripts/generate_schema_docs.py
+```
+
 ## Модели Anthropic
 
 Сервис использует последние модели Anthropic:

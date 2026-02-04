@@ -327,6 +327,8 @@ class MaterialBatchDB(Base):
 
     batch_id = Column(String, primary_key=True)
     material_type = Column(Text, nullable=True)
+    material_group_id = Column(Integer, ForeignKey("material_groups.id", ondelete="SET NULL"), nullable=True)
+    material_subgroup_id = Column(Integer, ForeignKey("material_subgroups.id", ondelete="SET NULL"), nullable=True)
     diameter = Column(Numeric(10, 3), nullable=True)
     bar_length = Column(Numeric(10, 3), nullable=True)
     quantity_received = Column(Integer, nullable=True)
@@ -341,6 +343,35 @@ class MaterialBatchDB(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
 
     creator = relationship("EmployeeDB", foreign_keys=[created_by])
+    material_group = relationship("MaterialGroupDB")
+    material_subgroup = relationship("MaterialSubgroupDB")
+
+
+class MaterialGroupDB(Base):
+    """Справочник групп материалов"""
+    __tablename__ = "material_groups"
+
+    id = Column(Integer, primary_key=True, index=True)
+    code = Column(String, unique=True, nullable=False)
+    name = Column(String, nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    subgroups = relationship("MaterialSubgroupDB", back_populates="group")
+
+
+class MaterialSubgroupDB(Base):
+    """Справочник подгрупп материалов"""
+    __tablename__ = "material_subgroups"
+
+    id = Column(Integer, primary_key=True, index=True)
+    group_id = Column(Integer, ForeignKey("material_groups.id", ondelete="CASCADE"), nullable=False)
+    code = Column(String, nullable=False)
+    name = Column(String, nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    group = relationship("MaterialGroupDB", back_populates="subgroups")
 
 
 class StorageLocationDB(Base):

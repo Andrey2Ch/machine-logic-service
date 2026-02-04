@@ -1,10 +1,23 @@
 import os
 import sys
+from pathlib import Path
 import psycopg2
+
+def _get_preamble(out_path: Path) -> str:
+    if not out_path.exists():
+        return "# Schema documentation for schema `public`\n\n"
+
+    content = out_path.read_text(encoding='utf-8')
+    marker = "\n## Таблицы\n"
+    if marker in content:
+        return content.split(marker, 1)[0] + marker + "\n"
+    return "# Schema documentation for schema `public`\n\n"
+
 
 def main():
     dsn = os.environ.get('DATABASE_URL') or 'postgresql://postgres:postgres@localhost:5432/isramat_bot'
-    out = os.environ.get('SCHEMA_MD_OUT') or os.path.join(os.getcwd(), 'schema_docs.md')
+    default_out = Path(__file__).parent.parent / "docs" / "schema_docs.md"
+    out = Path(os.environ.get('SCHEMA_MD_OUT') or default_out)
     schema = os.environ.get('SCHEMA') or 'public'
 
     conn = psycopg2.connect(dsn)
@@ -32,8 +45,11 @@ def main():
     for t, col, typ, nulls, descr in rows:
         by_table.setdefault(t, []).append((col, typ, nulls, descr))
 
+    preamble = _get_preamble(out)
+
     with open(out, 'w', encoding='utf-8') as f:
-        f.write(f"# Schema documentation for schema `{schema}`\n\n")
+        f.write(preamble)
+        f.write("## Таблицы\n\n")
         for table, cols in by_table.items():
             f.write(f"## {table}\n\n")
             f.write("| column | type | nullable | description |\n")
