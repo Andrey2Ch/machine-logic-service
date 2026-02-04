@@ -71,7 +71,7 @@ class MaterialBatchUpdate(BaseModel):
 
 
 class MaterialBatchOut(MaterialBatchIn):
-    created_at: Optional[str] = None
+    created_at: Optional[datetime] = None
 
 
 class MaterialGroupIn(BaseModel):
@@ -85,6 +85,12 @@ class MaterialGroupOut(MaterialGroupIn):
     created_at: Optional[datetime] = None
 
 
+class MaterialGroupUpdate(BaseModel):
+    code: Optional[str] = None
+    name: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
 class MaterialSubgroupIn(BaseModel):
     group_id: int
     code: str
@@ -95,6 +101,13 @@ class MaterialSubgroupIn(BaseModel):
 class MaterialSubgroupOut(MaterialSubgroupIn):
     id: int
     created_at: Optional[datetime] = None
+
+
+class MaterialSubgroupUpdate(BaseModel):
+    group_id: Optional[int] = None
+    code: Optional[str] = None
+    name: Optional[str] = None
+    is_active: Optional[bool] = None
 
 
 class StorageLocationIn(BaseModel):
@@ -243,6 +256,18 @@ def create_material_group(payload: MaterialGroupIn, db: Session = Depends(get_db
     return group
 
 
+@router.patch("/material-groups/{group_id}", response_model=MaterialGroupOut)
+def update_material_group(group_id: int, payload: MaterialGroupUpdate, db: Session = Depends(get_db_session)):
+    group = db.query(MaterialGroupDB).filter(MaterialGroupDB.id == group_id).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="Material group not found")
+    for k, v in payload.dict(exclude_unset=True).items():
+        setattr(group, k, v)
+    db.commit()
+    db.refresh(group)
+    return group
+
+
 @router.get("/material-subgroups", response_model=List[MaterialSubgroupOut])
 def list_material_subgroups(
     group_id: Optional[int] = Query(None),
@@ -270,6 +295,22 @@ def create_material_subgroup(payload: MaterialSubgroupIn, db: Session = Depends(
         raise HTTPException(status_code=409, detail="Material subgroup already exists")
     subgroup = MaterialSubgroupDB(**payload.dict())
     db.add(subgroup)
+    db.commit()
+    db.refresh(subgroup)
+    return subgroup
+
+
+@router.patch("/material-subgroups/{subgroup_id}", response_model=MaterialSubgroupOut)
+def update_material_subgroup(subgroup_id: int, payload: MaterialSubgroupUpdate, db: Session = Depends(get_db_session)):
+    subgroup = db.query(MaterialSubgroupDB).filter(MaterialSubgroupDB.id == subgroup_id).first()
+    if not subgroup:
+        raise HTTPException(status_code=404, detail="Material subgroup not found")
+    if payload.group_id:
+        group = db.query(MaterialGroupDB).filter(MaterialGroupDB.id == payload.group_id).first()
+        if not group:
+            raise HTTPException(status_code=404, detail="Material group not found")
+    for k, v in payload.dict(exclude_unset=True).items():
+        setattr(subgroup, k, v)
     db.commit()
     db.refresh(subgroup)
     return subgroup
