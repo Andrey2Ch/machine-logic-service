@@ -331,6 +331,8 @@ class MaterialBatchDB(Base):
     material_subgroup_id = Column(Integer, ForeignKey("material_subgroups.id", ondelete="SET NULL"), nullable=True)
     diameter = Column(Numeric(10, 3), nullable=True)
     bar_length = Column(Numeric(10, 3), nullable=True)
+    weight_per_meter_kg = Column(Numeric(10, 4), nullable=True)
+    weight_kg = Column(Numeric(12, 4), nullable=True)
     quantity_received = Column(Integer, nullable=True)
     supplier = Column(Text, nullable=True)
     supplier_doc_number = Column(Text, nullable=True)
@@ -354,6 +356,7 @@ class MaterialGroupDB(Base):
     id = Column(Integer, primary_key=True, index=True)
     code = Column(String, unique=True, nullable=False)
     name = Column(String, nullable=False)
+    density_kg_m3 = Column(Numeric(10, 3), nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
 
@@ -368,6 +371,7 @@ class MaterialSubgroupDB(Base):
     group_id = Column(Integer, ForeignKey("material_groups.id", ondelete="CASCADE"), nullable=False)
     code = Column(String, nullable=False)
     name = Column(String, nullable=False)
+    density_kg_m3 = Column(Numeric(10, 3), nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
 

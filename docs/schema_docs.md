@@ -129,6 +129,8 @@
 | material_subgroup_id | integer | YES |  |
 | diameter | numeric(10,3) | YES |  |
 | bar_length | numeric(10,3) | YES |  |
+| weight_per_meter_kg | numeric(10,4) | YES |  |
+| weight_kg | numeric(12,4) | YES |  |
 | quantity_received | integer | YES |  |
 | supplier | text | YES |  |
 | supplier_doc_number | text | YES |  |
@@ -147,6 +149,7 @@
 | id | integer | NO |  |
 | code | text | NO |  |
 | name | text | NO |  |
+| density_kg_m3 | numeric(10,3) | YES |  |
 | is_active | boolean | NO |  |
 | created_at | timestamp with time zone | NO |  |
 
@@ -158,6 +161,7 @@
 | group_id | integer | NO |  |
 | code | text | NO |  |
 | name | text | NO |  |
+| density_kg_m3 | numeric(10,3) | YES |  |
 | is_active | boolean | NO |  |
 | created_at | timestamp with time zone | NO |  |
 

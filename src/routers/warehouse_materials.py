@@ -42,6 +42,8 @@ class MaterialBatchIn(BaseModel):
     material_subgroup_id: Optional[int] = None
     diameter: Optional[float] = None
     bar_length: Optional[float] = None
+    weight_per_meter_kg: Optional[float] = None
+    weight_kg: Optional[float] = None
     quantity_received: Optional[int] = None
     supplier: Optional[str] = None
     supplier_doc_number: Optional[str] = None
@@ -59,6 +61,8 @@ class MaterialBatchUpdate(BaseModel):
     material_subgroup_id: Optional[int] = None
     diameter: Optional[float] = None
     bar_length: Optional[float] = None
+    weight_per_meter_kg: Optional[float] = None
+    weight_kg: Optional[float] = None
     quantity_received: Optional[int] = None
     supplier: Optional[str] = None
     supplier_doc_number: Optional[str] = None
@@ -77,6 +81,7 @@ class MaterialBatchOut(MaterialBatchIn):
 class MaterialGroupIn(BaseModel):
     code: str
     name: str
+    density_kg_m3: Optional[float] = None
     is_active: Optional[bool] = True
 
 
@@ -88,6 +93,7 @@ class MaterialGroupOut(MaterialGroupIn):
 class MaterialGroupUpdate(BaseModel):
     code: Optional[str] = None
     name: Optional[str] = None
+    density_kg_m3: Optional[float] = None
     is_active: Optional[bool] = None
 
 
@@ -95,6 +101,7 @@ class MaterialSubgroupIn(BaseModel):
     group_id: int
     code: str
     name: str
+    density_kg_m3: Optional[float] = None
     is_active: Optional[bool] = True
 
 
@@ -107,6 +114,7 @@ class MaterialSubgroupUpdate(BaseModel):
     group_id: Optional[int] = None
     code: Optional[str] = None
     name: Optional[str] = None
+    density_kg_m3: Optional[float] = None
     is_active: Optional[bool] = None
 
 
@@ -119,7 +127,7 @@ class StorageLocationIn(BaseModel):
 
 
 class StorageLocationOut(StorageLocationIn):
-    created_at: Optional[str] = None
+    created_at: Optional[datetime] = None
 
 
 class StorageSegmentIn(BaseModel):
@@ -131,7 +139,7 @@ class StorageSegmentIn(BaseModel):
 
 
 class StorageSegmentOut(StorageSegmentIn):
-    created_at: Optional[str] = None
+    created_at: Optional[datetime] = None
 
 
 class InventoryPositionIn(BaseModel):
@@ -141,7 +149,7 @@ class InventoryPositionIn(BaseModel):
 
 
 class InventoryPositionOut(InventoryPositionIn):
-    updated_at: Optional[str] = None
+    updated_at: Optional[datetime] = None
 
 
 class WarehouseMovementIn(BaseModel):
@@ -158,7 +166,7 @@ class WarehouseMovementIn(BaseModel):
 
 class WarehouseMovementOut(WarehouseMovementIn):
     movement_id: int
-    performed_at: Optional[str] = None
+    performed_at: Optional[datetime] = None
 
 
 class OcrLabelIn(BaseModel):
@@ -177,6 +185,18 @@ class OcrLabelOut(BaseModel):
     quantity_received: Optional[int] = None
     drawing_numbers: Optional[List[str]] = None
     preferred_drawing: Optional[str] = None
+    raw_text: Optional[str] = None
+
+
+class DensitySuggestIn(BaseModel):
+    material_type: str
+    group_name: Optional[str] = None
+    subgroup_name: Optional[str] = None
+
+
+class DensitySuggestOut(BaseModel):
+    density_kg_m3: Optional[float] = None
+    source: Optional[str] = None
     raw_text: Optional[str] = None
 
 
@@ -379,6 +399,14 @@ def upsert_inventory(payload: InventoryPositionIn, db: Session = Depends(get_db_
     return pos
 
 
+@router.get("/inventory", response_model=List[InventoryPositionOut])
+def list_inventory(batch_id: Optional[str] = Query(None), db: Session = Depends(get_db_session)):
+    query = db.query(InventoryPositionDB)
+    if batch_id:
+        query = query.filter(InventoryPositionDB.batch_id == batch_id)
+    return query.order_by(InventoryPositionDB.updated_at.desc()).limit(500).all()
+
+
 # --- Movements ---
 @router.post("/movements", response_model=WarehouseMovementOut)
 def create_movement(payload: WarehouseMovementIn, db: Session = Depends(get_db_session)):
@@ -479,17 +507,68 @@ def ocr_label(payload: OcrLabelIn):
         data = resp.json()
 
     text = data.get("content", [{}])[0].get("text", "")
+    parsed = _parse_json_response(text)
+    if not parsed:
+        return OcrLabelOut(raw_text=text)
+
+    parsed = _postprocess_ocr(parsed, text)
+    return OcrLabelOut(**parsed)
+
+
+def _parse_json_response(text: str) -> Optional[dict]:
     cleaned_text = text.strip()
     if cleaned_text.startswith("```"):
         cleaned_text = cleaned_text.strip("`")
         cleaned_text = cleaned_text.replace("json", "", 1).strip()
     try:
-        parsed = json.loads(cleaned_text)
+        return json.loads(cleaned_text)
     except Exception:
-        return OcrLabelOut(raw_text=text)
+        return None
 
-    parsed = _postprocess_ocr(parsed, text)
-    return OcrLabelOut(**parsed)
+
+# --- Density suggest ---
+@router.post("/density-suggest", response_model=DensitySuggestOut)
+def density_suggest(payload: DensitySuggestIn):
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY is not set")
+
+    prompt = (
+        "Given a material description, return JSON with keys: density_kg_m3, source. "
+        "Use kg/m^3 numeric density. If unsure, return null. "
+        "Material description: "
+        f"type={payload.material_type}, group={payload.group_name}, subgroup={payload.subgroup_name}. "
+        "Return ONLY valid JSON."
+    )
+
+    body = {
+        "model": ANTHROPIC_OCR_MODEL,
+        "max_tokens": 256,
+        "temperature": 0,
+        "messages": [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": prompt}],
+            }
+        ],
+    }
+
+    headers = {
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+
+    with httpx.Client(timeout=20.0) as client:
+        resp = client.post(ANTHROPIC_API_URL, headers=headers, json=body)
+        if resp.status_code >= 400:
+            raise HTTPException(status_code=resp.status_code, detail=resp.text)
+        data = resp.json()
+
+    text = data.get("content", [{}])[0].get("text", "")
+    parsed = _parse_json_response(text)
+    if not parsed:
+        return DensitySuggestOut(raw_text=text)
+    return DensitySuggestOut(**parsed)
 
 
 def _postprocess_ocr(parsed: dict, raw_text: str) -> dict:

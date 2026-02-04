@@ -33,6 +33,7 @@ ALTER TABLE material_batches
 CREATE INDEX IF NOT EXISTS idx_material_batches_group ON material_batches(material_group_id);
 CREATE INDEX IF NOT EXISTS idx_material_batches_subgroup ON material_batches(material_subgroup_id);
 
+
 -- 4) Migration version tracking
 INSERT INTO schema_migrations (version, applied_at)
 VALUES ('026_material_catalogs', NOW())
