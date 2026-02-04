@@ -1138,7 +1138,7 @@ async def save_reading(reading_input: ReadingInput, db: Session = Depends(get_db
 @app.get("/machines")
 async def get_machines(db: Session = Depends(get_db_session)):
     """
-    Получить список всех станков с is_active
+    Получить список всех станков с is_active и location_id
     """
     machines = db.query(MachineDB).all()
     return {
@@ -1147,7 +1147,8 @@ async def get_machines(db: Session = Depends(get_db_session)):
                 "id": m.id,
                 "name": m.name,
                 "type": m.type,
-                "is_active": m.is_active
+                "is_active": m.is_active,
+                "location_id": m.location_id
             } for m in machines
         ]
     }

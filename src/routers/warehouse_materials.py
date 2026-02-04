@@ -365,6 +365,10 @@ def _postprocess_ocr(parsed: dict, raw_text: str) -> dict:
     if parsed.get("bar_length") is not None and parsed.get("diameter") == parsed.get("bar_length"):
         parsed["diameter"] = None
 
+    # Normalize bar length to mm if value looks like meters
+    if parsed.get("bar_length") is not None:
+        parsed["bar_length"] = _normalize_bar_length_mm(parsed["bar_length"])
+
     # Parse diameter from fraction in inches
     fraction = parsed.get("diameter_fraction")
     if not fraction:
@@ -394,3 +398,10 @@ def _fraction_to_mm(value: str) -> Optional[float]:
         return None
     mm = (numerator / denominator) * 25.4
     return round(mm, 2)
+
+
+def _normalize_bar_length_mm(value: float) -> float:
+    # Heuristic: label shows meters (e.g. 3.66). Store in mm for consistency.
+    if value <= 20:
+        return round(value * 1000, 2)
+    return round(value, 2)
