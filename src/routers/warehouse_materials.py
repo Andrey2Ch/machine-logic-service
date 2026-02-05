@@ -182,6 +182,7 @@ class OcrLabelOut(BaseModel):
     material_type: Optional[str] = None
     diameter: Optional[float] = None
     bar_length: Optional[float] = None
+    weight_kg: Optional[float] = None
     quantity_received: Optional[int] = None
     drawing_numbers: Optional[List[str]] = None
     preferred_drawing: Optional[str] = None
@@ -455,20 +456,22 @@ def _normalize_material_catalog(payload: dict, db: Session, partial: bool = Fals
 
 # --- OCR ---
 @router.post("/ocr-label", response_model=OcrLabelOut)
-def ocr_label(payload: OcrLabelIn):
+def ocr_label(payload: OcrLabelIn, db: Session = Depends(get_db_session)):
     if not ANTHROPIC_API_KEY:
         raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY is not set")
 
+    known_materials = _build_known_materials_list(db)
     prompt = (
         "Extract fields from this Hebrew material label image and return JSON with keys: "
         "batch_id, supplier, supplier_doc_number, date_received, material_type, diameter, "
-        "bar_length, quantity_received, drawing_numbers, preferred_drawing, diameter_fraction. "
+        "bar_length, weight_kg, quantity_received, drawing_numbers, preferred_drawing, diameter_fraction. "
         "Rules: batch_id must be the internal batch number (מס מנה) like 26000132-1. "
         "drawing_numbers should include part numbers (מס חלק) like 756-22 (can be multiple). "
         "diameter should be in millimeters if possible. If the diameter is shown as a fraction "
         '(e.g. עגול 3/4), put that in diameter_fraction as "3/4". '
         "bar_length is the bar length (אורך מוט). "
-        "If a field is missing, return null. Use numeric types for diameter/bar_length/quantity. "
+        f"Known materials (groups/subgroups): {known_materials}. "
+        "If a field is missing, return null. Use numeric types for diameter/bar_length/weight_kg/quantity. "
         "Return ONLY valid JSON."
     )
 
@@ -590,6 +593,11 @@ def _postprocess_ocr(parsed: dict, raw_text: str) -> dict:
     if length_match and parsed.get("bar_length") is None:
         parsed["bar_length"] = float(length_match.group(1))
 
+    # Extract total weight if present in text
+    weight_match = re.search(r"משקל[:\s]*([0-9]+(?:\.[0-9]+)?)", raw_text)
+    if weight_match and parsed.get("weight_kg") is None:
+        parsed["weight_kg"] = float(weight_match.group(1))
+
     # If diameter equals bar length, clear it (likely mis-mapped)
     if parsed.get("bar_length") is not None and parsed.get("diameter") == parsed.get("bar_length"):
         parsed["diameter"] = None
@@ -614,7 +622,54 @@ def _postprocess_ocr(parsed: dict, raw_text: str) -> dict:
     if "diameter_fraction" in parsed:
         parsed.pop("diameter_fraction", None)
 
+    # Normalize material type text (OCR common errors)
+    if parsed.get("material_type"):
+        parsed["material_type"] = _normalize_material_type(parsed["material_type"])
+
     return parsed
+
+
+def _build_known_materials_list(db: Session) -> str:
+    groups = db.query(MaterialGroupDB).filter(MaterialGroupDB.is_active == True).all()
+    subgroups = db.query(MaterialSubgroupDB).filter(MaterialSubgroupDB.is_active == True).all()
+
+    items: List[str] = []
+    for g in groups:
+        if g.code:
+            items.append(str(g.code))
+        if g.name:
+            items.append(str(g.name))
+    for s in subgroups:
+        if s.code:
+            items.append(str(s.code))
+        if s.name:
+            items.append(str(s.name))
+
+    unique = []
+    seen = set()
+    for item in items:
+        key = item.strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        unique.append(item.strip())
+
+    # Keep prompt compact
+    return ", ".join(unique[:120])
+
+
+def _normalize_material_type(value: str) -> str:
+    fixed = value
+    replacements = {
+        "בריטסה": "נירוסטה",
+        "נירוסטא": "נירוסטה",
+        "אלומינום": "אלומיניום",
+        "אלומיניוםם": "אלומיניום",
+        "פלדהה": "פלדה",
+    }
+    for wrong, right in replacements.items():
+        fixed = fixed.replace(wrong, right)
+    return fixed.strip()
 
 
 def _fraction_to_mm(value: str) -> Optional[float]:
