@@ -833,4 +833,3 @@ GROUP BY current_location
 | performed_by | integer | YES | employees.id |
 | performed_at | timestamp with time zone | NO |  |
 | notes | text | YES |  |
-
