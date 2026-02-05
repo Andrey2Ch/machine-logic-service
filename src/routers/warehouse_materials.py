@@ -171,6 +171,28 @@ class WarehouseMovementOut(WarehouseMovementIn):
     performed_at: Optional[datetime] = None
 
 
+def _infer_location_type(code: str) -> str:
+    if code.startswith("MIX-") or code.startswith("LONG-"):
+        return "zone"
+    return "rack"
+
+
+def _ensure_location(code: Optional[str], db: Session) -> None:
+    if not code:
+        return
+    existing = db.query(StorageLocationDB).filter(StorageLocationDB.code == code).first()
+    if existing:
+        return
+    location = StorageLocationDB(
+        code=code,
+        name=code,
+        type=_infer_location_type(code),
+        status="active"
+    )
+    db.add(location)
+    db.flush()
+
+
 class OcrLabelIn(BaseModel):
     image_base64: str
     media_type: str = "image/jpeg"
@@ -443,6 +465,7 @@ def delete_segment(
 # --- Inventory positions ---
 @router.post("/inventory", response_model=InventoryPositionOut)
 def upsert_inventory(payload: InventoryPositionIn, db: Session = Depends(get_db_session)):
+    _ensure_location(payload.location_code, db)
     pos = db.query(InventoryPositionDB).filter(
         InventoryPositionDB.batch_id == payload.batch_id,
         InventoryPositionDB.location_code == payload.location_code
@@ -468,6 +491,8 @@ def list_inventory(batch_id: Optional[str] = Query(None), db: Session = Depends(
 # --- Movements ---
 @router.post("/movements", response_model=WarehouseMovementOut)
 def create_movement(payload: WarehouseMovementIn, db: Session = Depends(get_db_session)):
+    _ensure_location(payload.from_location, db)
+    _ensure_location(payload.to_location, db)
     movement = WarehouseMovementDB(**payload.dict())
     db.add(movement)
     db.commit()
