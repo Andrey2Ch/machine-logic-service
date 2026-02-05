@@ -10,7 +10,7 @@ from .whatsapp_client import send_whatsapp_to_role, send_whatsapp_to_role_person
 # Убираем RoleDB из импорта
 from src.models.models import SetupDB, EmployeeDB, MachineDB, LotDB, PartDB, LotMaterialDB
 from src.routers.notification_settings import is_notification_enabled
-from src.database import SessionLocal  # Для создания своей сессии в background tasks
+from src import database  # Для создания своей сессии в background tasks (импортируем модуль, а не переменную)
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +82,7 @@ async def check_low_materials_and_notify():
     Периодическая проверка: если материала осталось <=12 часов — отправляем уведомления.
     Пропускаем если нет длины прутка или нет времени цикла.
     """
-    own_db = SessionLocal()
+    own_db = database.SessionLocal()
     try:
         items = (
             own_db.query(LotMaterialDB, LotDB, MachineDB, PartDB)
@@ -202,7 +202,7 @@ async def send_setup_approval_notifications(db: Session, setup_id: int, notifica
         notification_type: Тип уведомления ("approval" или "completion")
     """
     # Создаём свою сессию, т.к. переданная может быть закрыта (asyncio.create_task)
-    own_db = SessionLocal()
+    own_db = database.SessionLocal()
     try:
         logger.info(f"Fetching data for {notification_type} notification (Setup ID: {setup_id}) using own DB session")
         summary = {
