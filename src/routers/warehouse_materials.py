@@ -289,6 +289,22 @@ def update_material_group(group_id: int, payload: MaterialGroupUpdate, db: Sessi
     return group
 
 
+@router.delete("/material-groups/{group_id}")
+def delete_material_group(group_id: int, db: Session = Depends(get_db_session)):
+    group = db.query(MaterialGroupDB).filter(MaterialGroupDB.id == group_id).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="Material group not found")
+    subgroup_count = db.query(MaterialSubgroupDB).filter(MaterialSubgroupDB.group_id == group_id).count()
+    if subgroup_count > 0:
+        raise HTTPException(status_code=409, detail="Material group has subgroups")
+    batch_count = db.query(MaterialBatchDB).filter(MaterialBatchDB.material_group_id == group_id).count()
+    if batch_count > 0:
+        raise HTTPException(status_code=409, detail="Material group is used in batches")
+    db.delete(group)
+    db.commit()
+    return {"status": "ok"}
+
+
 @router.get("/material-subgroups", response_model=List[MaterialSubgroupOut])
 def list_material_subgroups(
     group_id: Optional[int] = Query(None),
@@ -337,6 +353,19 @@ def update_material_subgroup(subgroup_id: int, payload: MaterialSubgroupUpdate, 
     return subgroup
 
 
+@router.delete("/material-subgroups/{subgroup_id}")
+def delete_material_subgroup(subgroup_id: int, db: Session = Depends(get_db_session)):
+    subgroup = db.query(MaterialSubgroupDB).filter(MaterialSubgroupDB.id == subgroup_id).first()
+    if not subgroup:
+        raise HTTPException(status_code=404, detail="Material subgroup not found")
+    batch_count = db.query(MaterialBatchDB).filter(MaterialBatchDB.material_subgroup_id == subgroup_id).count()
+    if batch_count > 0:
+        raise HTTPException(status_code=409, detail="Material subgroup is used in batches")
+    db.delete(subgroup)
+    db.commit()
+    return {"status": "ok"}
+
+
 # --- Locations ---
 @router.post("/locations", response_model=StorageLocationOut)
 def upsert_location(payload: StorageLocationIn, db: Session = Depends(get_db_session)):
@@ -381,6 +410,29 @@ def list_segments(segment_type: Optional[str] = Query(None), db: Session = Depen
     if segment_type:
         query = query.filter(StorageLocationSegmentDB.segment_type == segment_type)
     return query.order_by(StorageLocationSegmentDB.segment_type.asc(), StorageLocationSegmentDB.sort_order.asc()).all()
+
+
+@router.delete("/segments")
+def delete_segment(
+    segment_type: str = Query(...),
+    code: str = Query(...),
+    db: Session = Depends(get_db_session)
+):
+    segment = db.query(StorageLocationSegmentDB).filter(
+        StorageLocationSegmentDB.segment_type == segment_type,
+        StorageLocationSegmentDB.code == code
+    ).first()
+    if not segment:
+        raise HTTPException(status_code=404, detail="Segment not found")
+    location_count = db.query(StorageLocationDB).filter(StorageLocationDB.code.ilike(f"{code}%")).count()
+    if location_count > 0:
+        raise HTTPException(status_code=409, detail="Segment is used in locations")
+    inventory_count = db.query(InventoryPositionDB).filter(InventoryPositionDB.location_code.ilike(f"{code}%")).count()
+    if inventory_count > 0:
+        raise HTTPException(status_code=409, detail="Segment is used in inventory")
+    db.delete(segment)
+    db.commit()
+    return {"status": "ok"}
 
 
 # --- Inventory positions ---
