@@ -338,6 +338,7 @@ class MaterialBatchDB(Base):
     supplier_doc_number = Column(Text, nullable=True)
     date_received = Column(Date, nullable=True)
     cert_folder = Column(Text, nullable=True)
+    from_customer = Column(Boolean, default=False, nullable=False)
     allowed_drawings = Column(ARRAY(String), nullable=True)
     preferred_drawing = Column(Text, nullable=True)
     status = Column(String, nullable=False, default="active")

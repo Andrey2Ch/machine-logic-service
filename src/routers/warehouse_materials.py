@@ -49,6 +49,7 @@ class MaterialBatchIn(BaseModel):
     supplier_doc_number: Optional[str] = None
     date_received: Optional[date] = None
     cert_folder: Optional[str] = None
+    from_customer: Optional[bool] = False
     allowed_drawings: Optional[List[str]] = None
     preferred_drawing: Optional[str] = None
     status: Optional[str] = "active"
@@ -68,6 +69,7 @@ class MaterialBatchUpdate(BaseModel):
     supplier_doc_number: Optional[str] = None
     date_received: Optional[date] = None
     cert_folder: Optional[str] = None
+    from_customer: Optional[bool] = None
     allowed_drawings: Optional[List[str]] = None
     preferred_drawing: Optional[str] = None
     status: Optional[str] = None
@@ -220,6 +222,7 @@ def create_batch(payload: MaterialBatchIn, db: Session = Depends(get_db_session)
 def list_batches(
     search: Optional[str] = Query(None, description="batch_id or supplier_doc_number"),
     status: Optional[str] = Query(None, description="active/closed"),
+    from_customer: Optional[bool] = Query(None, description="customer-provided material"),
     db: Session = Depends(get_db_session)
 ):
     query = db.query(MaterialBatchDB)
@@ -231,6 +234,8 @@ def list_batches(
         )
     if status:
         query = query.filter(MaterialBatchDB.status == status)
+    if from_customer is not None:
+        query = query.filter(MaterialBatchDB.from_customer == from_customer)
     return query.order_by(MaterialBatchDB.created_at.desc()).limit(200).all()
 
 

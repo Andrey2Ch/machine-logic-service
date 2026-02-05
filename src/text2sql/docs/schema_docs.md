@@ -758,6 +758,7 @@ GROUP BY current_location
 | supplier_doc_number | text | YES |  |
 | date_received | date | YES |  |
 | cert_folder | text | YES |  |
+| from_customer | boolean | NO |  |
 | allowed_drawings | text[] | YES |  |
 | preferred_drawing | text | YES |  |
 | status | text | NO |  |
