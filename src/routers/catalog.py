@@ -147,6 +147,8 @@ class MachineOut(BaseModel):
     id: int
     name: str
     type: Optional[str] = None
+    min_diameter: Optional[float] = None
+    max_diameter: Optional[float] = None
     location_id: int
     serial_number: Optional[str] = None
     notes: Optional[str] = None

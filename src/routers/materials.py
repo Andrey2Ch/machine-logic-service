@@ -349,6 +349,18 @@ def issue_material_to_machine(
         if not machine:
             raise HTTPException(status_code=404, detail=f"Станок {request.machine_id} не найден")
         
+        # Проверяем диаметр по допускам станка (если заданы)
+        if machine.min_diameter is not None and request.diameter < machine.min_diameter:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Диаметр {request.diameter}мм меньше минимального для станка ({machine.min_diameter}мм)"
+            )
+        if machine.max_diameter is not None and request.diameter > machine.max_diameter:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Диаметр {request.diameter}мм больше максимального для станка ({machine.max_diameter}мм)"
+            )
+        
         # Получаем drawing_number из лота если не передан
         drawing_number = request.drawing_number
         if not drawing_number and lot.part_id:
