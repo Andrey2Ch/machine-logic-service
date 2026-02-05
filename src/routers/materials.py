@@ -224,6 +224,8 @@ class IssueToMachineRequest(BaseModel):
     lot_id: int
     drawing_number: Optional[str] = None  # מס' שרטוט
     material_type: Optional[str] = None  # סוג חומר - теперь необязательный
+    material_group_id: Optional[int] = None
+    material_subgroup_id: Optional[int] = None
     diameter: float  # диаметр
     quantity_bars: int  # כמות במוטות
     bar_length_mm: Optional[float] = None
@@ -275,6 +277,8 @@ class LotMaterialOut(BaseModel):
     machine_name: Optional[str] = None
     drawing_number: Optional[str] = None
     material_type: Optional[str] = None
+    material_group_id: Optional[int] = None
+    material_subgroup_id: Optional[int] = None
     diameter: Optional[float] = None
     bar_length_mm: Optional[float] = None
     blade_width_mm: Optional[float] = None
@@ -390,6 +394,10 @@ def issue_material_to_machine(
                 existing.notes = f"{existing.notes or ''}\n{request.notes}".strip()
             if request.bar_length_mm is not None and existing.bar_length_mm is None:
                 existing.bar_length_mm = request.bar_length_mm
+            if request.material_group_id is not None and existing.material_group_id is None:
+                existing.material_group_id = request.material_group_id
+            if request.material_subgroup_id is not None and existing.material_subgroup_id is None:
+                existing.material_subgroup_id = request.material_subgroup_id
             if existing.blade_width_mm is None:
                 existing.blade_width_mm = calc_params["blade_width_mm"]
             if existing.facing_allowance_mm is None:
@@ -406,6 +414,8 @@ def issue_material_to_machine(
                 lot_id=request.lot_id,
                 machine_id=request.machine_id,
                 material_type=request.material_type,
+                material_group_id=request.material_group_id,
+                material_subgroup_id=request.material_subgroup_id,
                 diameter=request.diameter,
                 bar_length_mm=calc_params["bar_length_mm"],
                 blade_width_mm=calc_params["blade_width_mm"],

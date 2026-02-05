@@ -91,7 +91,12 @@ allowed_origins = [
 # Если есть переменная окружения с origins, используем её
 env_origins = os.getenv("CORS_ORIGINS")
 if env_origins:
-    allowed_origins = env_origins.split(",")
+    allowed_origins = [origin.strip() for origin in env_origins.split(",") if origin.strip()]
+
+# Гарантируем доступ для прод-дэшборда даже при override env
+dashboard_origin = "https://isramat-dashboard-production.up.railway.app"
+if dashboard_origin not in allowed_origins:
+    allowed_origins.append(dashboard_origin)
 
 app.add_middleware(
     CORSMiddleware,

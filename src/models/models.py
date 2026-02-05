@@ -251,6 +251,8 @@ class LotMaterialDB(Base):
     machine_id = Column(Integer, ForeignKey("machines.id", ondelete="SET NULL"), nullable=True)
     material_receipt_id = Column(Integer, nullable=True)  # будет FK позже
     material_type = Column(String(100), nullable=True)
+    material_group_id = Column(Integer, ForeignKey("material_groups.id", ondelete="SET NULL"), nullable=True)
+    material_subgroup_id = Column(Integer, ForeignKey("material_subgroups.id", ondelete="SET NULL"), nullable=True)
     diameter = Column(Float, nullable=True)
     # Длина прутка и параметры расчета (для конкретной выдачи/работы)
     bar_length_mm = Column(Float, nullable=True)
