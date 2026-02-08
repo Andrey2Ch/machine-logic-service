@@ -6,6 +6,7 @@
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from typing import List, Optional
 from pydantic import BaseModel
 from src.database import get_db_session
@@ -78,6 +79,7 @@ class MaterialBatchUpdate(BaseModel):
 
 class MaterialBatchOut(MaterialBatchIn):
     created_at: Optional[datetime] = None
+    remaining_quantity: Optional[int] = None
 
 
 class MaterialGroupIn(BaseModel):
@@ -258,7 +260,27 @@ def list_batches(
         query = query.filter(MaterialBatchDB.status == status)
     if from_customer is not None:
         query = query.filter(MaterialBatchDB.from_customer == from_customer)
-    return query.order_by(MaterialBatchDB.created_at.desc()).limit(200).all()
+    batches = query.order_by(MaterialBatchDB.created_at.desc()).limit(200).all()
+
+    batch_ids = [b.batch_id for b in batches]
+    remaining_map = {}
+    if batch_ids:
+        remaining_rows = db.query(
+            InventoryPositionDB.batch_id,
+            func.coalesce(func.sum(InventoryPositionDB.quantity), 0).label("remaining_quantity")
+        ).filter(
+            InventoryPositionDB.batch_id.in_(batch_ids)
+        ).group_by(
+            InventoryPositionDB.batch_id
+        ).all()
+        remaining_map = {row.batch_id: int(row.remaining_quantity or 0) for row in remaining_rows}
+
+    result = []
+    for batch in batches:
+        batch_data = {col.name: getattr(batch, col.name) for col in MaterialBatchDB.__table__.columns}
+        batch_data["remaining_quantity"] = remaining_map.get(batch.batch_id, 0)
+        result.append(batch_data)
+    return result
 
 
 @router.get("/batches/{batch_id}", response_model=MaterialBatchOut)
