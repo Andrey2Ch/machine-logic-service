@@ -547,11 +547,14 @@ def ocr_label(payload: OcrLabelIn, db: Session = Depends(get_db_session)):
         "Extract fields from this Hebrew material label image and return JSON with keys: "
         "batch_id, supplier, supplier_doc_number, date_received, material_type, diameter, "
         "bar_length, weight_kg, quantity_received, drawing_numbers, preferred_drawing, diameter_fraction. "
+        "The label can be a standard warehouse label or a customer-provided material form with handwritten values. "
         "Rules: batch_id must be the internal batch number (מס מנה) like 26000132-1. "
-        "drawing_numbers should include part numbers (מס חלק) like 756-22 (can be multiple). "
+        "If this is a customer form, use the customer delivery document number (מס ת. משלוח) as batch_id. "
+        "drawing_numbers should include part numbers (מס חלק) or work number (מס עבודה); can be multiple. "
+        "date_received may appear as DD.MM.YY, DD/MM/YY, DD-MM-YYYY or YYYY-MM-DD. "
         "diameter should be in millimeters if possible. If the diameter is shown as a fraction "
         '(e.g. עגול 3/4), put that in diameter_fraction as "3/4". '
-        "bar_length is the bar length (אורך מוט). "
+        "bar_length is the bar length (אורך מוט) in mm. "
         f"Known materials (groups/subgroups): {known_materials}. "
         "If a field is missing, return null. Use numeric types for diameter/bar_length/weight_kg/quantity. "
         "Return ONLY valid JSON."
@@ -657,17 +660,21 @@ def density_suggest(payload: DensitySuggestIn):
 
 
 def _postprocess_ocr(parsed: dict, raw_text: str) -> dict:
+    def _is_customer_form(text: str) -> bool:
+        return ("מס עבודה" in text) or ("כמות המסופקת" in text) or ("חומר" in text and "לקוח" in text)
     # Normalize batch_id using Hebrew label field if model mixed it with part number
     batch_match = re.search(r"מס מנה[:\s]*([0-9]{5,}(?:-\d+)?)", raw_text)
     if batch_match:
         parsed["batch_id"] = batch_match.group(1)
 
-    # Ensure drawing_numbers include part number(s)
-    part_match = re.search(r"מס חלק[:\s]*([0-9]+(?:-\d+)?)", raw_text)
-    if part_match:
-        drawings = parsed.get("drawing_numbers") or []
-        if part_match.group(1) not in drawings:
-            drawings.append(part_match.group(1))
+    # Ensure drawing_numbers include part/work number(s)
+    drawings = parsed.get("drawing_numbers") or []
+    part_matches = re.findall(r"מס[ '\"]*חלק[:\s]*([0-9A-Za-z]+(?:-\d+)?)", raw_text)
+    work_matches = re.findall(r"מס[ '\"]*עבודה[:\s]*([0-9A-Za-z]+(?:-\d+)?)", raw_text)
+    for match in part_matches + work_matches:
+        if match not in drawings:
+            drawings.append(match)
+    if drawings:
         parsed["drawing_numbers"] = drawings
 
     # Extract bar length if present in text
@@ -679,6 +686,27 @@ def _postprocess_ocr(parsed: dict, raw_text: str) -> dict:
     weight_match = re.search(r"משקל[:\s]*([0-9]+(?:\.[0-9]+)?)", raw_text)
     if weight_match and parsed.get("weight_kg") is None:
         parsed["weight_kg"] = float(weight_match.group(1))
+
+    # Extract supplier document number if present
+    doc_match = re.search(r"(?:מסמך|תעודה)[^\dA-Za-z]*([0-9A-Za-z-]+)", raw_text)
+    delivery_match = re.search(r"מס[ '\"]*ת\.?\s*משלוח[:\s]*([0-9A-Za-z/-]+)", raw_text)
+    if parsed.get("supplier_doc_number") is None:
+        if delivery_match:
+            parsed["supplier_doc_number"] = delivery_match.group(1)
+        elif doc_match:
+            parsed["supplier_doc_number"] = doc_match.group(1)
+
+    # Extract date if present (dd.mm.yy, dd/mm/yy, yyyy-mm-dd)
+    if parsed.get("date_received") is None:
+        date_match = re.search(r"(\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{4}[./-]\d{1,2}[./-]\d{1,2})", raw_text)
+        if date_match:
+            parsed["date_received"] = date_match.group(1)
+
+    # If customer form: prefer customer delivery doc as batch_id
+    if _is_customer_form(raw_text):
+        supplier_doc = parsed.get("supplier_doc_number")
+        if supplier_doc:
+            parsed["batch_id"] = supplier_doc
 
     # If diameter equals bar length, clear it (likely mis-mapped)
     if parsed.get("bar_length") is not None and parsed.get("diameter") == parsed.get("bar_length"):
