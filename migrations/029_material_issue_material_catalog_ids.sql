@@ -27,3 +27,7 @@ BEGIN
         ON DELETE SET NULL;
   END IF;
 END $$;
+
+INSERT INTO schema_migrations (version, applied_at)
+VALUES ('029_material_issue_material_catalog_ids', NOW())
+ON CONFLICT (version) DO NOTHING;
