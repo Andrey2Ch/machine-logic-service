@@ -1495,6 +1495,7 @@ class OperatorMachineViewItem(BaseModel):
     reading: Optional[str] = '' 
     lastReading: Optional[int] = Field(None, alias='last_reading')
     lastReadingTime: Optional[datetime] = Field(None, alias='last_reading_time')
+    locationId: Optional[int] = Field(None, alias='location_id')
     setupId: Optional[int] = Field(None, alias='setup_id')
     drawingNumber: Optional[str] = Field(None, alias='drawing_number')
     lotId: Optional[int] = Field(None, alias='lot_id')
@@ -1576,6 +1577,7 @@ async def get_operator_machines_view(db: Session = Depends(get_db_session)):
             SELECT 
                 m.id,
                 m.name,
+                m.location_id,
                 lr.reading as last_reading,
                 lr.created_at as last_reading_time,
                 ls.id as setup_id,
