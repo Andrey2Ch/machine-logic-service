@@ -1497,6 +1497,8 @@ class OperatorMachineViewItem(BaseModel):
     lastReadingTime: Optional[datetime] = Field(None, alias='last_reading_time')
     setupId: Optional[int] = Field(None, alias='setup_id')
     drawingNumber: Optional[str] = Field(None, alias='drawing_number')
+    lotId: Optional[int] = Field(None, alias='lot_id')
+    lotNumber: Optional[str] = Field(None, alias='lot_number')
     plannedQuantity: Optional[int] = Field(None, alias='planned_quantity')
     additionalQuantity: Optional[int] = Field(None, alias='additional_quantity')
     status: Optional[str] = None
@@ -1577,6 +1579,8 @@ async def get_operator_machines_view(db: Session = Depends(get_db_session)):
                 lr.created_at as last_reading_time,
                 ls.id as setup_id,
                 p.drawing_number,
+                ls.lot_id,
+                l.lot_number,
                 ls.planned_quantity,
                 ls.additional_quantity,
                 COALESCE(ls.status, 'idle') as status,
@@ -1591,6 +1595,7 @@ async def get_operator_machines_view(db: Session = Depends(get_db_session)):
                 SELECT * FROM latest_readings WHERE rn = 1
             ) lr ON ls.id = lr.setup_job_id
             LEFT JOIN parts p ON ls.part_id = p.id
+            LEFT JOIN lots l ON ls.lot_id = l.id
             LEFT JOIN employees op ON ls.employee_id = op.id
             LEFT JOIN employees qa ON ls.qa_id = qa.id
             WHERE m.is_active = true

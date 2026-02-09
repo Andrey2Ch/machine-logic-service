@@ -437,6 +437,7 @@ class WarehouseMovementDB(Base):
     from_location = Column(String, ForeignKey("storage_locations.code", ondelete="SET NULL"), nullable=True)
     to_location = Column(String, ForeignKey("storage_locations.code", ondelete="SET NULL"), nullable=True)
     related_lot_id = Column(Integer, ForeignKey("lots.id", ondelete="SET NULL"), nullable=True)
+    related_machine_id = Column(Integer, ForeignKey("machines.id", ondelete="SET NULL"), nullable=True)
     cut_factor = Column(Integer, nullable=True)
     performed_by = Column(Integer, ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
     performed_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
@@ -444,3 +445,4 @@ class WarehouseMovementDB(Base):
 
     batch = relationship("MaterialBatchDB")
     performer = relationship("EmployeeDB", foreign_keys=[performed_by])
+    machine = relationship("MachineDB", foreign_keys=[related_machine_id])

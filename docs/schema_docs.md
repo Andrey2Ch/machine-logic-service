@@ -208,6 +208,7 @@
 | from_location | text | YES |  |
 | to_location | text | YES |  |
 | related_lot_id | integer | YES |  |
+| related_machine_id | integer | YES |  |
 | cut_factor | integer | YES |  |
 | performed_by | integer | YES |  |
 | performed_at | timestamp with time zone | NO |  |

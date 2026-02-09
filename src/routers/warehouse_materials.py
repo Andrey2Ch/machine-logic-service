@@ -175,6 +175,7 @@ class WarehouseMovementIn(BaseModel):
     from_location: Optional[str] = None
     to_location: Optional[str] = None
     related_lot_id: Optional[int] = None
+    related_machine_id: Optional[int] = None
     cut_factor: Optional[int] = None
     performed_by: Optional[int] = None
     notes: Optional[str] = None
@@ -537,12 +538,18 @@ def create_movement(payload: WarehouseMovementIn, db: Session = Depends(get_db_s
 @router.get("/movements", response_model=List[WarehouseMovementOut])
 def list_movements(
     batch_id: Optional[str] = Query(None),
+    related_lot_id: Optional[int] = Query(None),
+    related_machine_id: Optional[int] = Query(None),
     limit: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db_session)
 ):
     query = db.query(WarehouseMovementDB)
     if batch_id:
         query = query.filter(WarehouseMovementDB.batch_id == batch_id)
+    if related_lot_id:
+        query = query.filter(WarehouseMovementDB.related_lot_id == related_lot_id)
+    if related_machine_id:
+        query = query.filter(WarehouseMovementDB.related_machine_id == related_machine_id)
     return query.order_by(WarehouseMovementDB.performed_at.desc()).limit(limit).all()
 
 
