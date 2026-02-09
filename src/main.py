@@ -1563,6 +1563,7 @@ async def get_operator_machines_view(db: Session = Depends(get_db_session)):
                     planned_quantity,
                     additional_quantity,
                     part_id,
+                    lot_id,
                     status,
                     machine_id,
                     employee_id,
