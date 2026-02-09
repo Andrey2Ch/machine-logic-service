@@ -341,6 +341,8 @@ class MaterialBatchDB(Base):
     price_per_kg_ils = Column(Numeric(12, 4), nullable=True)
     price_per_meter_ils = Column(Numeric(12, 4), nullable=True)
     price_per_kg_ils = Column(Numeric(12, 4), nullable=True)
+    price_per_meter_ils = Column(Numeric(12, 4), nullable=True)
+    price_per_kg_ils = Column(Numeric(12, 4), nullable=True)
     quantity_received = Column(Integer, nullable=True)
     supplier = Column(Text, nullable=True)
     supplier_doc_number = Column(Text, nullable=True)

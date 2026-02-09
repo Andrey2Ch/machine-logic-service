@@ -49,6 +49,8 @@ class MaterialBatchIn(BaseModel):
     price_per_kg_ils: Optional[float] = None
     price_per_meter_ils: Optional[float] = None
     price_per_kg_ils: Optional[float] = None
+    price_per_meter_ils: Optional[float] = None
+    price_per_kg_ils: Optional[float] = None
     quantity_received: Optional[int] = None
     supplier: Optional[str] = None
     supplier_doc_number: Optional[str] = None
@@ -69,6 +71,8 @@ class MaterialBatchUpdate(BaseModel):
     bar_length: Optional[float] = None
     weight_per_meter_kg: Optional[float] = None
     weight_kg: Optional[float] = None
+    price_per_meter_ils: Optional[float] = None
+    price_per_kg_ils: Optional[float] = None
     price_per_meter_ils: Optional[float] = None
     price_per_kg_ils: Optional[float] = None
     price_per_meter_ils: Optional[float] = None
