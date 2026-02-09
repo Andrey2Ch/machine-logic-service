@@ -17,3 +17,5 @@ jobs:
           python-version: "3.11"
       - name: Verify migration files
         run: python scripts/verify_migration_files.py
+      - name: Verify schema docs
+        run: python scripts/verify_schema_docs.py

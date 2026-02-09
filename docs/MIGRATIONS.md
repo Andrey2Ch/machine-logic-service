@@ -26,6 +26,11 @@ python scripts/check_migrations.py
 python scripts/verify_migration_files.py
 ```
 
+Проверка, что schema_docs.md включает таблицы/колонки из миграций:
+```bash
+python scripts/verify_schema_docs.py
+```
+
 ### Как обновить schema_docs.md
 ```bash
 python scripts/refresh_schema_docs.py

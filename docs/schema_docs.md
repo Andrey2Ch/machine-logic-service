@@ -390,3 +390,106 @@
 | role | character varying | NO | main / sub |
 | created_at | timestamp without time zone | NO | Когда привязали файл |
 
+## ai_conversations
+
+Секция добавлена по миграциям (без подключения к БД). Типы уточнить при следующем refresh.
+
+| column | type | nullable | description |
+|---|---|---|---|
+| id | unknown | ? |  |
+
+## ai_feedback
+
+Секция добавлена по миграциям (без подключения к БД). Типы уточнить при следующем refresh.
+
+| column | type | nullable | description |
+|---|---|---|---|
+| id | unknown | ? |  |
+
+## ai_knowledge_documents
+
+Секция добавлена по миграциям (без подключения к БД). Типы уточнить при следующем refresh.
+
+| column | type | nullable | description |
+|---|---|---|---|
+| id | unknown | ? |  |
+
+## ai_memory
+
+Секция добавлена по миграциям (без подключения к БД). Типы уточнить при следующем refresh.
+
+| column | type | nullable | description |
+|---|---|---|---|
+| id | unknown | ? |  |
+
+## ai_messages
+
+Секция добавлена по миграциям (без подключения к БД). Типы уточнить при следующем refresh.
+
+| column | type | nullable | description |
+|---|---|---|---|
+| id | unknown | ? |  |
+
+## ai_sql_examples
+
+Секция добавлена по миграциям (без подключения к БД). Типы уточнить при следующем refresh.
+
+| column | type | nullable | description |
+|---|---|---|---|
+| id | unknown | ? |  |
+
+## app_settings
+
+Секция добавлена по миграциям (без подключения к БД). Типы уточнить при следующем refresh.
+
+| column | type | nullable | description |
+|---|---|---|---|
+| id | unknown | ? |  |
+
+## nc_machine_type_profiles
+
+Секция добавлена по миграциям (без подключения к БД). Типы уточнить при следующем refresh.
+
+| column | type | nullable | description |
+|---|---|---|---|
+| id | unknown | ? |  |
+
+## notification_settings
+
+Секция добавлена по миграциям (без подключения к БД). Типы уточнить при следующем refresh.
+
+| column | type | nullable | description |
+|---|---|---|---|
+| id | unknown | ? |  |
+
+## user_sessions
+
+Секция добавлена по миграциям (без подключения к БД). Типы уточнить при следующем refresh.
+
+| column | type | nullable | description |
+|---|---|---|---|
+| id | unknown | ? |  |
+
+## migration_pending_columns
+
+Колонки из миграций (без подключения к БД). Типы уточнить при следующем refresh.
+
+| column | type | nullable | description |
+|---|---|---|---|
+| assigned_machine_id | unknown | ? |  |
+| assigned_order | unknown | ? |  |
+| avg_cycle_time | unknown | ? |  |
+| closed_at | unknown | ? |  |
+| closed_by | unknown | ? |  |
+| defect_bars | unknown | ? |  |
+| enabled_viewer | unknown | ? |  |
+| is_operational | unknown | ? |  |
+| language_admin | unknown | ? |  |
+| language_machinists | unknown | ? |  |
+| language_operators | unknown | ? |  |
+| language_qa | unknown | ? |  |
+| language_viewer | unknown | ? |  |
+| pinned_machine_id | unknown | ? |  |
+| price_per_kg_ils | unknown | ? |  |
+| price_per_meter_ils | unknown | ? |  |
+
