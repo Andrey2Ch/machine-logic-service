@@ -463,6 +463,32 @@
 |---|---|---|---|
 | id | unknown | ? |  |
 
+## print_jobs
+
+Секция добавлена по миграциям (без подключения к БД). Типы уточнить при следующем refresh.
+
+| column | type | nullable | description |
+|---|---|---|---|
+| id | unknown | ? |  |
+| idempotency_key | unknown | ? |  |
+| kind | unknown | ? |  |
+| payload | unknown | ? |  |
+| copies | unknown | ? |  |
+| priority | unknown | ? |  |
+| status | unknown | ? |  |
+| assigned_station_name | unknown | ? |  |
+| lease_token | unknown | ? |  |
+| lease_expires_at | unknown | ? |  |
+| attempt_count | unknown | ? |  |
+| last_error | unknown | ? |  |
+| started_at | unknown | ? |  |
+| completed_at | unknown | ? |  |
+| failed_at | unknown | ? |  |
+| cancelled_at | unknown | ? |  |
+| created_at | unknown | ? |  |
+| updated_at | unknown | ? |  |
+| created_by_employee_id | unknown | ? |  |
+
 ## user_sessions
 
 Секция добавлена по миграциям (без подключения к БД). Типы уточнить при следующем refresh.
