@@ -12,6 +12,7 @@ import asyncio
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import and_, or_, func, text, tuple_
+from sqlalchemy.exc import IntegrityError
 from src.database import get_db_session
 from typing import List, Optional
 from pydantic import BaseModel
@@ -343,6 +344,9 @@ def issue_material_to_machine(
     5. Записываем операцию в material_operations
     """
     try:
+        part = None
+        now = datetime.now(timezone.utc)
+
         # Проверяем существование лота
         lot = db.query(LotDB).filter(LotDB.id == request.lot_id).first()
         if not lot:
@@ -372,41 +376,62 @@ def issue_material_to_machine(
             if part:
                 drawing_number = part.drawing_number
         
-        # Ищем существующую запись с таким же lot_id + machine_id + diameter (+ bar_length, если задан)
-        existing_query = db.query(LotMaterialDB).filter(
-            and_(
-                LotMaterialDB.lot_id == request.lot_id,
-                LotMaterialDB.machine_id == request.machine_id,
-                LotMaterialDB.diameter == request.diameter
-            )
-        )
-        if request.bar_length_mm is not None:
-            existing_query = existing_query.filter(LotMaterialDB.bar_length_mm == request.bar_length_mm)
-        else:
-            existing_query = existing_query.filter(LotMaterialDB.bar_length_mm == None)
-        existing = existing_query.first()
-        
-        if existing:
-            calc_params = _resolve_calc_params(machine=machine, request=request, lot_material=existing)
+        def _apply_issue_update(existing: LotMaterialDB) -> tuple[LotMaterialDB, dict, str]:
+            """
+            Применяет логику "выдачи" к существующей записи.
+            Возвращает (lot_material, calc_params, operation_type).
+            """
+            calc_params_local = _resolve_calc_params(machine=machine, request=request, lot_material=existing)
+
+            # Если запись была закрыта, переоткрываем (уникальный индекс не позволяет создать новую).
+            if existing.closed_at is not None:
+                existing.closed_at = None
+                existing.closed_by = None
+                existing.status = "issued"
+
+            if existing.issued_at is None:
+                existing.issued_at = now
+
             # Добавляем к существующей записи (used_bars вычисляется автоматически в PostgreSQL)
             existing.issued_bars = (existing.issued_bars or 0) + request.quantity_bars
+
             if request.notes:
                 existing.notes = f"{existing.notes or ''}\n{request.notes}".strip()
+
             if request.bar_length_mm is not None and existing.bar_length_mm is None:
                 existing.bar_length_mm = request.bar_length_mm
+
             if request.material_group_id is not None and existing.material_group_id is None:
                 existing.material_group_id = request.material_group_id
+
             if request.material_subgroup_id is not None and existing.material_subgroup_id is None:
                 existing.material_subgroup_id = request.material_subgroup_id
+
             if existing.blade_width_mm is None:
-                existing.blade_width_mm = calc_params["blade_width_mm"]
+                existing.blade_width_mm = calc_params_local["blade_width_mm"]
+
             if existing.facing_allowance_mm is None:
-                existing.facing_allowance_mm = calc_params["facing_allowance_mm"]
+                existing.facing_allowance_mm = calc_params_local["facing_allowance_mm"]
+
             if existing.min_remainder_mm is None:
-                existing.min_remainder_mm = calc_params["min_remainder_mm"]
-            
-            lot_material = existing
-            operation_type = "add"
+                existing.min_remainder_mm = calc_params_local["min_remainder_mm"]
+
+            return existing, calc_params_local, "add"
+
+        # Ищем существующую запись СТРОГО по уникальному ключу БД: (lot_id, machine_id, diameter)
+        existing = (
+            db.query(LotMaterialDB)
+            .filter(
+                LotMaterialDB.lot_id == request.lot_id,
+                LotMaterialDB.machine_id == request.machine_id,
+                LotMaterialDB.diameter == request.diameter,
+            )
+            .first()
+        )
+
+        created_new = False
+        if existing:
+            lot_material, calc_params, operation_type = _apply_issue_update(existing)
         else:
             calc_params = _resolve_calc_params(machine=machine, request=request, lot_material=None)
             # Создаём новую запись (НЕ включаем used_bars - это generated column в PostgreSQL!)
@@ -423,12 +448,13 @@ def issue_material_to_machine(
                 min_remainder_mm=calc_params["min_remainder_mm"],
                 issued_bars=request.quantity_bars,
                 returned_bars=0,
-                issued_at=datetime.now(timezone.utc),
+                issued_at=now,
                 status="issued",
-                notes=request.notes
+                notes=request.notes,
             )
             db.add(lot_material)
             operation_type = "issue"
+            created_new = True
         
         # Обновляем статус материала в лоте
         lot.material_status = "issued"
@@ -439,8 +465,33 @@ def issue_material_to_machine(
         if request.diameter:
             lot.actual_diameter = request.diameter
             logger.info(f"Updated lot {lot.id} actual_diameter to {request.diameter} from warehouse issue")
-        
-        db.flush()  # Получаем ID для lot_material
+
+        # Получаем ID для lot_material. Если запросов одновременно два (или мы не нашли existing по старой логике),
+        # INSERT может упасть по уникальному индексу — тогда откатываем и обновляем существующую запись.
+        try:
+            db.flush()
+        except IntegrityError:
+            db.rollback()
+            existing_after = (
+                db.query(LotMaterialDB)
+                .filter(
+                    LotMaterialDB.lot_id == request.lot_id,
+                    LotMaterialDB.machine_id == request.machine_id,
+                    LotMaterialDB.diameter == request.diameter,
+                )
+                .first()
+            )
+            if not existing_after:
+                raise
+            # Повторяем обновление уже существующей записи
+            lot = db.query(LotDB).filter(LotDB.id == request.lot_id).first()
+            machine = db.query(MachineDB).filter(MachineDB.id == request.machine_id).first()
+            lot_material, calc_params, operation_type = _apply_issue_update(existing_after)
+            lot.material_status = "issued"
+            if request.diameter:
+                lot.actual_diameter = request.diameter
+            created_new = False
+            db.flush()
         
         # Записываем операцию в историю
         operation = MaterialOperationDB(
@@ -453,7 +504,7 @@ def issue_material_to_machine(
             facing_allowance_mm=calc_params["facing_allowance_mm"],
             min_remainder_mm=calc_params["min_remainder_mm"],
             notes=request.notes,
-            performed_at=datetime.now(timezone.utc)
+            performed_at=now
         )
         db.add(operation)
         
