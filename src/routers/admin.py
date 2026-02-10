@@ -10,7 +10,7 @@ from sqlalchemy import func
 
 # Относительные импорты для доступа к моделям и сессии БД
 from ..database import get_db_session
-from ..models.models import MachineDB, CardDB, SetupDB, LotDB, PartDB, EmployeeDB
+from ..models.models import MachineDB, CardDB, SetupDB, LotDB, PartDB, EmployeeDB, BatchDB
 from ..services.mtconnect_client import reset_counter_on_qa_approval
 from ..services.telegram_client import send_telegram_message
 from ..services.whatsapp_client import send_whatsapp_to_all_enabled_roles, WHATSAPP_ENABLED
@@ -77,6 +77,10 @@ class CreateSetupPayload(BaseModel):
     drawing_number: str
     lot_number: str
     planned_quantity: float
+
+
+class TransferSetupPayload(BaseModel):
+    target_machine_id: int
 
 
 @router.post("/setup/create", summary="Создать наладку по предсозданному лоту")
@@ -156,6 +160,117 @@ async def create_setup(payload: CreateSetupPayload, db: Session = Depends(get_db
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Ошибка создания наладки: {e}")
+
+
+@router.post("/setup/{setup_id}/transfer", summary="Перенести активную наладку на другой станок (админ)")
+async def transfer_setup(setup_id: int, payload: TransferSetupPayload, db: Session = Depends(get_db_session)):
+    """
+    Перенос (transfer) активной наладки:
+    - завершает текущую наладку (source) на исходном станке,
+    - создаёт новую наладку (target) на выбранном станке с остатком по плану.
+
+    ВАЖНО:
+    - перенос работает только для активных статусов (created/started/allowed),
+      чтобы не обходить процесс ОТК (pending_qc).
+    - перенос НЕ требует миграций: используется существующая модель SetupDB.
+    """
+    try:
+        # Блокируем строку наладки на время переноса (минимизируем гонки)
+        setup = (
+            db.query(SetupDB)
+              .filter(SetupDB.id == setup_id)
+              .with_for_update()
+              .first()
+        )
+        if not setup:
+            raise HTTPException(status_code=404, detail="Наладка не найдена")
+        if setup.end_time is not None:
+            raise HTTPException(status_code=400, detail="Наладка уже завершена")
+
+        allowed_statuses = ("created", "started", "allowed")
+        if setup.status not in allowed_statuses:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Перенос доступен только для статусов {allowed_statuses}. Текущий: '{setup.status}'",
+            )
+
+        if payload.target_machine_id == setup.machine_id:
+            raise HTTPException(status_code=400, detail="Станок назначения совпадает с исходным")
+
+        target_machine = db.query(MachineDB).filter(MachineDB.id == payload.target_machine_id).first()
+        if not target_machine:
+            raise HTTPException(status_code=404, detail="Станок назначения не найден")
+
+        produced = (
+            db.query(func.coalesce(func.sum(BatchDB.current_quantity), 0))
+              .filter(BatchDB.setup_job_id == setup.id)
+              .scalar()
+        ) or 0
+
+        total_planned = int(setup.planned_quantity or 0) + int(setup.additional_quantity or 0)
+        remaining = max(total_planned - int(produced), 0)
+        if remaining <= 0:
+            raise HTTPException(status_code=400, detail="Остаток = 0. Нечего переносить.")
+
+        # Завершаем исходную наладку
+        setup.status = "completed"
+        setup.end_time = datetime.now()
+
+        # Проверяем занятость станка назначения → queued/created
+        active_on_target = db.query(SetupDB).filter(
+            SetupDB.machine_id == payload.target_machine_id,
+            SetupDB.status.in_(["created", "started", "pending_qc", "allowed"]),
+            SetupDB.end_time == None
+        ).first()
+        target_status = "queued" if active_on_target else "created"
+
+        target_setup = SetupDB(
+            employee_id=setup.employee_id,
+            machine_id=payload.target_machine_id,
+            lot_id=setup.lot_id,
+            part_id=setup.part_id,
+            planned_quantity=remaining,
+            additional_quantity=0,
+            status=target_status,
+            cycle_time=setup.cycle_time,
+        )
+        db.add(target_setup)
+        db.flush()
+
+        # Создаём/фиксируем запись гейта для новой наладки (idempotent, safe)
+        try:
+            ensure_setup_program_handover_row(db, next_setup_id=target_setup.id, machine_id=payload.target_machine_id)
+        except Exception as e:
+            logger.warning("setup_program_handover init failed (non-critical): %s", e)
+
+        # Обновляем привязки лота к станку назначения (как в create_setup)
+        lot = db.query(LotDB).filter(LotDB.id == setup.lot_id).first()
+        if lot:
+            max_order = db.query(func.max(LotDB.assigned_order)).filter(
+                LotDB.assigned_machine_id == payload.target_machine_id,
+                LotDB.id != lot.id
+            ).scalar() or 0
+            lot.assigned_machine_id = payload.target_machine_id
+            lot.assigned_order = max_order + 1
+
+            # Перевод лота в производство только если наладка не queued
+            if target_status == "created":
+                if lot.status in ("new", "assigned"):
+                    lot.status = "in_production"
+
+        db.commit()
+        db.refresh(target_setup)
+        return {
+            "source_setup_id": setup_id,
+            "target_setup_id": target_setup.id,
+            "target_status": target_setup.status,
+            "remaining": remaining,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Ошибка переноса наладки: {e}")
 
 
 @router.post("/setup/{setup_id}/send-to-qc", summary="Отправить наладку в ОТК (pending_qc)")
