@@ -162,6 +162,63 @@ async def create_setup(payload: CreateSetupPayload, db: Session = Depends(get_db
         raise HTTPException(status_code=500, detail=f"Ошибка создания наладки: {e}")
 
 
+@router.post("/setup/{setup_id}/resume", summary="Возобновить завершенную наладку (переоткрыть)")
+async def resume_setup(setup_id: int, db: Session = Depends(get_db_session)):
+    """
+    Возобновление = переоткрыть ТУ ЖЕ наладку:
+    - status -> 'started'
+    - end_time -> NULL
+    - start_time -> COALESCE(start_time, NOW())
+
+    Логика полностью соответствует боту (resume_setup), без пересчетов и создания новой наладки.
+    """
+    try:
+        setup = (
+            db.query(SetupDB)
+              .filter(SetupDB.id == setup_id)
+              .with_for_update()
+              .first()
+        )
+        if not setup:
+            raise HTTPException(status_code=404, detail="Наладка не найдена")
+
+        if setup.status != "completed":
+            raise HTTPException(status_code=400, detail="Наладка не завершена и не может быть возобновлена")
+
+        # На этом станке не должно быть другой активной наладки
+        active_setup = db.query(SetupDB).filter(
+            SetupDB.machine_id == setup.machine_id,
+            SetupDB.status.in_(["created", "started", "pending_qc", "allowed"]),
+            SetupDB.end_time == None,
+            SetupDB.id != setup.id,
+        ).first()
+        if active_setup:
+            raise HTTPException(status_code=409, detail="На этом станке уже есть активная наладка")
+
+        # Переоткрываем ту же запись
+        setup.status = "started"
+        setup.end_time = None
+        if setup.start_time is None:
+            setup.start_time = datetime.now()
+
+        db.commit()
+        db.refresh(setup)
+        return {
+            "setup_id": setup.id,
+            "machine_id": setup.machine_id,
+            "lot_id": setup.lot_id,
+            "part_id": setup.part_id,
+            "planned_quantity": int(setup.planned_quantity or 0),
+            "additional_quantity": int(setup.additional_quantity or 0),
+            "status": setup.status,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Ошибка возобновления наладки: {e}")
+
+
 @router.post("/setup/{setup_id}/transfer", summary="Перенести активную наладку на другой станок (админ)")
 async def transfer_setup(setup_id: int, payload: TransferSetupPayload, db: Session = Depends(get_db_session)):
     """
@@ -204,6 +261,9 @@ async def transfer_setup(setup_id: int, payload: TransferSetupPayload, db: Sessi
         produced = (
             db.query(func.coalesce(func.sum(BatchDB.current_quantity), 0))
               .filter(BatchDB.setup_job_id == setup.id)
+              # Считаем только production-источник (иначе good/defect/rework дочерние батчи "удваивают" сумму)
+              .filter(BatchDB.original_location == "production")
+              .filter(BatchDB.parent_batch_id == None)
               .scalar()
         ) or 0
 
