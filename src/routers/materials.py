@@ -25,7 +25,9 @@ from src.models.models import (
     EmployeeDB,
     PartDB,
     MaterialOperationDB,
-    SetupDB
+    SetupDB,
+    WarehouseMovementDB,
+    InventoryPositionDB,
 )
 from src.services.notification_service import send_material_low_notification
 from datetime import datetime, timezone, timedelta
@@ -107,6 +109,106 @@ def _normalize_machine_name(name: Optional[str]) -> str:
         if len(parts) >= 3:
             normalized = parts[2]
     return normalized.replace('_', '-').upper()
+
+
+def _get_source_batch_for_lot_material(
+    *,
+    db: Session,
+    lot_material: LotMaterialDB
+) -> Optional[WarehouseMovementDB]:
+    """
+    Находит исходную складскую выдачу (movement_type='issue') для этой записи lot_material.
+    Используем последнюю выдачу по паре lot + machine как источник batch/location для возврата.
+    """
+    # Приоритет: явная привязка к исходной складской выдаче
+    if lot_material.material_receipt_id:
+        linked = (
+            db.query(WarehouseMovementDB)
+            .filter(WarehouseMovementDB.movement_id == lot_material.material_receipt_id)
+            .first()
+        )
+        if linked and linked.movement_type == "issue":
+            return linked
+
+    if not lot_material.lot_id or not lot_material.machine_id:
+        return None
+
+    return (
+        db.query(WarehouseMovementDB)
+        .filter(WarehouseMovementDB.related_lot_id == lot_material.lot_id)
+        .filter(WarehouseMovementDB.related_machine_id == lot_material.machine_id)
+        .filter(WarehouseMovementDB.movement_type == "issue")
+        .order_by(WarehouseMovementDB.performed_at.desc(), WarehouseMovementDB.movement_id.desc())
+        .first()
+    )
+
+
+def _apply_warehouse_return_sync(
+    *,
+    db: Session,
+    lot_material: LotMaterialDB,
+    quantity_bars: int,
+    notes: Optional[str]
+) -> None:
+    """
+    Синхронизирует возврат в складском контуре:
+    1) пишет warehouse_movements (return),
+    2) увеличивает inventory_positions для исходной batch/location.
+    """
+    if quantity_bars <= 0:
+        return
+
+    source_issue = _get_source_batch_for_lot_material(db=db, lot_material=lot_material)
+    if not source_issue:
+        logger.info(
+            "Skip warehouse return sync: source issue movement not found for lot_material_id=%s",
+            lot_material.id,
+        )
+        return
+
+    target_location = source_issue.from_location or source_issue.to_location
+    if not target_location:
+        logger.warning(
+            "Skip warehouse return sync: no target location in source issue movement_id=%s (lot_material_id=%s)",
+            source_issue.movement_id,
+            lot_material.id,
+        )
+        return
+
+    movement_note = "Auto return sync from materials/lot-materials"
+    if notes:
+        movement_note = f"{movement_note}. {notes}"
+
+    movement = WarehouseMovementDB(
+        batch_id=source_issue.batch_id,
+        movement_type="return",
+        quantity=quantity_bars,
+        from_location=None,
+        to_location=target_location,
+        related_lot_id=lot_material.lot_id,
+        related_machine_id=lot_material.machine_id,
+        performed_by=lot_material.returned_by,
+        notes=movement_note[:2000],
+    )
+    db.add(movement)
+
+    position = (
+        db.query(InventoryPositionDB)
+        .filter(InventoryPositionDB.batch_id == source_issue.batch_id)
+        .filter(InventoryPositionDB.location_code == target_location)
+        .first()
+    )
+    if position:
+        position.quantity = int(position.quantity or 0) + int(quantity_bars)
+        position.updated_at = datetime.now(timezone.utc)
+    else:
+        position = InventoryPositionDB(
+            batch_id=source_issue.batch_id,
+            location_code=target_location,
+            quantity=int(quantity_bars),
+            updated_at=datetime.now(timezone.utc),
+        )
+        db.add(position)
 
 
 def _fetch_mtconnect_counts() -> dict:
@@ -250,6 +352,9 @@ class CloseMaterialRequest(BaseModel):
     defect_bars: int = 0
     notes: Optional[str] = None
     closed_by: Optional[int] = None
+
+class LinkSourceMovementRequest(BaseModel):
+    movement_id: int
 
 class MaterialOperationOut(BaseModel):
     id: int
@@ -701,7 +806,11 @@ def return_bars(
             raise HTTPException(status_code=400, detail="Количество прутков должно быть положительным")
         
         # Проверяем, что не возвращаем больше чем есть
-        max_returnable = (lot_material.issued_bars or 0) - (lot_material.returned_bars or 0)
+        max_returnable = max(0, (
+            (lot_material.issued_bars or 0)
+            - (lot_material.returned_bars or 0)
+            - (lot_material.defect_bars or 0)
+        ))
         if request.quantity_bars > max_returnable:
             raise HTTPException(
                 status_code=400, 
@@ -712,9 +821,22 @@ def return_bars(
         lot_material.returned_bars = (lot_material.returned_bars or 0) + request.quantity_bars
         lot_material.returned_at = datetime.now(timezone.utc)
         lot_material.returned_by = request.performed_by
+
+        # Синхронизация со складскими партиями (warehouse_materials):
+        # возвращаем в исходную batch/location по последней issue-операции.
+        _apply_warehouse_return_sync(
+            db=db,
+            lot_material=lot_material,
+            quantity_bars=request.quantity_bars,
+            notes=request.notes,
+        )
         
         # Обновляем статус (вычисляем used_bars для проверки)
-        calculated_used = (lot_material.issued_bars or 0) - (lot_material.returned_bars or 0)
+        calculated_used = (
+            (lot_material.issued_bars or 0)
+            - (lot_material.returned_bars or 0)
+            - (lot_material.defect_bars or 0)
+        )
         if calculated_used == 0:
             lot_material.status = "returned"
         elif lot_material.returned_bars > 0:
@@ -1242,6 +1364,45 @@ def get_lot_material_detail(
     except Exception as e:
         logger.error(f"Error fetching lot material detail: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Ошибка: {str(e)}")
+
+
+@router.patch("/lot-materials/{id}/source-movement")
+def link_source_movement(
+    id: int,
+    request: LinkSourceMovementRequest,
+    db: Session = Depends(get_db_session)
+):
+    """
+    Явно связывает lot_material с исходной складской выдачей (warehouse_movements.movement_id).
+    Нужно для детерминированного возврата строго в исходную партию/локацию.
+    """
+    lot_material = db.query(LotMaterialDB).filter(LotMaterialDB.id == id).first()
+    if not lot_material:
+        raise HTTPException(status_code=404, detail=f"Запись материала {id} не найдена")
+
+    movement = (
+        db.query(WarehouseMovementDB)
+        .filter(WarehouseMovementDB.movement_id == request.movement_id)
+        .first()
+    )
+    if not movement:
+        raise HTTPException(status_code=404, detail=f"Складское движение {request.movement_id} не найдено")
+    if movement.movement_type != "issue":
+        raise HTTPException(status_code=400, detail="Можно привязывать только движение issue")
+
+    if lot_material.lot_id and movement.related_lot_id and lot_material.lot_id != movement.related_lot_id:
+        raise HTTPException(status_code=400, detail="movement.related_lot_id не совпадает с lot_material.lot_id")
+    if lot_material.machine_id and movement.related_machine_id and lot_material.machine_id != movement.related_machine_id:
+        raise HTTPException(status_code=400, detail="movement.related_machine_id не совпадает с lot_material.machine_id")
+
+    lot_material.material_receipt_id = movement.movement_id
+    db.commit()
+
+    return {
+        "status": "ok",
+        "lot_material_id": lot_material.id,
+        "source_movement_id": movement.movement_id,
+    }
 
 
 @router.get("/lot-materials/{id}/material-hours")
