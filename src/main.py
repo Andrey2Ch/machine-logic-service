@@ -1153,7 +1153,10 @@ async def get_machines(db: Session = Depends(get_db_session)):
                 "name": m.name,
                 "type": m.type,
                 "is_active": m.is_active,
-                "location_id": m.location_id
+                "location_id": m.location_id,
+                "min_diameter": m.min_diameter,
+                "max_diameter": m.max_diameter,
+                "max_bar_length": m.max_bar_length,
             } for m in machines
         ]
     }
