@@ -34,6 +34,7 @@ from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger(__name__)
 SYSTEM_NOLOT_PREFIX = "NOLOT-M"
+SYSTEM_NOLOT_PART_DWG = "__SYSTEM_NOLOT_PART__"
 
 router = APIRouter(
     prefix="/materials",
@@ -529,6 +530,20 @@ def issue_material_to_machine(
             if target_lot_id is None:
                 # Переходный режим для участков без привязки к лотам:
                 # создаем/переиспользуем системный "технический" лот на станок.
+                system_part = (
+                    db.query(PartDB)
+                    .filter(PartDB.drawing_number == SYSTEM_NOLOT_PART_DWG)
+                    .first()
+                )
+                if not system_part:
+                    system_part = PartDB(
+                        drawing_number=SYSTEM_NOLOT_PART_DWG,
+                        material="SYSTEM_NOLOT",
+                    )
+                    db.add(system_part)
+                    db.flush()
+                    logger.info("Created system part for no-lot flow: %s", SYSTEM_NOLOT_PART_DWG)
+
                 system_lot_number = f"{SYSTEM_NOLOT_PREFIX}{request.machine_id}"
                 system_lot = (
                     db.query(LotDB)
@@ -539,7 +554,7 @@ def issue_material_to_machine(
                 if not system_lot:
                     system_lot = LotDB(
                         lot_number=system_lot_number,
-                        part_id=None,
+                        part_id=int(system_part.id),
                         status="in_production",
                         assigned_machine_id=request.machine_id,
                     )
@@ -550,6 +565,10 @@ def issue_material_to_machine(
                         system_lot_number,
                         request.machine_id,
                     )
+                elif system_lot.part_id is None:
+                    # Бэкфилл старых тех-лотов, созданных до фикса.
+                    system_lot.part_id = int(system_part.id)
+                    db.flush()
                 target_lot_id = int(system_lot.id)
 
         # Проверяем существование лота

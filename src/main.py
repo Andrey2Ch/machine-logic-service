@@ -2559,6 +2559,7 @@ class LotCreate(LotBase):
 
 class LotResponse(LotBase):
     id: int
+    part_id: Optional[int] = None
     order_manager_id: Optional[int] = None
     created_by_order_manager_at: Optional[datetime] = None
     status: LotStatus
