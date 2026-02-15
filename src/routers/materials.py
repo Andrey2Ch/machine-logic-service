@@ -333,7 +333,7 @@ class MaterialTypeOut(BaseModel):
 
 class IssueToMachineRequest(BaseModel):
     machine_id: int  # Теперь обязательный!
-    lot_id: int
+    lot_id: Optional[int] = None
     drawing_number: Optional[str] = None  # מס' שרטוט
     material_type: Optional[str] = None  # סוג חומר - теперь необязательный
     material_group_id: Optional[int] = None
@@ -467,15 +467,44 @@ def issue_material_to_machine(
         now = datetime.now(timezone.utc)
         request_shape = _normalize_profile_type(request.shape)
 
-        # Проверяем существование лота
-        lot = db.query(LotDB).filter(LotDB.id == request.lot_id).first()
-        if not lot:
-            raise HTTPException(status_code=404, detail=f"Лот {request.lot_id} не найден")
-        
         # Проверяем станок
         machine = db.query(MachineDB).filter(MachineDB.id == request.machine_id).first()
         if not machine:
             raise HTTPException(status_code=404, detail=f"Станок {request.machine_id} не найден")
+
+        # Переходный период: lot_id может не передаваться с фронта.
+        # Тогда автоматически подбираем активный лот для выбранного станка.
+        target_lot_id: Optional[int] = request.lot_id
+        if target_lot_id is None:
+            statuses_priority = ("in_production", "assigned", "new")
+            target_lot = None
+            for status_code in statuses_priority:
+                target_lot = (
+                    db.query(LotDB)
+                    .filter(
+                        LotDB.status == status_code,
+                        or_(
+                            LotDB.assigned_machine_id == request.machine_id,
+                            LotDB.machine_id == request.machine_id,
+                        ),
+                    )
+                    .order_by(LotDB.created_at.desc())
+                    .first()
+                )
+                if target_lot:
+                    break
+
+            if not target_lot:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Для выбранного станка не найден активный лот. Укажи лот вручную или назначь его в канбане."
+                )
+            target_lot_id = target_lot.id
+
+        # Проверяем существование лота
+        lot = db.query(LotDB).filter(LotDB.id == target_lot_id).first()
+        if not lot:
+            raise HTTPException(status_code=404, detail=f"Лот {target_lot_id} не найден")
         
         # Проверяем диаметр по допускам станка (если заданы)
         if machine.min_diameter is not None and request.diameter < machine.min_diameter:
@@ -552,7 +581,7 @@ def issue_material_to_machine(
         existing = (
             db.query(LotMaterialDB)
             .filter(
-                LotMaterialDB.lot_id == request.lot_id,
+                LotMaterialDB.lot_id == target_lot_id,
                 LotMaterialDB.machine_id == request.machine_id,
                 LotMaterialDB.diameter == request.diameter,
                 func.coalesce(LotMaterialDB.shape, "round") == request_shape,
@@ -567,7 +596,7 @@ def issue_material_to_machine(
             calc_params = _resolve_calc_params(machine=machine, request=request, lot_material=None)
             # Создаём новую запись (НЕ включаем used_bars - это generated column в PostgreSQL!)
             lot_material = LotMaterialDB(
-                lot_id=request.lot_id,
+                lot_id=target_lot_id,
                 machine_id=request.machine_id,
                 material_type=request.material_type,
                 material_group_id=request.material_group_id,
@@ -608,7 +637,7 @@ def issue_material_to_machine(
             existing_after = (
                 db.query(LotMaterialDB)
                 .filter(
-                    LotMaterialDB.lot_id == request.lot_id,
+                    LotMaterialDB.lot_id == target_lot_id,
                     LotMaterialDB.machine_id == request.machine_id,
                     LotMaterialDB.diameter == request.diameter,
                     func.coalesce(LotMaterialDB.shape, "round") == request_shape,
@@ -618,7 +647,7 @@ def issue_material_to_machine(
             if not existing_after:
                 raise
             # Повторяем обновление уже существующей записи
-            lot = db.query(LotDB).filter(LotDB.id == request.lot_id).first()
+            lot = db.query(LotDB).filter(LotDB.id == target_lot_id).first()
             machine = db.query(MachineDB).filter(MachineDB.id == request.machine_id).first()
             lot_material, calc_params, operation_type = _apply_issue_update(existing_after)
             lot.material_status = "issued"
