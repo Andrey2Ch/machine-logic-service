@@ -483,10 +483,7 @@ def issue_material_to_machine(
                     db.query(LotDB)
                     .filter(
                         LotDB.status == status_code,
-                        or_(
-                            LotDB.assigned_machine_id == request.machine_id,
-                            LotDB.machine_id == request.machine_id,
-                        ),
+                        LotDB.assigned_machine_id == request.machine_id,
                     )
                     .order_by(LotDB.created_at.desc())
                     .first()
