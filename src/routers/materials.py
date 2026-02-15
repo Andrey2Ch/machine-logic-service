@@ -488,6 +488,13 @@ def issue_material_to_machine(
                 status_code=400,
                 detail=f"Диаметр {request.diameter}мм больше максимального для станка ({machine.max_diameter}мм)"
             )
+
+        # Минимальная длина прутка (защита от мусорных значений вида 2мм)
+        if request.bar_length_mm is not None and request.bar_length_mm < 500:
+            raise HTTPException(
+                status_code=400,
+                detail="Длина прутка должна быть не меньше 500 мм"
+            )
         
         # Получаем drawing_number из лота если не передан
         drawing_number = request.drawing_number
