@@ -47,6 +47,15 @@ DEFAULT_FACING_ALLOWANCE_MM = 0.5
 DEFAULT_MIN_REMAINDER_MM = 300.0
 
 
+def _normalize_profile_type(value: Optional[str]) -> str:
+    normalized = (value or "").strip().lower()
+    if normalized in ("hex", "hexagon"):
+        return "hexagon"
+    if normalized == "square":
+        return "square"
+    return "round"
+
+
 def _resolve_calc_params(
     *,
     machine: Optional[MachineDB],
@@ -329,6 +338,7 @@ class IssueToMachineRequest(BaseModel):
     material_type: Optional[str] = None  # סוג חומר - теперь необязательный
     material_group_id: Optional[int] = None
     material_subgroup_id: Optional[int] = None
+    shape: Optional[str] = "round"
     diameter: float  # диаметр
     quantity_bars: int  # כמות במוטות
     bar_length_mm: Optional[float] = None
@@ -361,6 +371,7 @@ class MaterialOperationOut(BaseModel):
     lot_material_id: int
     operation_type: str
     quantity_bars: int
+    shape: Optional[str] = None
     diameter: Optional[float] = None
     bar_length_mm: Optional[float] = None
     blade_width_mm: Optional[float] = None
@@ -385,6 +396,7 @@ class LotMaterialOut(BaseModel):
     material_type: Optional[str] = None
     material_group_id: Optional[int] = None
     material_subgroup_id: Optional[int] = None
+    shape: Optional[str] = None
     diameter: Optional[float] = None
     bar_length_mm: Optional[float] = None
     blade_width_mm: Optional[float] = None
@@ -451,6 +463,7 @@ def issue_material_to_machine(
     try:
         part = None
         now = datetime.now(timezone.utc)
+        request_shape = _normalize_profile_type(request.shape)
 
         # Проверяем существование лота
         lot = db.query(LotDB).filter(LotDB.id == request.lot_id).first()
@@ -512,6 +525,9 @@ def issue_material_to_machine(
             if request.material_subgroup_id is not None and existing.material_subgroup_id is None:
                 existing.material_subgroup_id = request.material_subgroup_id
 
+            if not existing.shape:
+                existing.shape = request_shape
+
             if existing.blade_width_mm is None:
                 existing.blade_width_mm = calc_params_local["blade_width_mm"]
 
@@ -523,13 +539,14 @@ def issue_material_to_machine(
 
             return existing, calc_params_local, "add"
 
-        # Ищем существующую запись СТРОГО по уникальному ключу БД: (lot_id, machine_id, diameter)
+        # Ищем существующую запись по паре lot+machine+diameter+shape
         existing = (
             db.query(LotMaterialDB)
             .filter(
                 LotMaterialDB.lot_id == request.lot_id,
                 LotMaterialDB.machine_id == request.machine_id,
                 LotMaterialDB.diameter == request.diameter,
+                func.coalesce(LotMaterialDB.shape, "round") == request_shape,
             )
             .first()
         )
@@ -546,6 +563,7 @@ def issue_material_to_machine(
                 material_type=request.material_type,
                 material_group_id=request.material_group_id,
                 material_subgroup_id=request.material_subgroup_id,
+                shape=request_shape,
                 diameter=request.diameter,
                 bar_length_mm=calc_params["bar_length_mm"],
                 blade_width_mm=calc_params["blade_width_mm"],
@@ -570,6 +588,7 @@ def issue_material_to_machine(
         if request.diameter:
             lot.actual_diameter = request.diameter
             logger.info(f"Updated lot {lot.id} actual_diameter to {request.diameter} from warehouse issue")
+        lot.actual_profile_type = request_shape
 
         # Получаем ID для lot_material. Если запросов одновременно два (или мы не нашли existing по старой логике),
         # INSERT может упасть по уникальному индексу — тогда откатываем и обновляем существующую запись.
@@ -583,6 +602,7 @@ def issue_material_to_machine(
                     LotMaterialDB.lot_id == request.lot_id,
                     LotMaterialDB.machine_id == request.machine_id,
                     LotMaterialDB.diameter == request.diameter,
+                    func.coalesce(LotMaterialDB.shape, "round") == request_shape,
                 )
                 .first()
             )
@@ -595,6 +615,7 @@ def issue_material_to_machine(
             lot.material_status = "issued"
             if request.diameter:
                 lot.actual_diameter = request.diameter
+            lot.actual_profile_type = request_shape
             created_new = False
             db.flush()
         
@@ -603,6 +624,7 @@ def issue_material_to_machine(
             lot_material_id=lot_material.id,
             operation_type=operation_type,
             quantity_bars=request.quantity_bars,
+            shape=request_shape,
             diameter=request.diameter,
             bar_length_mm=calc_params["bar_length_mm"],
             blade_width_mm=calc_params["blade_width_mm"],
@@ -686,6 +708,7 @@ def issue_material_to_machine(
             "machine_name": machine.name,
             "drawing_number": drawing_number,
             "material_type": lot_material.material_type,
+            "shape": lot_material.shape,
             "diameter": lot_material.diameter,
             "bar_length_mm": lot_material.bar_length_mm,
             "blade_width_mm": lot_material.blade_width_mm,
@@ -739,6 +762,7 @@ def add_bars_to_material(
             lot_material_id=id,
             operation_type="add",
             quantity_bars=request.quantity_bars,
+            shape=lot_material.shape,
             diameter=lot_material.diameter,
             bar_length_mm=lot_material.bar_length_mm,
             blade_width_mm=lot_material.blade_width_mm,
@@ -764,6 +788,7 @@ def add_bars_to_material(
             "machine_id": lot_material.machine_id,
             "machine_name": machine.name if machine else None,
             "material_type": lot_material.material_type,
+            "shape": lot_material.shape,
             "diameter": lot_material.diameter,
             "bar_length_mm": lot_material.bar_length_mm,
             "blade_width_mm": lot_material.blade_width_mm,
@@ -847,6 +872,7 @@ def return_bars(
             lot_material_id=id,
             operation_type="return",
             quantity_bars=-request.quantity_bars,  # Отрицательное для возврата
+            shape=lot_material.shape,
             diameter=lot_material.diameter,
             bar_length_mm=lot_material.bar_length_mm,
             blade_width_mm=lot_material.blade_width_mm,
@@ -872,6 +898,7 @@ def return_bars(
             "machine_id": lot_material.machine_id,
             "machine_name": machine.name if machine else None,
             "material_type": lot_material.material_type,
+            "shape": lot_material.shape,
             "diameter": lot_material.diameter,
             "bar_length_mm": lot_material.bar_length_mm,
             "blade_width_mm": lot_material.blade_width_mm,
@@ -962,6 +989,7 @@ def close_material(
             "machine_name": machine.name if machine else None,
             "drawing_number": drawing_number,
             "material_type": lot_material.material_type,
+            "shape": lot_material.shape,
             "diameter": lot_material.diameter,
             "bar_length_mm": lot_material.bar_length_mm,
             "blade_width_mm": lot_material.blade_width_mm,
@@ -1070,6 +1098,7 @@ def check_pending_materials(
                 "machine_name": machine_name,
                 "drawing_number": drawing_number,
                 "material_type": m.material_type,
+                "shape": m.shape,
                 "diameter": m.diameter,
                 "bar_length_mm": m.bar_length_mm,
                 "blade_width_mm": m.blade_width_mm,
@@ -1259,6 +1288,7 @@ def get_lot_materials(
                 "machine_name": machine_name,
                 "drawing_number": drawing_number,
                 "material_type": m.material_type,
+                "shape": m.shape,
                 "diameter": m.diameter,
                 "bar_length_mm": bar_length_mm,
                 "blade_width_mm": blade_width_mm,
@@ -1322,6 +1352,7 @@ def get_lot_material_detail(
                 "lot_material_id": op.lot_material_id,
                 "operation_type": op.operation_type,
                 "quantity_bars": op.quantity_bars,
+                "shape": op.shape,
                 "diameter": op.diameter,
                 "bar_length_mm": op.bar_length_mm,
                 "blade_width_mm": op.blade_width_mm,
@@ -1342,6 +1373,7 @@ def get_lot_material_detail(
             "machine_name": machine.name if machine else None,
             "drawing_number": drawing_number,
             "material_type": lot_material.material_type,
+            "shape": lot_material.shape,
             "diameter": lot_material.diameter,
             "bar_length_mm": lot_material.bar_length_mm,
             "blade_width_mm": lot_material.blade_width_mm,
@@ -1498,6 +1530,7 @@ def get_material_history(
                 "lot_material_id": op.lot_material_id,
                 "operation_type": op.operation_type,
                 "quantity_bars": op.quantity_bars,
+                "shape": op.shape,
                 "diameter": op.diameter,
                 "bar_length_mm": op.bar_length_mm,
                 "blade_width_mm": op.blade_width_mm,

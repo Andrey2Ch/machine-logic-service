@@ -39,6 +39,7 @@ router = APIRouter(
 class MaterialBatchIn(BaseModel):
     batch_id: str
     material_type: Optional[str] = None
+    profile_type: Optional[str] = "round"
     material_group_id: Optional[int] = None
     material_subgroup_id: Optional[int] = None
     diameter: Optional[float] = None
@@ -65,6 +66,7 @@ class MaterialBatchIn(BaseModel):
 
 class MaterialBatchUpdate(BaseModel):
     material_type: Optional[str] = None
+    profile_type: Optional[str] = None
     material_group_id: Optional[int] = None
     material_subgroup_id: Optional[int] = None
     diameter: Optional[float] = None
@@ -219,6 +221,7 @@ class OcrLabelOut(BaseModel):
     supplier_doc_number: Optional[str] = None
     date_received: Optional[str] = None
     material_type: Optional[str] = None
+    profile_type: Optional[str] = None
     diameter: Optional[float] = None
     bar_length: Optional[float] = None
     weight_kg: Optional[float] = None
@@ -574,7 +577,19 @@ def _normalize_material_catalog(payload: dict, db: Session, partial: bool = Fals
         payload.setdefault("material_group_id", group_id)
         payload.setdefault("material_subgroup_id", subgroup_id)
 
+    if "profile_type" in payload:
+        payload["profile_type"] = _normalize_profile_type(payload.get("profile_type"))
+
     return payload
+
+
+def _normalize_profile_type(value: Optional[str]) -> str:
+    normalized = (value or "").strip().lower()
+    if normalized in ("hex", "hexagon"):
+        return "hexagon"
+    if normalized == "square":
+        return "square"
+    return "round"
 
 
 # --- OCR ---
@@ -587,7 +602,7 @@ def ocr_label(payload: OcrLabelIn, db: Session = Depends(get_db_session)):
     prompt = (
         "Extract fields from this Hebrew material label image and return JSON with keys: "
         "batch_id, supplier, supplier_doc_number, date_received, material_type, diameter, "
-        "bar_length, weight_kg, quantity_received, drawing_numbers, preferred_drawing, diameter_fraction. "
+        "profile_type, bar_length, weight_kg, quantity_received, drawing_numbers, preferred_drawing, diameter_fraction. "
         "The label can be a standard warehouse label or a customer-provided material form with handwritten values. "
         "Rules: batch_id must be the internal batch number (מס מנה) like 26000132-1. "
         "If this is a customer form, use the customer delivery document number (מס ת. משלוח) as batch_id. "
@@ -595,6 +610,7 @@ def ocr_label(payload: OcrLabelIn, db: Session = Depends(get_db_session)):
         "date_received may appear as DD.MM.YY, DD/MM/YY, DD-MM-YYYY or YYYY-MM-DD. "
         "diameter should be in millimeters if possible. If the diameter is shown as a fraction "
         '(e.g. עגול 3/4), put that in diameter_fraction as "3/4". '
+        "profile_type must be one of: round, hexagon, square. "
         "bar_length is the bar length (אורך מוט) in mm. "
         f"Known materials (groups/subgroups): {known_materials}. "
         "If a field is missing, return null. Use numeric types for diameter/bar_length/weight_kg/quantity. "
@@ -768,6 +784,17 @@ def _postprocess_ocr(parsed: dict, raw_text: str) -> dict:
         mm = _fraction_to_mm(fraction)
         if mm:
             parsed["diameter"] = mm
+
+    # Derive profile type from OCR text if model did not provide it.
+    if not parsed.get("profile_type"):
+        if re.search(r"משוש|hex", raw_text, re.IGNORECASE):
+            parsed["profile_type"] = "hexagon"
+        elif re.search(r"ריבוע|square", raw_text, re.IGNORECASE):
+            parsed["profile_type"] = "square"
+        elif re.search(r"עגול|round", raw_text, re.IGNORECASE):
+            parsed["profile_type"] = "round"
+
+    parsed["profile_type"] = _normalize_profile_type(parsed.get("profile_type"))
 
     # Remove helper field if present
     if "diameter_fraction" in parsed:

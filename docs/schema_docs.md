@@ -125,6 +125,7 @@
 |---|---|---|---|
 | batch_id | text | NO |  |
 | material_type | text | YES |  |
+| profile_type | character varying | YES |  |
 | material_group_id | integer | YES |  |
 | material_subgroup_id | integer | YES |  |
 | diameter | numeric(10,3) | YES |  |

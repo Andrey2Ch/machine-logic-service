@@ -253,6 +253,7 @@ class LotMaterialDB(Base):
     material_type = Column(String(100), nullable=True)
     material_group_id = Column(Integer, ForeignKey("material_groups.id", ondelete="SET NULL"), nullable=True)
     material_subgroup_id = Column(Integer, ForeignKey("material_subgroups.id", ondelete="SET NULL"), nullable=True)
+    shape = Column(String(20), nullable=True, default="round")
     diameter = Column(Float, nullable=True)
     # Длина прутка и параметры расчета (для конкретной выдачи/работы)
     bar_length_mm = Column(Float, nullable=True)
@@ -303,6 +304,7 @@ class MaterialOperationDB(Base):
     lot_material_id = Column(Integer, ForeignKey("lot_materials.id", ondelete="CASCADE"), nullable=False)
     operation_type = Column(String(20), nullable=False)  # issue, add, return, correction
     quantity_bars = Column(Integer, nullable=False)  # положительное = выдача, отрицательное = возврат
+    shape = Column(String(20), nullable=True)
     diameter = Column(Float, nullable=True)  # диаметр (для справки)
     # Снимок параметров расчета на момент операции
     bar_length_mm = Column(Float, nullable=True)
@@ -333,6 +335,7 @@ class MaterialBatchDB(Base):
     material_type = Column(Text, nullable=True)
     material_group_id = Column(Integer, ForeignKey("material_groups.id", ondelete="SET NULL"), nullable=True)
     material_subgroup_id = Column(Integer, ForeignKey("material_subgroups.id", ondelete="SET NULL"), nullable=True)
+    profile_type = Column(String(20), nullable=True, default="round")
     diameter = Column(Numeric(10, 3), nullable=True)
     bar_length = Column(Numeric(10, 3), nullable=True)
     weight_per_meter_kg = Column(Numeric(10, 4), nullable=True)
