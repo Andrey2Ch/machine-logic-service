@@ -396,6 +396,8 @@ class LotMaterialOut(BaseModel):
     material_type: Optional[str] = None
     material_group_id: Optional[int] = None
     material_subgroup_id: Optional[int] = None
+    source_movement_id: Optional[int] = None
+    source_batch_id: Optional[str] = None
     shape: Optional[str] = None
     diameter: Optional[float] = None
     bar_length_mm: Optional[float] = None
@@ -1221,8 +1223,30 @@ def get_lot_materials(
         
         t_setups = time.time()
         logger.info(f"[lot-materials] setup_query took {(t_setups - t_base)*1000:.0f}ms, pairs={len(pairs)}")
+
+        # ШАГ 4: Мапа source movement -> batch_id (для перехода в карточку партии)
+        source_movement_ids = {
+            int(m.material_receipt_id)
+            for row in base_results
+            for m in [row[0]]
+            if getattr(m, "material_receipt_id", None) is not None
+        }
+        source_batch_by_movement = {}
+        if source_movement_ids:
+            movement_rows = (
+                db.query(
+                    WarehouseMovementDB.movement_id,
+                    WarehouseMovementDB.batch_id,
+                )
+                .filter(WarehouseMovementDB.movement_id.in_(source_movement_ids))
+                .all()
+            )
+            source_batch_by_movement = {
+                int(movement_id): batch_id
+                for movement_id, batch_id in movement_rows
+            }
         
-        # ШАГ 4: Объединяем и фильтруем по status_group
+        # ШАГ 5: Объединяем и фильтруем по status_group
         results = []
         for row in base_results:
             m = row[0]
@@ -1288,6 +1312,8 @@ def get_lot_materials(
                 "machine_name": machine_name,
                 "drawing_number": drawing_number,
                 "material_type": m.material_type,
+                "source_movement_id": m.material_receipt_id,
+                "source_batch_id": source_batch_by_movement.get(m.material_receipt_id) if m.material_receipt_id else None,
                 "shape": m.shape,
                 "diameter": m.diameter,
                 "bar_length_mm": bar_length_mm,
