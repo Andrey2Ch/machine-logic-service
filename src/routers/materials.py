@@ -33,6 +33,7 @@ from src.services.notification_service import send_material_low_notification
 from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger(__name__)
+SYSTEM_NOLOT_PREFIX = "NOLOT-M"
 
 router = APIRouter(
     prefix="/materials",
@@ -473,7 +474,10 @@ def issue_material_to_machine(
             raise HTTPException(status_code=404, detail=f"Станок {request.machine_id} не найден")
 
         # Переходный период: lot_id может не передаваться с фронта.
-        # Тогда автоматически подбираем активный лот для выбранного станка.
+        # Тогда автоматически подбираем лот для выбранного станка:
+        # 1) активный лот, назначенный на станок (kanban)
+        # 2) последний setup по станку
+        # 3) последняя незакрытая выдача материала по станку
         target_lot_id: Optional[int] = request.lot_id
         if target_lot_id is None:
             statuses_priority = ("in_production", "assigned", "new")
@@ -491,12 +495,62 @@ def issue_material_to_machine(
                 if target_lot:
                     break
 
-            if not target_lot:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Для выбранного станка не найден активный лот. Укажи лот вручную или назначь его в канбане."
+            if target_lot:
+                target_lot_id = target_lot.id
+            else:
+                # Fallback: последний setup, где указан lot_id
+                recent_setup = (
+                    db.query(SetupDB)
+                    .filter(
+                        SetupDB.machine_id == request.machine_id,
+                        SetupDB.lot_id.isnot(None),
+                    )
+                    .order_by(SetupDB.created_at.desc())
+                    .first()
                 )
-            target_lot_id = target_lot.id
+                if recent_setup and recent_setup.lot_id:
+                    target_lot_id = int(recent_setup.lot_id)
+
+            if target_lot_id is None:
+                # Fallback: последняя незакрытая выдача материала на станке
+                recent_lot_material = (
+                    db.query(LotMaterialDB)
+                    .filter(
+                        LotMaterialDB.machine_id == request.machine_id,
+                        LotMaterialDB.lot_id.isnot(None),
+                        LotMaterialDB.closed_at.is_(None),
+                    )
+                    .order_by(LotMaterialDB.created_at.desc())
+                    .first()
+                )
+                if recent_lot_material and recent_lot_material.lot_id:
+                    target_lot_id = int(recent_lot_material.lot_id)
+
+            if target_lot_id is None:
+                # Переходный режим для участков без привязки к лотам:
+                # создаем/переиспользуем системный "технический" лот на станок.
+                system_lot_number = f"{SYSTEM_NOLOT_PREFIX}{request.machine_id}"
+                system_lot = (
+                    db.query(LotDB)
+                    .filter(LotDB.lot_number == system_lot_number)
+                    .order_by(LotDB.created_at.desc())
+                    .first()
+                )
+                if not system_lot:
+                    system_lot = LotDB(
+                        lot_number=system_lot_number,
+                        part_id=None,
+                        status="in_production",
+                        assigned_machine_id=request.machine_id,
+                    )
+                    db.add(system_lot)
+                    db.flush()
+                    logger.info(
+                        "Created fallback system lot %s for machine_id=%s",
+                        system_lot_number,
+                        request.machine_id,
+                    )
+                target_lot_id = int(system_lot.id)
 
         # Проверяем существование лота
         lot = db.query(LotDB).filter(LotDB.id == target_lot_id).first()
