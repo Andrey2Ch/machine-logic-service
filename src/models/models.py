@@ -26,6 +26,7 @@ class MachineDB(Base):
     type = Column(String(50))
     min_diameter = Column(Float, nullable=True)
     max_diameter = Column(Float, nullable=True)
+    max_bar_length = Column(Float, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     is_active = Column(Boolean, default=True)
     is_operational = Column(Boolean, default=True)  # False = поломан/на обслуживании
