@@ -719,6 +719,15 @@ def density_suggest(payload: DensitySuggestIn):
 def _postprocess_ocr(parsed: dict, raw_text: str) -> dict:
     def _is_customer_form(text: str) -> bool:
         return ("מס עבודה" in text) or ("כמות המסופקת" in text) or ("חומר" in text and "לקוח" in text)
+    def _extract_labeled_value(text: str, labels: List[str]) -> Optional[str]:
+        for label in labels:
+            match = re.search(rf"{re.escape(label)}[:\s]*([^\n\r]+)", text, re.IGNORECASE)
+            if not match:
+                continue
+            value = match.group(1).strip().strip("|-:;,.")
+            if value:
+                return value
+        return None
     # Normalize batch_id using Hebrew label field if model mixed it with part number
     batch_match = re.search(r"מס מנה[:\s]*([0-9]{5,}(?:-\d+)?)", raw_text)
     if batch_match:
@@ -752,6 +761,27 @@ def _postprocess_ocr(parsed: dict, raw_text: str) -> dict:
             parsed["supplier_doc_number"] = delivery_match.group(1)
         elif doc_match:
             parsed["supplier_doc_number"] = doc_match.group(1)
+
+    # Supplier must come from supplier/customer supplier label only.
+    # Do not use receiver field (שם המקבל) as supplier.
+    supplier_from_label = _extract_labeled_value(
+        raw_text,
+        [
+            "שם ספק לקוח",
+            "שם ספק",
+            "ספק לקוח",
+            "Supplier",
+        ],
+    )
+    receiver_from_label = _extract_labeled_value(raw_text, ["שם המקבל", "מקבל", "Receiver"])
+
+    if supplier_from_label:
+        parsed["supplier"] = supplier_from_label
+    elif receiver_from_label and parsed.get("supplier"):
+        normalized_supplier = str(parsed.get("supplier", "")).strip().lower()
+        normalized_receiver = receiver_from_label.strip().lower()
+        if normalized_supplier and normalized_supplier == normalized_receiver:
+            parsed["supplier"] = None
 
     # Extract date if present (dd.mm.yy, dd/mm/yy, yyyy-mm-dd)
     if parsed.get("date_received") is None:
