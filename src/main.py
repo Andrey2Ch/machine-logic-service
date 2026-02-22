@@ -2555,10 +2555,9 @@ class LotBase(BaseModel):
     # Статус будет устанавливаться по умолчанию на бэкенде
 
 class LotCreate(LotBase):
-    # order_manager_id и created_by_order_manager_at будут добавлены на бэкенде
-    # Обновляем для временного решения: клиент может передавать эти поля
     order_manager_id: Optional[int] = None
     created_by_order_manager_at: Optional[datetime] = None
+    reserved_batch_id: Optional[str] = None
 
 class LotResponse(LotBase):
     id: int
@@ -2574,6 +2573,7 @@ class LotResponse(LotBase):
     assigned_order: Optional[int] = None  # Порядок в очереди на станке
     actual_produced: Optional[int] = None  # Текущее произведенное количество из machine_readings
     setup_status: Optional[str] = None  # Статус активной наладки
+    reserved_batch_id: Optional[str] = None
 
     class Config:
         from_attributes = True # <--- ИСПРАВЛЕНО с orm_mode

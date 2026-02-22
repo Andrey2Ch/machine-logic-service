@@ -349,6 +349,7 @@ GROUP BY current_location
 | initial_planned_quantity | integer | YES |  |
 | assigned_machine_id | integer | YES |  |
 | assigned_order | integer | YES |  |
+| reserved_batch_id | character varying(255) | YES | ID зарезервированной партии материала со склада |
 
 ## machine_readings
 

@@ -12,6 +12,17 @@
   ```
 - После применения миграций **обновляем** `docs/schema_docs.md`.
 
+### Чеклист при добавлении миграции
+1. Создать SQL-файл в `migrations/` (idempotent, с записью в `schema_migrations`)
+2. Применить SQL на БД (Appsmith или psql)
+3. Обновить **оба** `schema_docs.md` — запустить `python scripts/refresh_schema_docs.py`
+   - `docs/schema_docs.md` — документация для разработчиков
+   - `src/text2sql/docs/schema_docs.md` — **контекст для AI-ассистента**
+4. Проверить: `python scripts/verify_schema_docs.py`
+5. Закоммитить миграцию + обновлённые `schema_docs.md` вместе
+
+> **Pre-commit hook** автоматически блокирует коммит, если в `migrations/` есть изменения, а `schema_docs.md` не обновлён.
+
 ### Как применять миграции
 Если применяете вручную (через Appsmith/psql) — запускайте SQL в порядке имен файлов.
 

@@ -119,6 +119,7 @@ class LotDB(Base):
     assigned_order = Column(Integer, nullable=True)  # Порядок в очереди на станке
     actual_diameter = Column(Float, nullable=True)  # Фактический диаметр материала (хранится в БД)
     actual_profile_type = Column(String(20), nullable=True, default='round')  # Фактический тип профиля (round, hexagon, square)
+    reserved_batch_id = Column(String(255), nullable=True)
 
     # Добавляем обратную связь к BatchDB
     batches = relationship("BatchDB", back_populates="lot")

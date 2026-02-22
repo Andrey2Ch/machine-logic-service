@@ -117,7 +117,39 @@
 | total_planned_quantity | integer | YES |  |
 | status | character varying | NO |  |
 | created_at | timestamp without time zone | YES |  |
-| order_manager_id | bigint | YES | ID ?????????? (????????? ???????), ?????????? ? ???? ?????. |
+| order_manager_id | bigint | YES | ID менеджера, назначенного к лоту |
+| assigned_machine_id | bigint | YES | ID станка, назначенного к лоту |
+| assigned_order | integer | YES | Порядок в очереди станка |
+| actual_diameter | numeric(10,3) | YES | Фактический диаметр материала |
+| actual_profile_type | character varying | YES | Фактический тип профиля материала |
+| material_status | character varying | YES | Статус управления материалом |
+| reserved_batch_id | character varying(255) | YES | ID зарезервированной партии со склада |
+
+## lot_materials
+
+| column | type | nullable | description |
+|---|---|---|---|
+| id | integer | NO |  |
+| lot_id | integer | YES |  |
+| material_type | character varying | YES |  |
+| diameter | numeric | YES |  |
+| quantity | integer | YES |  |
+| shape | character varying(20) | YES | Форма профиля материала (round/hexagon/square) |
+| created_at | timestamp without time zone | YES |  |
+
+## material_operations
+
+| column | type | nullable | description |
+|---|---|---|---|
+| id | integer | NO |  |
+| lot_id | integer | YES |  |
+| operation_type | character varying | YES |  |
+| quantity | integer | YES |  |
+| diameter | numeric | YES |  |
+| shape | character varying(20) | YES | Форма профиля материала |
+| operator_id | integer | YES |  |
+| machine_id | integer | YES |  |
+| created_at | timestamp without time zone | YES |  |
 
 ## material_batches
 
