@@ -10,7 +10,8 @@ from sqlalchemy import or_, and_
 from src.database import get_db_session
 from typing import List, Optional
 from pydantic import BaseModel
-from src.models.models import BatchDB, PartDB, LotDB, SetupDB, MachineDB # Импортируем модели SQLAlchemy
+from src.models.models import BatchDB, PartDB, LotDB, SetupDB, MachineDB, SetupDefectDB, SetupQuantityAdjustmentDB
+from sqlalchemy import func
 import datetime
 from zoneinfo import ZoneInfo
 from datetime import timezone, timedelta
@@ -210,11 +211,61 @@ def update_batch_quantity(batch_id: int, payload: UpdateQuantityPayload, db: Ses
     if not batch:
         raise HTTPException(status_code=404, detail=f"Batch with id {batch_id} not found")
 
-    # Для дочерних батчей (good/defect) обновляем current_quantity
-    # Для родительских — recounted_quantity
     child_locations = ['good', 'defect']
     if batch.current_location in child_locations:
+        old_quantity = batch.current_quantity
         batch.current_quantity = payload.new_quantity
+
+        if batch.current_location == 'defect' and old_quantity != payload.new_quantity:
+            delta = old_quantity - payload.new_quantity
+
+            if batch.setup_job_id:
+                defect_record = db.query(SetupDefectDB).filter(
+                    SetupDefectDB.setup_job_id == batch.setup_job_id,
+                    SetupDefectDB.defect_quantity == old_quantity
+                ).order_by(SetupDefectDB.created_at.desc()).first()
+
+                if not defect_record:
+                    defect_record = db.query(SetupDefectDB).filter(
+                        SetupDefectDB.setup_job_id == batch.setup_job_id,
+                    ).order_by(
+                        SetupDefectDB.created_at.desc()
+                    ).first()
+
+                if defect_record:
+                    defect_record.defect_quantity = max(0, (defect_record.defect_quantity or 0) - delta)
+
+                new_defect_total = db.query(func.coalesce(func.sum(BatchDB.current_quantity), 0)).filter(
+                    BatchDB.setup_job_id == batch.setup_job_id,
+                    BatchDB.current_location == 'defect',
+                    BatchDB.id != batch.id
+                ).scalar() + payload.new_quantity
+
+                adj = db.query(SetupQuantityAdjustmentDB).filter(
+                    SetupQuantityAdjustmentDB.setup_job_id == batch.setup_job_id
+                ).first()
+
+                if adj:
+                    old_defect_adj = adj.defect_adjustment or 0
+                    adj.defect_adjustment = new_defect_total
+
+                    setup = db.query(SetupDB).filter(SetupDB.id == batch.setup_job_id).first()
+                    if setup:
+                        current_additional = setup.additional_quantity or 0
+                        setup.additional_quantity = current_additional - old_defect_adj + new_defect_total
+
+                        lot = db.query(LotDB).filter(LotDB.id == setup.lot_id).first()
+                        if lot:
+                            initial_planned = lot.initial_planned_quantity or 0
+                            lot.total_planned_quantity = initial_planned + setup.additional_quantity
+
+            if delta > 0 and batch.parent_batch_id:
+                good_sibling = db.query(BatchDB).filter(
+                    BatchDB.parent_batch_id == batch.parent_batch_id,
+                    BatchDB.current_location == 'good'
+                ).first()
+                if good_sibling:
+                    good_sibling.current_quantity = (good_sibling.current_quantity or 0) + delta
     else:
         batch.recounted_quantity = payload.new_quantity
     

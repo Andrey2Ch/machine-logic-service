@@ -206,6 +206,31 @@ class BatchDB(Base):
     # Добавляем связь с карточкой
     card = relationship("CardDB", back_populates="batch", uselist=False)
 
+class SetupDefectDB(Base):
+    __tablename__ = "setup_defects"
+
+    id = Column(Integer, primary_key=True, index=True)
+    setup_job_id = Column(Integer, ForeignKey("setup_jobs.id"), nullable=True)
+    defect_quantity = Column(Integer, nullable=True)
+    defect_reason = Column(String, nullable=True)
+    employee_id = Column(Integer, ForeignKey("employees.id"), nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    setup_job = relationship("SetupDB", foreign_keys=[setup_job_id])
+    employee = relationship("EmployeeDB", foreign_keys=[employee_id])
+
+class SetupQuantityAdjustmentDB(Base):
+    __tablename__ = "setup_quantity_adjustments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    setup_job_id = Column(Integer, ForeignKey("setup_jobs.id"), nullable=True, unique=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_by = Column(Integer, ForeignKey("employees.id"), nullable=True)
+    auto_adjustment = Column(Integer, nullable=True)
+    manual_adjustment = Column(Integer, nullable=True)
+    defect_adjustment = Column(Integer, nullable=True)
+    total_adjustment = Column(Integer, nullable=True)
+
 class ReadingDB(Base):
     __tablename__ = "machine_readings"
 
