@@ -765,6 +765,7 @@ GROUP BY current_location
 | status | text | NO |  |
 | created_by | integer | YES | employees.id |
 | created_at | timestamp with time zone | NO |  |
+| parent_batch_id | text | YES | ID родительской партии (для нарезанного материала). FK material_batches.batch_id |
 
 ## material_groups
 

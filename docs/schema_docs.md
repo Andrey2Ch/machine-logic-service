@@ -175,6 +175,7 @@
 | status | text | NO |  |
 | created_by | integer | YES |  |
 | created_at | timestamp with time zone | NO |  |
+| parent_batch_id | text | YES | ID родительской партии (для нарезанного материала) |
 
 ## material_groups
 

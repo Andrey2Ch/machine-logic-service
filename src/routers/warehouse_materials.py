@@ -91,9 +91,31 @@ class MaterialBatchUpdate(BaseModel):
     created_by: Optional[int] = None
 
 
+class ChildBatchSummary(BaseModel):
+    batch_id: str
+    bar_length: Optional[float] = None
+    remaining_quantity: Optional[int] = None
+    status: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
 class MaterialBatchOut(MaterialBatchIn):
     created_at: Optional[datetime] = None
     remaining_quantity: Optional[int] = None
+    parent_batch_id: Optional[str] = None
+    child_batches: Optional[List[ChildBatchSummary]] = None
+
+    class Config:
+        from_attributes = True
+
+
+class CutBatchRequest(BaseModel):
+    quantity: int
+    cut_factor: int = 2
+    performed_by: Optional[int] = None
+    notes: Optional[str] = None
 
 
 class MaterialGroupIn(BaseModel):
@@ -291,10 +313,36 @@ def list_batches(
         ).all()
         remaining_map = {row.batch_id: int(row.remaining_quantity or 0) for row in remaining_rows}
 
+    all_batch_ids = [b.batch_id for b in batches]
+    children_rows = db.query(MaterialBatchDB).filter(
+        MaterialBatchDB.parent_batch_id.in_(all_batch_ids)
+    ).all() if all_batch_ids else []
+
+    children_remaining_ids = [c.batch_id for c in children_rows]
+    children_remaining_map = {}
+    if children_remaining_ids:
+        cr_rows = db.query(
+            InventoryPositionDB.batch_id,
+            func.coalesce(func.sum(InventoryPositionDB.quantity), 0).label("rq")
+        ).filter(InventoryPositionDB.batch_id.in_(children_remaining_ids)).group_by(
+            InventoryPositionDB.batch_id
+        ).all()
+        children_remaining_map = {r.batch_id: int(r.rq or 0) for r in cr_rows}
+
+    children_by_parent: dict = {}
+    for c in children_rows:
+        children_by_parent.setdefault(c.parent_batch_id, []).append({
+            "batch_id": c.batch_id,
+            "bar_length": float(c.bar_length) if c.bar_length else None,
+            "remaining_quantity": children_remaining_map.get(c.batch_id, 0),
+            "status": c.status,
+        })
+
     result = []
     for batch in batches:
         batch_data = {col.name: getattr(batch, col.name) for col in MaterialBatchDB.__table__.columns}
         batch_data["remaining_quantity"] = remaining_map.get(batch.batch_id, 0)
+        batch_data["child_batches"] = children_by_parent.get(batch.batch_id, [])
         result.append(batch_data)
     return result
 
@@ -304,7 +352,37 @@ def get_batch(batch_id: str, db: Session = Depends(get_db_session)):
     batch = db.query(MaterialBatchDB).filter(MaterialBatchDB.batch_id == batch_id).first()
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found")
-    return batch
+
+    remaining = db.query(
+        func.coalesce(func.sum(InventoryPositionDB.quantity), 0)
+    ).filter(InventoryPositionDB.batch_id == batch_id).scalar()
+
+    children = db.query(MaterialBatchDB).filter(
+        MaterialBatchDB.parent_batch_id == batch_id
+    ).all()
+    child_ids = [c.batch_id for c in children]
+    cr_map = {}
+    if child_ids:
+        cr_rows = db.query(
+            InventoryPositionDB.batch_id,
+            func.coalesce(func.sum(InventoryPositionDB.quantity), 0).label("rq")
+        ).filter(InventoryPositionDB.batch_id.in_(child_ids)).group_by(
+            InventoryPositionDB.batch_id
+        ).all()
+        cr_map = {r.batch_id: int(r.rq or 0) for r in cr_rows}
+
+    batch_data = {col.name: getattr(batch, col.name) for col in MaterialBatchDB.__table__.columns}
+    batch_data["remaining_quantity"] = int(remaining or 0)
+    batch_data["child_batches"] = [
+        {
+            "batch_id": c.batch_id,
+            "bar_length": float(c.bar_length) if c.bar_length else None,
+            "remaining_quantity": cr_map.get(c.batch_id, 0),
+            "status": c.status,
+        }
+        for c in children
+    ]
+    return batch_data
 
 
 @router.patch("/batches/{batch_id}", response_model=MaterialBatchOut)
@@ -319,6 +397,111 @@ def update_batch(batch_id: str, payload: MaterialBatchUpdate, db: Session = Depe
     db.commit()
     db.refresh(batch)
     return batch
+
+
+# --- Cut batch ---
+@router.post("/batches/{batch_id}/cut", response_model=MaterialBatchOut)
+def cut_batch(batch_id: str, payload: CutBatchRequest, db: Session = Depends(get_db_session)):
+    parent = db.query(MaterialBatchDB).filter(MaterialBatchDB.batch_id == batch_id).first()
+    if not parent:
+        raise HTTPException(status_code=404, detail="Parent batch not found")
+    if parent.status != "active":
+        raise HTTPException(status_code=400, detail="Only active batches can be cut")
+    if payload.quantity < 1:
+        raise HTTPException(status_code=400, detail="quantity must be >= 1")
+    if payload.cut_factor < 2:
+        raise HTTPException(status_code=400, detail="cut_factor must be >= 2")
+
+    inv = db.query(InventoryPositionDB).filter(
+        InventoryPositionDB.batch_id == batch_id
+    ).all()
+    total_available = sum(p.quantity for p in inv)
+    if total_available < payload.quantity:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Not enough bars: available={total_available}, requested={payload.quantity}"
+        )
+
+    existing_children = db.query(MaterialBatchDB).filter(
+        MaterialBatchDB.parent_batch_id == batch_id
+    ).count()
+    child_suffix = f"/C{existing_children + 1}"
+    child_batch_id = f"{batch_id}{child_suffix}"
+
+    new_bar_length = round(float(parent.bar_length or 0) / payload.cut_factor, 2) if parent.bar_length else None
+
+    child = MaterialBatchDB(
+        batch_id=child_batch_id,
+        material_type=parent.material_type,
+        profile_type=parent.profile_type,
+        material_group_id=parent.material_group_id,
+        material_subgroup_id=parent.material_subgroup_id,
+        diameter=parent.diameter,
+        bar_length=new_bar_length,
+        weight_per_meter_kg=parent.weight_per_meter_kg,
+        quantity_received=payload.quantity * payload.cut_factor,
+        supplier=parent.supplier,
+        supplier_doc_number=parent.supplier_doc_number,
+        date_received=parent.date_received,
+        cert_folder=parent.cert_folder,
+        from_customer=parent.from_customer,
+        allowed_drawings=parent.allowed_drawings,
+        preferred_drawing=parent.preferred_drawing,
+        status="active",
+        created_by=payload.performed_by,
+        parent_batch_id=batch_id,
+    )
+    db.add(child)
+
+    remaining_to_deduct = payload.quantity
+    for pos in inv:
+        if remaining_to_deduct <= 0:
+            break
+        deduct = min(pos.quantity, remaining_to_deduct)
+        pos.quantity -= deduct
+        remaining_to_deduct -= deduct
+
+    child_location = inv[0].location_code if inv else "WAREHOUSE"
+    child_qty = payload.quantity * payload.cut_factor
+
+    child_inv = db.query(InventoryPositionDB).filter(
+        InventoryPositionDB.batch_id == child_batch_id,
+        InventoryPositionDB.location_code == child_location
+    ).first()
+    if child_inv:
+        child_inv.quantity += child_qty
+    else:
+        child_inv = InventoryPositionDB(
+            batch_id=child_batch_id,
+            location_code=child_location,
+            quantity=child_qty,
+        )
+        db.add(child_inv)
+
+    movement = WarehouseMovementDB(
+        batch_id=batch_id,
+        movement_type="cut",
+        quantity=payload.quantity,
+        from_location=child_location,
+        to_location=child_location,
+        cut_factor=payload.cut_factor,
+        performed_by=payload.performed_by,
+        notes=payload.notes or f"Cut {payload.quantity} bars x{payload.cut_factor} → {child_batch_id} ({new_bar_length}mm)",
+    )
+    db.add(movement)
+
+    db.commit()
+    db.refresh(child)
+
+    child_remaining = db.query(
+        func.coalesce(func.sum(InventoryPositionDB.quantity), 0)
+    ).filter(InventoryPositionDB.batch_id == child_batch_id).scalar()
+
+    return {
+        **{col.name: getattr(child, col.name) for col in MaterialBatchDB.__table__.columns},
+        "remaining_quantity": int(child_remaining or 0),
+        "child_batches": [],
+    }
 
 
 # --- Material catalogs ---

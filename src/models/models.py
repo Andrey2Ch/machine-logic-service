@@ -359,10 +359,13 @@ class MaterialBatchDB(Base):
     status = Column(String, nullable=False, default="active")
     created_by = Column(Integer, ForeignKey("employees.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    parent_batch_id = Column(String, ForeignKey("material_batches.batch_id", ondelete="SET NULL"), nullable=True)
 
     creator = relationship("EmployeeDB", foreign_keys=[created_by])
     material_group = relationship("MaterialGroupDB")
     material_subgroup = relationship("MaterialSubgroupDB")
+    parent_batch = relationship("MaterialBatchDB", remote_side=[batch_id], back_populates="child_batches")
+    child_batches = relationship("MaterialBatchDB", back_populates="parent_batch")
 
 
 class MaterialGroupDB(Base):
