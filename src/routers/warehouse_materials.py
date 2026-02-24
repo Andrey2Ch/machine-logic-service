@@ -37,7 +37,7 @@ router = APIRouter(
 
 # --- Pydantic models ---
 class MaterialBatchIn(BaseModel):
-    batch_id: str
+    batch_id: Optional[str] = None
     material_type: Optional[str] = None
     profile_type: Optional[str] = "round"
     material_group_id: Optional[int] = None
@@ -250,6 +250,7 @@ class OcrLabelOut(BaseModel):
     quantity_received: Optional[int] = None
     drawing_numbers: Optional[List[str]] = None
     preferred_drawing: Optional[str] = None
+    from_customer: Optional[bool] = None
     raw_text: Optional[str] = None
 
 
@@ -268,6 +269,12 @@ class DensitySuggestOut(BaseModel):
 # --- Batches ---
 @router.post("/batches", response_model=MaterialBatchOut)
 def create_batch(payload: MaterialBatchIn, db: Session = Depends(get_db_session)):
+    if not payload.batch_id:
+        if payload.from_customer and payload.supplier_doc_number:
+            payload.batch_id = payload.supplier_doc_number
+        else:
+            raise HTTPException(status_code=422, detail="batch_id is required")
+
     existing = db.query(MaterialBatchDB).filter(MaterialBatchDB.batch_id == payload.batch_id).first()
     if existing:
         raise HTTPException(status_code=409, detail="Batch already exists")
@@ -783,21 +790,50 @@ def ocr_label(payload: OcrLabelIn, db: Session = Depends(get_db_session)):
 
     known_materials = _build_known_materials_list(db)
     prompt = (
-        "Extract fields from this Hebrew material label image and return JSON with keys: "
-        "batch_id, supplier, supplier_doc_number, date_received, material_type, diameter, "
-        "profile_type, bar_length, weight_kg, quantity_received, drawing_numbers, preferred_drawing, diameter_fraction. "
-        "The label can be a standard warehouse label or a customer-provided material form with handwritten values. "
-        "Rules: batch_id must be the internal batch number (מס מנה) like 26000132-1. "
-        "If this is a customer form, use the customer delivery document number (מס ת. משלוח) as batch_id. "
-        "drawing_numbers should include part numbers (מס חלק) or work number (מס עבודה); can be multiple. "
-        "date_received may appear as DD.MM.YY, DD/MM/YY, DD-MM-YYYY or YYYY-MM-DD. "
-        "diameter should be in millimeters if possible. If the diameter is shown as a fraction "
-        '(e.g. עגול 3/4), put that in diameter_fraction as "3/4". '
-        "profile_type must be one of: round, hexagon, square. "
-        "bar_length is the bar length (אורך מוט) in mm. "
-        f"Known materials (groups/subgroups): {known_materials}. "
-        "If a field is missing, return null. Use numeric types for diameter/bar_length/weight_kg/quantity. "
-        "Return ONLY valid JSON."
+        "This is a photo of a Hebrew raw-material label from an Israeli factory warehouse. "
+        "The label can be a printed warehouse tag (תג זיהוי חומר גלם) or a customer-provided "
+        "material form with handwritten values. The photo may be rotated 90/180/270 degrees — "
+        "rotate mentally before reading. Read ALL text on the label carefully, then extract fields into JSON.\n\n"
+        "MANDATORY Hebrew-field-to-JSON mapping (use EXACTLY these associations):\n"
+        "  שם ספק לקוח  → supplier (the supplier/vendor name)\n"
+        "  מס חלק       → drawing_numbers (array of part/drawing numbers)\n"
+        "  סוג חומר גלם → material_type (raw material description, e.g. פליז, נירוסטה, פלדה)\n"
+        "  עגול/משושה/ריבוע → profile_type: round/hexagon/square; the number next to it is diameter\n"
+        "  קוטר           → diameter (may be in mm or inches; fractions like 1/4, 3/4 are INCHES)\n"
+        "  כמות / כמות(מוטות) / כמות(מוטות/לוחות) → quantity_received (number of bars/rods)\n"
+        "  אורך מוט     → bar_length (bar length; if ≤20 it is meters, otherwise mm)\n"
+        "  משקל          → weight_kg (total weight)\n"
+        "  מס ת.משלוח / מס ת. משלוח → supplier_doc_number (delivery document number)\n"
+        "  מס מנה        → batch_id (internal batch number like 25001414-2)\n"
+        "  תאריך         → date_received (date in DD.MM.YY or similar format)\n"
+        "  מס עבודה      → also add to drawing_numbers if present\n"
+        "  הערות          → ignore (notes/comments)\n"
+        "  שם המקבל / שם מאשרה → ignore (receiver/approver, NOT supplier)\n\n"
+        "CUSTOMER FORM detection:\n"
+        "  If the form has מס עבודה or כמות המסופקת, it is a CUSTOMER form → set from_customer=true.\n"
+        "  On customer forms, שם ספק/לקוח is the customer name (still put in supplier).\n"
+        "  On customer forms, מס מנה is usually EMPTY — set batch_id=null (the system will generate it).\n"
+        "  NEVER copy מס ת.משלוח into batch_id. They are ALWAYS separate fields:\n"
+        "    מס ת.משלוח → ALWAYS goes to supplier_doc_number\n"
+        "    מס מנה → ALWAYS goes to batch_id (null if empty)\n\n"
+        "CRITICAL RULES:\n"
+        "- תג זיהוי חומר גלם is the TITLE of the label, NOT the supplier.\n"
+        "- ישראמט בע\"מ (Isramat) is the WAREHOUSE OWNER company, NOT the supplier.\n"
+        "- שם המקבל / שם מאשרה are receiver/approver names, NOT the supplier.\n"
+        "- supplier comes ONLY from שם ספק לקוח / שם ספק. On customer forms it may be handwritten below the header.\n"
+        "- Do NOT confuse מס ת.משלוח (supplier_doc_number) with מס מנה (batch_id).\n"
+        "- Do NOT put weight in quantity or quantity in weight.\n"
+        "- diameter: if a whole number (e.g. 22), it is mm. If a fraction (e.g. 1/4, 3/4, 7/8), it is INCHES → put the fraction string in diameter_fraction.\n"
+        "- Handwritten numbers need extra care: distinguish 4/7/1, 3/8, 0/6/9 carefully.\n"
+        "- profile_type must be one of: round, hexagon, square.\n"
+        f"- Known material groups/subgroups from our catalog: {known_materials}\n"
+        "  Try to match material_type to the closest known material name.\n\n"
+        "Return JSON with keys: batch_id, supplier, supplier_doc_number, date_received, "
+        "material_type, profile_type, diameter, diameter_fraction, bar_length, weight_kg, "
+        "quantity_received, drawing_numbers, preferred_drawing, from_customer, raw_text.\n"
+        "raw_text must contain ALL text you read from the label as-is (Hebrew), line by line.\n"
+        "Use numeric types for diameter/bar_length/weight_kg/quantity. Null for missing fields.\n"
+        "Return ONLY valid JSON, no markdown."
     )
 
     body = {
@@ -839,7 +875,8 @@ def ocr_label(payload: OcrLabelIn, db: Session = Depends(get_db_session)):
     if not parsed:
         return OcrLabelOut(raw_text=text)
 
-    parsed = _postprocess_ocr(parsed, text)
+    label_text = parsed.get("raw_text") or text
+    parsed = _postprocess_ocr(parsed, label_text)
     return OcrLabelOut(**parsed)
 
 
@@ -936,17 +973,26 @@ def _postprocess_ocr(parsed: dict, raw_text: str) -> dict:
     if weight_match and parsed.get("weight_kg") is None:
         parsed["weight_kg"] = float(weight_match.group(1))
 
-    # Extract supplier document number if present
-    doc_match = re.search(r"(?:מסמך|תעודה)[^\dA-Za-z]*([0-9A-Za-z-]+)", raw_text)
+    # Extract supplier document number from מס ת.משלוח (always override if found)
     delivery_match = re.search(r"מס[ '\"]*ת\.?\s*משלוח[:\s]*([0-9A-Za-z/-]+)", raw_text)
-    if parsed.get("supplier_doc_number") is None:
-        if delivery_match:
-            parsed["supplier_doc_number"] = delivery_match.group(1)
-        elif doc_match:
+    if delivery_match:
+        parsed["supplier_doc_number"] = delivery_match.group(1)
+    elif parsed.get("supplier_doc_number") is None:
+        doc_match = re.search(r"(?:מסמך|תעודה)[^\dA-Za-z]*([0-9A-Za-z-]+)", raw_text)
+        if doc_match:
             parsed["supplier_doc_number"] = doc_match.group(1)
+
+    # Cross-check: if batch_id and supplier_doc_number got swapped, fix it
+    if batch_match and delivery_match:
+        correct_batch = batch_match.group(1)
+        correct_doc = delivery_match.group(1)
+        if parsed.get("batch_id") == correct_doc and parsed.get("supplier_doc_number") == correct_batch:
+            parsed["batch_id"] = correct_batch
+            parsed["supplier_doc_number"] = correct_doc
 
     # Supplier must come from supplier/customer supplier label only.
     # Do not use receiver field (שם המקבל) as supplier.
+    # Do not use label title (תג זיהוי חומר גלם) as supplier.
     supplier_from_label = _extract_labeled_value(
         raw_text,
         [
@@ -960,11 +1006,35 @@ def _postprocess_ocr(parsed: dict, raw_text: str) -> dict:
 
     if supplier_from_label:
         parsed["supplier"] = supplier_from_label
-    elif receiver_from_label and parsed.get("supplier"):
-        normalized_supplier = str(parsed.get("supplier", "")).strip().lower()
-        normalized_receiver = receiver_from_label.strip().lower()
-        if normalized_supplier and normalized_supplier == normalized_receiver:
+    else:
+        current = str(parsed.get("supplier") or "").strip()
+        bad_suppliers = ("תג זיהוי חומר גלם", "ישראמט בע\"מ", "ישראמט", "isramat", "")
+        if current.lower().strip() in [s.lower() for s in bad_suppliers]:
             parsed["supplier"] = None
+        if receiver_from_label:
+            normalized_supplier = current.lower()
+            normalized_receiver = receiver_from_label.strip().lower()
+            if normalized_supplier and normalized_supplier == normalized_receiver:
+                parsed["supplier"] = None
+
+    # Extract material type from label (סוג חומר גלם)
+    material_from_label = _extract_labeled_value(raw_text, ["סוג חומר גלם", "סוג חומר", "חומר גלם"])
+    if material_from_label:
+        current_material = str(parsed.get("material_type") or "").strip()
+        supplier_name = str(parsed.get("supplier") or supplier_from_label or "").strip()
+        if not current_material or current_material == supplier_name or current_material == "תג זיהוי חומר גלם":
+            parsed["material_type"] = material_from_label
+
+    # Extract quantity (כמות / כמות(מוטות))
+    qty_match = re.search(r"כמות\s*(?:\(מוטות\))?\s*[:\s]*(\d+)", raw_text)
+    if qty_match:
+        qty_val = int(qty_match.group(1))
+        current_qty = parsed.get("quantity_received")
+        current_weight = parsed.get("weight_kg")
+        if current_qty is None or current_qty == 0:
+            parsed["quantity_received"] = qty_val
+        if current_weight is not None and current_weight == qty_val and current_qty != qty_val:
+            parsed["weight_kg"] = None
 
     # Extract date if present (dd.mm.yy, dd/mm/yy, yyyy-mm-dd)
     if parsed.get("date_received") is None:
@@ -972,11 +1042,12 @@ def _postprocess_ocr(parsed: dict, raw_text: str) -> dict:
         if date_match:
             parsed["date_received"] = date_match.group(1)
 
-    # If customer form: prefer customer delivery doc as batch_id
+    # Customer forms: batch_id should be null (system generates it later).
+    # NEVER copy supplier_doc_number into batch_id.
     if _is_customer_form(raw_text):
-        supplier_doc = parsed.get("supplier_doc_number")
-        if supplier_doc:
-            parsed["batch_id"] = supplier_doc
+        parsed.setdefault("from_customer", True)
+        if not batch_match:
+            parsed["batch_id"] = None
 
     # If diameter equals bar length, clear it (likely mis-mapped)
     if parsed.get("bar_length") is not None and parsed.get("diameter") == parsed.get("bar_length"):
@@ -989,7 +1060,7 @@ def _postprocess_ocr(parsed: dict, raw_text: str) -> dict:
     # Parse diameter from fraction in inches
     fraction = parsed.get("diameter_fraction")
     if not fraction:
-        fraction_match = re.search(r"עגול\s*([0-9]+)\s*/\s*([0-9]+)", raw_text)
+        fraction_match = re.search(r"(?:עגול|קוטר)\s*([0-9]+)\s*/\s*([0-9]+)", raw_text)
         if fraction_match:
             fraction = f"{fraction_match.group(1)}/{fraction_match.group(2)}"
 
