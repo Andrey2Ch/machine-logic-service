@@ -1,0 +1,52 @@
+{
+  "categories": {
+    "machine":           { "he": "מכונה",        "ru": "Станок",              "en": "Machine",           "range": "1-16"  },
+    "part":              { "he": "חלקים",         "ru": "Детали",              "en": "Parts",             "range": "30-49" },
+    "work_and_material": { "he": "עבודה וחומר",   "ru": "Работа и материал",   "en": "Work & Material",   "range": "70-74" }
+  },
+  "reasons": [
+    { "code":  1, "category": "machine", "he": "כיוון מכונה",                      "ru": "Настройка станка на новую деталь",                    "en": "Machine setup for new part" },
+    { "code":  2, "category": "machine", "he": "כיוון מוביל",                      "ru": "Подстройка люнета",                                   "en": "Steady rest adjustment" },
+    { "code":  3, "category": "machine", "he": "תקלה במכונה",                      "ru": "Неполадка в станке",                                  "en": "Machine malfunction" },
+    { "code":  4, "category": "machine", "he": "אחזקת מכונה",                      "ru": "Тех. уход за станком",                                "en": "Machine maintenance" },
+    { "code":  5, "category": "machine", "he": "ניקוי מכונה",                      "ru": "Уборка станка",                                       "en": "Machine cleaning" },
+    { "code":  6, "category": "machine", "he": "תקלה באלקטרוניקה",                 "ru": "Неполадки в электронной части",                        "en": "Electronics malfunction" },
+    { "code":  7, "category": "machine", "he": "תקלה בהזנת חומר",                  "ru": "Неполадки в подаче прутка",                            "en": "Bar feeder malfunction" },
+    { "code":  8, "category": "machine", "he": "נשבר סכין",                        "ru": "Сломался резец",                                      "en": "Broken cutting tool" },
+    { "code":  9, "category": "machine", "he": "נשבר מקדח",                        "ru": "Сломалось сверло",                                    "en": "Broken drill" },
+    { "code": 10, "category": "machine", "he": "נשבר מברז",                         "ru": "Сломался метчик",                                     "en": "Broken tap" },
+    { "code": 11, "category": "machine", "he": "נשבר כרסום",                       "ru": "Сломалась фреза",                                     "en": "Broken milling cutter" },
+    { "code": 12, "category": "machine", "he": "החלפת לוחית חריטה",                "ru": "Замена пластинки",                                    "en": "Insert replacement" },
+    { "code": 13, "category": "machine", "he": "נשבר קרנר",                        "ru": "Сломался кернер",                                     "en": "Broken center punch" },
+    { "code": 14, "category": "machine", "he": "השחזת כלי",                        "ru": "Заточка инструмента",                                 "en": "Tool sharpening" },
+    { "code": 15, "category": "machine", "he": "נשבר כלי",                         "ru": "Сломался инструмент",                                 "en": "Broken tool (generic)" },
+    { "code": 16, "category": "machine", "he": "נשברה מחרוקת",                     "ru": "Сломалась плашка",                                    "en": "Broken die" },
+
+    { "code": 30, "category": "part", "he": "בעיית עוקץ",                          "ru": "Проблемы с отрезкой (чупчик)",                        "en": "Cut-off burr problem" },
+    { "code": 31, "category": "part", "he": "בעיית גרד",                           "ru": "Проблемы с заусенцем",                                "en": "Burr / deburring issue" },
+    { "code": 32, "category": "part", "he": "חריגה בגימור שטח",                     "ru": "Отклонение от требований по чистоте поверхности",      "en": "Surface finish deviation" },
+    { "code": 33, "category": "part", "he": "בעיית חיספוס",                         "ru": "Проблемы с накаткой",                                 "en": "Knurling problem" },
+    { "code": 34, "category": "part", "he": "חריץ לא במרכז",                        "ru": "Канавка не в центре",                                 "en": "Groove not centered" },
+    { "code": 35, "category": "part", "he": "חריגה באורך +/-",                      "ru": "Отклонение от линейных размеров",                     "en": "Length deviation +/-" },
+    { "code": 36, "category": "part", "he": "חריגה בקוטר +/-",                      "ru": "Отклонение от диаметра",                              "en": "Diameter deviation +/-" },
+    { "code": 37, "category": "part", "he": "חריגה במרכוז",                         "ru": "Отклонение от центровки",                             "en": "Centering deviation" },
+    { "code": 38, "category": "part", "he": "חריגה בפאזה",                          "ru": "Отклонение от фаски",                                 "en": "Chamfer deviation" },
+    { "code": 39, "category": "part", "he": "בעיית מקבילות",                        "ru": "Проблема с параллельностью",                          "en": "Parallelism problem" },
+    { "code": 40, "category": "part", "he": "מדיד לקדה GO לא עובר",                 "ru": "Калибр \"пробка\" GO не проходит",                    "en": "Plug gauge GO does not pass" },
+    { "code": 41, "category": "part", "he": "מדיד לקדה NO-GO עובר",                 "ru": "Калибр \"пробка\" NO-GO проходит",                    "en": "Plug gauge NO-GO passes" },
+    { "code": 42, "category": "part", "he": "נשברים חלקים",                         "ru": "Ломаются детали",                                    "en": "Parts breaking" },
+    { "code": 43, "category": "part", "he": "מדיד הברגה פנימית GO לא עובר",         "ru": "Резьбовой внутренний калибр GO не проходит",           "en": "Internal thread gauge GO fails" },
+    { "code": 44, "category": "part", "he": "מדיד הברגה פנימית NOGO עובר",          "ru": "Резьбовой внутренний калибр NO-GO проходит",           "en": "Internal thread gauge NO-GO passes" },
+    { "code": 45, "category": "part", "he": "מדיד הברגה חיצונית GO לא עובר",        "ru": "Калибр резьбовой наружный GO не проходит",             "en": "External thread gauge GO fails" },
+    { "code": 46, "category": "part", "he": "מדיד הברגה חיצונית NOGO עובר",         "ru": "Калибр резьбовой наружный NO-GO проходит",             "en": "External thread gauge NO-GO passes" },
+    { "code": 47, "category": "part", "he": "אין הברגה",                            "ru": "Нет резьбы",                                         "en": "No thread produced" },
+    { "code": 48, "category": "part", "he": "אורך ההברגה מעל הדרישה",               "ru": "Длина резьбы не в размере (больше)",                   "en": "Thread length above spec" },
+    { "code": 49, "category": "part", "he": "אורך ההברגה מתחת הדרישה",              "ru": "Длина резьбы не в размере (меньше)",                   "en": "Thread length below spec" },
+
+    { "code": 70, "category": "work_and_material", "he": "תחילת הזמנה",             "ru": "Начало производства (работы)",                        "en": "Production start (job start)" },
+    { "code": 71, "category": "work_and_material", "he": "סוף הזמנה",               "ru": "Конец производства (работы)",                         "en": "Production end (job end)" },
+    { "code": 72, "category": "work_and_material", "he": "גמר החומר",               "ru": "Закончился материал",                                "en": "Material depleted" },
+    { "code": 73, "category": "work_and_material", "he": "חוסר חומר",               "ru": "Нет материала",                                     "en": "Material unavailable" },
+    { "code": 74, "category": "work_and_material", "he": "חומר לא מגיע מהמחסון",    "ru": "Склад не поставил материал",                          "en": "Warehouse did not deliver material" }
+  ]
+}

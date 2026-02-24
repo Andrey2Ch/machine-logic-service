@@ -554,3 +554,17 @@
 | price_per_kg_ils | unknown | ? |  |
 | price_per_meter_ils | unknown | ? |  |
 
+## stoppage_reasons
+
+Machine stoppage/fault reason codes (רשימת תקלות). Categories: machine (1-16), part (30-49), work_and_material (70-74).
+
+| column | type | nullable | description |
+|---|---|---|---|
+| code | integer | NO | PK. Fault code number |
+| category | text | NO | machine / part / work_and_material |
+| name_he | text | NO | Hebrew name |
+| name_ru | text | NO | Russian name |
+| name_en | text | NO | English name |
+| is_active | boolean | NO | Soft-delete flag |
+| created_at | timestamp with time zone | NO |  |
+

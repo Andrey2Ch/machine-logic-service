@@ -479,3 +479,15 @@ class WarehouseMovementDB(Base):
     batch = relationship("MaterialBatchDB")
     performer = relationship("EmployeeDB", foreign_keys=[performed_by])
     machine = relationship("MachineDB", foreign_keys=[related_machine_id])
+
+
+class StoppageReasonDB(Base):
+    __tablename__ = "stoppage_reasons"
+
+    code = Column(Integer, primary_key=True)
+    category = Column(String, nullable=False)
+    name_he = Column(Text, nullable=False)
+    name_ru = Column(Text, nullable=False)
+    name_en = Column(Text, nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)

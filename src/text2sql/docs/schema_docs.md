@@ -836,3 +836,17 @@ GROUP BY current_location
 | performed_by | integer | YES | employees.id |
 | performed_at | timestamp with time zone | NO |  |
 | notes | text | YES |  |
+
+## stoppage_reasons
+
+Machine stoppage/fault reason codes (רשימת תקלות). Categories: machine (1-16), part (30-49), work_and_material (70-74).
+
+| column | type | nullable | description |
+|---|---|---|---|
+| code | integer | NO | PK. Fault code number |
+| category | text | NO | machine / part / work_and_material |
+| name_he | text | NO | Hebrew name |
+| name_ru | text | NO | Russian name |
+| name_en | text | NO | English name |
+| is_active | boolean | NO | Soft-delete flag |
+| created_at | timestamp with time zone | NO |  |
