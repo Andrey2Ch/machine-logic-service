@@ -345,7 +345,8 @@
 | auto_adjustment | integer | YES |  |
 | manual_adjustment | integer | YES |  |
 | defect_adjustment | integer | YES |  |
-| total_adjustment | integer | YES |  |
+| warehouse_discrepancy_adjustment | integer | NO | Auto-calculated: sum of max(0, current_quantity - recounted_quantity) for warehouse-received batches |
+| total_adjustment | integer | YES | Generated: auto + manual + defect + warehouse_discrepancy |
 
 ## setup_statuses
 
