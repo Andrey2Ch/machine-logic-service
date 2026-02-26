@@ -831,7 +831,11 @@ async def bind_part_material(part_id: int, body: PartMaterialBind, db: Session =
         part.material_group_id = body.material_group_id
         part.material_subgroup_id = body.material_subgroup_id
         db.commit()
-        db.refresh(part)
+
+        part = db.query(PartDB).options(
+            selectinload(PartDB.material_group),
+            selectinload(PartDB.material_subgroup),
+        ).filter(PartDB.id == part_id).first()
 
         logger.info(f"Деталь {part_id} привязана к material_group={body.material_group_id}, subgroup={body.material_subgroup_id}")
 
