@@ -43,7 +43,7 @@ from enum import Enum
 from sqlalchemy.orm import Session, aliased, selectinload
 from fastapi import Depends, Body
 from src.database import Base, initialize_database, get_db_session
-from src.models.models import SetupDB, ReadingDB, MachineDB, EmployeeDB, PartDB, LotDB, BatchDB, CardDB, MaterialGroupDB, MaterialSubgroupDB, WarehouseMovementDB, LotMaterialDB
+from src.models.models import SetupDB, ReadingDB, MachineDB, EmployeeDB, PartDB, LotDB, BatchDB, CardDB, MaterialGroupDB, MaterialSubgroupDB, WarehouseMovementDB, LotMaterialDB, SetupQuantityAdjustmentDB
 from datetime import datetime, timezone, date, timedelta
 from src.utils.sheets_handler import save_to_sheets
 import asyncio
@@ -2435,6 +2435,84 @@ async def get_warehouse_pending_batches(db: Session = Depends(get_db_session)):
         logger.error(f"Error fetching warehouse pending batches: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error while fetching pending batches")
 
+def _recalc_warehouse_discrepancy(db: Session, batch, lot, counted_quantity: int) -> dict:
+    """
+    Пересчитать warehouse_discrepancy_adjustment для активной наладки.
+    Обновляет additional_quantity на setup и total_planned_quantity на lot.
+    """
+    if not lot:
+        return {}
+
+    active_setup = db.query(SetupDB).filter(
+        SetupDB.lot_id == lot.id,
+        SetupDB.end_time.is_(None),
+        SetupDB.status.in_(['started', 'allowed'])
+    ).order_by(SetupDB.created_at.desc()).first()
+
+    if not active_setup:
+        logger.info(f"[_recalc_warehouse_discrepancy] No active setup for lot {lot.id}, skipping")
+        return {}
+
+    adj = db.query(SetupQuantityAdjustmentDB).filter(
+        SetupQuantityAdjustmentDB.setup_job_id == active_setup.id
+    ).first()
+
+    if not adj:
+        adj = SetupQuantityAdjustmentDB(
+            setup_job_id=active_setup.id,
+            auto_adjustment=0,
+            manual_adjustment=0,
+            defect_adjustment=0,
+            warehouse_discrepancy_adjustment=0,
+        )
+        db.add(adj)
+        db.flush()
+
+    received_batches = db.query(BatchDB).filter(
+        BatchDB.setup_job_id == active_setup.id,
+        BatchDB.recounted_quantity.isnot(None)
+    ).all()
+
+    total_discrepancy = 0
+    for b in received_batches:
+        declared = b.current_quantity or 0
+        recounted = counted_quantity if b.id == batch.id else (b.recounted_quantity or 0)
+        total_discrepancy += max(0, declared - recounted)
+
+    if not any(b.id == batch.id for b in received_batches):
+        total_discrepancy += max(0, (batch.current_quantity or 0) - counted_quantity)
+
+    current_defect = adj.defect_adjustment or 0
+    current_auto = adj.auto_adjustment or 0
+    old_wh_disc = adj.warehouse_discrepancy_adjustment or 0
+    current_additional = active_setup.additional_quantity or 0
+
+    manual_adj = max(0, current_additional - current_defect - current_auto - old_wh_disc)
+    new_additional = manual_adj + current_defect + current_auto + total_discrepancy
+
+    adj.warehouse_discrepancy_adjustment = total_discrepancy
+    adj.manual_adjustment = manual_adj
+
+    active_setup.additional_quantity = new_additional
+
+    total_planned = (lot.initial_planned_quantity or 0) + new_additional
+    lot.total_planned_quantity = total_planned
+
+    db.commit()
+
+    logger.info(
+        f"[_recalc_warehouse_discrepancy] batch={batch.id}, "
+        f"totalDiscrepancy={total_discrepancy}, additional={new_additional}, "
+        f"totalPlanned={total_planned}"
+    )
+
+    return {
+        'total_discrepancy': total_discrepancy,
+        'additional_quantity': new_additional,
+        'total_planned_quantity': total_planned,
+    }
+
+
 @app.post("/batches/{batch_id}/accept-warehouse")
 async def accept_batch_on_warehouse(batch_id: int, payload: AcceptWarehousePayload, db: Session = Depends(get_db_session)):
     """Принять батч на склад: обновить кол-во и статус."""
@@ -2547,14 +2625,16 @@ async def accept_batch_on_warehouse(batch_id: int, payload: AcceptWarehousePaylo
         db.commit()
         db.refresh(batch)
 
-        # Если была создана задача уведомления, дожидаемся ее (опционально, но безопасно)
-        # Либо можно не ждать, если не критично, что запрос завершится до отправки уведомления
-        # if notification_task:
-        #     await notification_task 
-        
+        # --- ПЕРЕСЧЁТ РАСХОЖДЕНИЙ → ПЛАНОВОЕ КОЛ-ВО ---
+        discrepancy_info = _recalc_warehouse_discrepancy(db, batch, lot, recounted_clerk_qty)
+
         logger.info(f"Batch {batch_id} accepted on warehouse by employee {payload.warehouse_employee_id} with quantity {payload.recounted_quantity}")
         
-        return {'success': True, 'message': 'Batch accepted successfully'}
+        return {
+            'success': True,
+            'message': 'Batch accepted successfully',
+            'discrepancy': discrepancy_info,
+        }
 
     except HTTPException as http_exc:
         # Не откатываем здесь, так как db.commit() еще не было или ошибка до него
