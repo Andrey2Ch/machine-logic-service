@@ -43,7 +43,7 @@ from enum import Enum
 from sqlalchemy.orm import Session, aliased, selectinload
 from fastapi import Depends, Body
 from src.database import Base, initialize_database, get_db_session
-from src.models.models import SetupDB, ReadingDB, MachineDB, EmployeeDB, PartDB, LotDB, BatchDB, CardDB, MaterialGroupDB, MaterialSubgroupDB
+from src.models.models import SetupDB, ReadingDB, MachineDB, EmployeeDB, PartDB, LotDB, BatchDB, CardDB, MaterialGroupDB, MaterialSubgroupDB, WarehouseMovementDB, LotMaterialDB
 from datetime import datetime, timezone, date, timedelta
 from src.utils.sheets_handler import save_to_sheets
 import asyncio
@@ -2690,18 +2690,19 @@ class LotResponse(LotBase):
     order_manager_id: Optional[int] = None
     created_by_order_manager_at: Optional[datetime] = None
     status: LotStatus
-    created_at: Optional[datetime] = None # <--- СДЕЛАНО ОПЦИОНАЛЬНЫМ
-    total_planned_quantity: Optional[int] = None # Общее количество (плановое + дополнительное)
-    part: Optional[PartResponse] = None # Для возврата информации о детали вместе с лотом
-    machine_name: Optional[str] = None  # 🔄 Название станка последней активной наладки
-    assigned_machine_id: Optional[int] = None  # Назначенный станок (для статуса assigned)
-    assigned_order: Optional[int] = None  # Порядок в очереди на станке
-    actual_produced: Optional[int] = None  # Текущее произведенное количество из machine_readings
-    setup_status: Optional[str] = None  # Статус активной наладки
+    created_at: Optional[datetime] = None
+    total_planned_quantity: Optional[int] = None
+    part: Optional[PartResponse] = None
+    machine_name: Optional[str] = None
+    assigned_machine_id: Optional[int] = None
+    assigned_order: Optional[int] = None
+    actual_produced: Optional[int] = None
+    setup_status: Optional[str] = None
     reserved_batch_id: Optional[str] = None
+    material_batch_ids: Optional[List[str]] = None
 
     class Config:
-        from_attributes = True # <--- ИСПРАВЛЕНО с orm_mode
+        from_attributes = True
 # <<< КОНЕЦ НОВЫХ Pydantic МОДЕЛЕЙ ДЛЯ LOT >>>
 
 # <<< НОВЫЙ ЭНДПОИНТ POST /lots/ >>>
@@ -2924,10 +2925,36 @@ async def get_lots(
                 if setup_id in reading_map:
                     actual_produced_map[lot_id] = reading_map[setup_id]
         
+        material_batch_map: Dict[int, List[str]] = {}
+        if lot_ids:
+            wm_rows = (
+                db.query(WarehouseMovementDB.related_lot_id, WarehouseMovementDB.batch_id)
+                .filter(
+                    WarehouseMovementDB.related_lot_id.in_(lot_ids),
+                    WarehouseMovementDB.movement_type == 'issue',
+                )
+                .distinct()
+                .all()
+            )
+            for wm_lot_id, wm_batch_id in wm_rows:
+                material_batch_map.setdefault(wm_lot_id, []).append(wm_batch_id)
+            missing_lot_ids = [lid for lid in lot_ids if lid not in material_batch_map]
+            if missing_lot_ids:
+                lm_rows = (
+                    db.query(LotMaterialDB.lot_id, WarehouseMovementDB.batch_id)
+                    .join(WarehouseMovementDB, LotMaterialDB.material_receipt_id == WarehouseMovementDB.movement_id)
+                    .filter(LotMaterialDB.lot_id.in_(missing_lot_ids))
+                    .distinct()
+                    .all()
+                )
+                for lm_lot_id, lm_batch_id in lm_rows:
+                    material_batch_map.setdefault(lm_lot_id, []).append(lm_batch_id)
+
         for lot in lots:
             lot.machine_name = machine_map.get(lot.id)
             lot.setup_status = setup_status_map.get(lot.id)
             lot.actual_produced = actual_produced_map.get(lot.id)
+            lot.material_batch_ids = material_batch_map.get(lot.id)
 
     return lots
 
@@ -3175,6 +3202,17 @@ async def get_lot(lot_id: int, db: Session = Depends(get_db_session)):
     lot = db.query(LotDB).options(selectinload(LotDB.part)).filter(LotDB.id == lot_id).first()
     if not lot:
         raise HTTPException(status_code=404, detail=f"Lot with id {lot_id} not found")
+    
+    wm_rows = (
+        db.query(WarehouseMovementDB.batch_id)
+        .filter(
+            WarehouseMovementDB.related_lot_id == lot_id,
+            WarehouseMovementDB.movement_type == 'issue',
+        )
+        .distinct()
+        .all()
+    )
+    lot.material_batch_ids = [r.batch_id for r in wm_rows] if wm_rows else None
     
     return lot
 
