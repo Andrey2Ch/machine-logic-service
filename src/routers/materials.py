@@ -28,6 +28,7 @@ from src.models.models import (
     SetupDB,
     WarehouseMovementDB,
     InventoryPositionDB,
+    MaterialSubgroupDB,
 )
 from src.services.notification_service import send_material_low_notification
 from datetime import datetime, timezone, timedelta
@@ -745,6 +746,22 @@ def issue_material_to_machine(
         
         db.commit()
         db.refresh(lot_material)
+
+        # Auto-bind: if the part has no material catalog link, inherit from the issue request
+        try:
+            if part and not part.material_group_id and (request.material_group_id or request.material_subgroup_id):
+                if request.material_group_id:
+                    part.material_group_id = request.material_group_id
+                if request.material_subgroup_id:
+                    part.material_subgroup_id = request.material_subgroup_id
+                    if not request.material_group_id:
+                        sg = db.query(MaterialSubgroupDB).filter(MaterialSubgroupDB.id == request.material_subgroup_id).first()
+                        if sg:
+                            part.material_group_id = sg.group_id
+                db.commit()
+                logger.info("Auto-bound material group=%s subgroup=%s to part_id=%s", part.material_group_id, part.material_subgroup_id, part.id)
+        except Exception as e:
+            logger.warning("Auto-bind material to part failed (non-critical): %s", e)
 
         # Если есть данные для расчета — проверяем, хватит ли материала на 12 часов
         try:

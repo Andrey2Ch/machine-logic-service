@@ -86,14 +86,19 @@ class PartDB(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     drawing_number = Column(String(255), unique=True, index=True)
-    material = Column(Text, nullable=True)
-    recommended_diameter = Column(Float, nullable=True)  # Рекомендованный диаметр в мм
-    profile_type = Column(String(20), nullable=True, default='round')  # Тип профиля (round/hex/square)
-    part_length = Column(Float, nullable=True)  # Длина детали в мм
-    drawing_url = Column(Text, nullable=True)  # URL чертежа (Cloudinary)
+    material = Column(Text, nullable=True)  # legacy free-text, kept for backward compat
+    material_group_id = Column(Integer, ForeignKey("material_groups.id", ondelete="SET NULL"), nullable=True)
+    material_subgroup_id = Column(Integer, ForeignKey("material_subgroups.id", ondelete="SET NULL"), nullable=True)
+    recommended_diameter = Column(Float, nullable=True)
+    profile_type = Column(String(20), nullable=True, default='round')
+    part_length = Column(Float, nullable=True)
+    drawing_url = Column(Text, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    avg_cycle_time = Column(Integer, nullable=True)  # Среднее время цикла в секундах
-    pinned_machine_id = Column(Integer, ForeignKey("machines.id"), nullable=True)  # Закрепление за станком
+    avg_cycle_time = Column(Integer, nullable=True)
+    pinned_machine_id = Column(Integer, ForeignKey("machines.id"), nullable=True)
+
+    material_group = relationship("MaterialGroupDB")
+    material_subgroup = relationship("MaterialSubgroupDB")
     # is_active = Column(Boolean, default=True)
     
     # Relationship

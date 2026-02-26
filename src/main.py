@@ -43,7 +43,7 @@ from enum import Enum
 from sqlalchemy.orm import Session, aliased, selectinload
 from fastapi import Depends, Body
 from src.database import Base, initialize_database, get_db_session
-from src.models.models import SetupDB, ReadingDB, MachineDB, EmployeeDB, PartDB, LotDB, BatchDB, CardDB
+from src.models.models import SetupDB, ReadingDB, MachineDB, EmployeeDB, PartDB, LotDB, BatchDB, CardDB, MaterialGroupDB, MaterialSubgroupDB
 from datetime import datetime, timezone, date, timedelta
 from src.utils.sheets_handler import save_to_sheets
 import asyncio
@@ -194,7 +194,9 @@ async def shutdown_event():
 # Pydantic модели для Деталей (Parts)
 class PartBase(BaseModel):
     drawing_number: str = Field(..., description="Номер чертежа детали, должен быть уникальным")
-    material: Optional[str] = Field(None, description="Материал детали")
+    material: Optional[str] = Field(None, description="Legacy текстовое поле материала")
+    material_group_id: Optional[int] = Field(None, description="FK material_groups.id")
+    material_subgroup_id: Optional[int] = Field(None, description="FK material_subgroups.id")
     avg_cycle_time: Optional[int] = Field(None, description="Среднее время цикла в секундах (для новых деталей - оценка)")
     recommended_diameter: Optional[float] = Field(None, description="Рекомендованный размер заготовки в мм (3-38 мм)")
     part_length: Optional[float] = Field(None, description="Длина детали в мм")
@@ -206,9 +208,10 @@ class PartCreate(PartBase):
     pass
 
 class PartUpdate(BaseModel):
-    """Модель для обновления детали — все поля опциональны"""
     drawing_number: Optional[str] = None
     material: Optional[str] = None
+    material_group_id: Optional[int] = None
+    material_subgroup_id: Optional[int] = None
     avg_cycle_time: Optional[int] = None
     recommended_diameter: Optional[float] = None
     part_length: Optional[float] = None
@@ -216,10 +219,26 @@ class PartUpdate(BaseModel):
     drawing_url: Optional[str] = None
     pinned_machine_id: Optional[int] = None
 
+class MaterialGroupInfo(BaseModel):
+    id: int
+    code: str
+    name: str
+    class Config:
+        orm_mode = True
+
+class MaterialSubgroupInfo(BaseModel):
+    id: int
+    code: str
+    name: str
+    class Config:
+        orm_mode = True
+
 class PartResponse(PartBase):
     id: int
-    created_at: Optional[datetime] # <--- СДЕЛАНО ОПЦИОНАЛЬНЫМ
+    created_at: Optional[datetime]
     has_nc_program: Optional[bool] = None
+    material_group_info: Optional[MaterialGroupInfo] = None
+    material_subgroup_info: Optional[MaterialSubgroupInfo] = None
 
     class Config:
         orm_mode = True
@@ -243,6 +262,8 @@ async def create_part(part_in: PartCreate, db: Session = Depends(get_db_session)
     new_part = PartDB(
         drawing_number=part_in.drawing_number,
         material=part_in.material,
+        material_group_id=part_in.material_group_id,
+        material_subgroup_id=part_in.material_subgroup_id,
         avg_cycle_time=part_in.avg_cycle_time,
         recommended_diameter=part_in.recommended_diameter,
         part_length=part_in.part_length,
@@ -274,7 +295,11 @@ async def get_parts(
     Поддерживает пагинацию через `skip` и `limit`.
     """
     try:
-        query = db.query(PartDB)
+        from sqlalchemy.orm import selectinload
+        query = db.query(PartDB).options(
+            selectinload(PartDB.material_group),
+            selectinload(PartDB.material_subgroup),
+        )
         
         if search:
             search_term = f"%{search.lower()}%"
@@ -288,8 +313,6 @@ async def get_parts(
         parts = query.order_by(PartDB.drawing_number).offset(skip).limit(limit).all()
         logger.info(f"Запрос списка деталей: search='{search}', skip={skip}, limit={limit}. Возвращено {len(parts)} из {total_count} деталей.")
 
-        # Enrich parts with NC presence (fast, single query).
-        # This enables client-side filtering without per-part requests.
         if parts:
             try:
                 from sqlalchemy import text, bindparam
@@ -307,13 +330,32 @@ async def get_parts(
                 for p in parts:
                     setattr(p, "has_nc_program", cnt_by_part_id.get(p.id, 0) > 0)
             except Exception as e:
-                # Don't fail /parts if NC tables are unavailable for some reason
                 logger.warning(f"Не удалось обогатить /parts has_nc_program: {e}")
+
+        result = []
+        for p in parts:
+            d = {
+                "id": p.id,
+                "drawing_number": p.drawing_number,
+                "material": p.material,
+                "material_group_id": p.material_group_id,
+                "material_subgroup_id": p.material_subgroup_id,
+                "avg_cycle_time": p.avg_cycle_time,
+                "recommended_diameter": p.recommended_diameter,
+                "part_length": p.part_length,
+                "profile_type": p.profile_type,
+                "drawing_url": p.drawing_url,
+                "pinned_machine_id": p.pinned_machine_id,
+                "created_at": p.created_at,
+                "has_nc_program": getattr(p, "has_nc_program", None),
+                "material_group_info": MaterialGroupInfo.from_orm(p.material_group) if p.material_group else None,
+                "material_subgroup_info": MaterialSubgroupInfo.from_orm(p.material_subgroup) if p.material_subgroup else None,
+            }
+            result.append(d)
         
         response.headers["X-Total-Count"] = str(total_count)
-        # УДАЛЕНО: response.headers["Access-Control-Expose-Headers"] = "X-Total-Count"
             
-        return parts
+        return result
     except Exception as e:
         logger.error(f"Ошибка при получении списка деталей (search='{search}', skip={skip}, limit={limit}): {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Внутренняя ошибка сервера при получении списка деталей: {str(e)}")
@@ -693,10 +735,31 @@ async def get_part_production_history(
 async def get_part(part_id: int, db: Session = Depends(get_db_session)):
     """Получить деталь по ID."""
     try:
-        part = db.query(PartDB).filter(PartDB.id == part_id).first()
+        from sqlalchemy.orm import selectinload
+        part = db.query(PartDB).options(
+            selectinload(PartDB.material_group),
+            selectinload(PartDB.material_subgroup),
+        ).filter(PartDB.id == part_id).first()
         if not part:
             raise HTTPException(status_code=404, detail=f"Деталь с ID {part_id} не найдена")
-        return part
+        d = {
+            "id": part.id,
+            "drawing_number": part.drawing_number,
+            "material": part.material,
+            "material_group_id": part.material_group_id,
+            "material_subgroup_id": part.material_subgroup_id,
+            "avg_cycle_time": part.avg_cycle_time,
+            "recommended_diameter": part.recommended_diameter,
+            "part_length": part.part_length,
+            "profile_type": part.profile_type,
+            "drawing_url": part.drawing_url,
+            "pinned_machine_id": part.pinned_machine_id,
+            "created_at": part.created_at,
+            "has_nc_program": None,
+            "material_group_info": MaterialGroupInfo.from_orm(part.material_group) if part.material_group else None,
+            "material_subgroup_info": MaterialSubgroupInfo.from_orm(part.material_subgroup) if part.material_subgroup else None,
+        }
+        return d
     except HTTPException:
         raise
     except Exception as e:
@@ -735,6 +798,65 @@ async def update_part(part_id: int, part_update: PartUpdate, db: Session = Depen
     except Exception as e:
         db.rollback()
         logger.error(f"Ошибка при обновлении детали {part_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+class PartMaterialBind(BaseModel):
+    material_group_id: int = Field(..., description="FK material_groups.id")
+    material_subgroup_id: Optional[int] = Field(None, description="FK material_subgroups.id (optional)")
+
+@app.patch("/parts/{part_id}/material", response_model=PartResponse, tags=["Parts"])
+async def bind_part_material(part_id: int, body: PartMaterialBind, db: Session = Depends(get_db_session)):
+    """Привязать материал (group + subgroup) к детали. Однократная операция."""
+    try:
+        from sqlalchemy.orm import selectinload
+        part = db.query(PartDB).options(
+            selectinload(PartDB.material_group),
+            selectinload(PartDB.material_subgroup),
+        ).filter(PartDB.id == part_id).first()
+        if not part:
+            raise HTTPException(status_code=404, detail=f"Деталь с ID {part_id} не найдена")
+
+        mg = db.query(MaterialGroupDB).filter(MaterialGroupDB.id == body.material_group_id).first()
+        if not mg:
+            raise HTTPException(status_code=400, detail=f"Группа материала {body.material_group_id} не найдена")
+
+        if body.material_subgroup_id:
+            ms = db.query(MaterialSubgroupDB).filter(
+                MaterialSubgroupDB.id == body.material_subgroup_id,
+                MaterialSubgroupDB.group_id == body.material_group_id,
+            ).first()
+            if not ms:
+                raise HTTPException(status_code=400, detail=f"Подгруппа {body.material_subgroup_id} не принадлежит группе {body.material_group_id}")
+
+        part.material_group_id = body.material_group_id
+        part.material_subgroup_id = body.material_subgroup_id
+        db.commit()
+        db.refresh(part)
+
+        logger.info(f"Деталь {part_id} привязана к material_group={body.material_group_id}, subgroup={body.material_subgroup_id}")
+
+        return {
+            "id": part.id,
+            "drawing_number": part.drawing_number,
+            "material": part.material,
+            "material_group_id": part.material_group_id,
+            "material_subgroup_id": part.material_subgroup_id,
+            "avg_cycle_time": part.avg_cycle_time,
+            "recommended_diameter": part.recommended_diameter,
+            "part_length": part.part_length,
+            "profile_type": part.profile_type,
+            "drawing_url": part.drawing_url,
+            "pinned_machine_id": part.pinned_machine_id,
+            "created_at": part.created_at,
+            "has_nc_program": None,
+            "material_group_info": MaterialGroupInfo.from_orm(part.material_group) if part.material_group else None,
+            "material_subgroup_info": MaterialSubgroupInfo.from_orm(part.material_subgroup) if part.material_subgroup else None,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Ошибка привязки материала к детали {part_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/parts/{part_id}", tags=["Parts"])

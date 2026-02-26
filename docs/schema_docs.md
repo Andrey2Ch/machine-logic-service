@@ -290,10 +290,18 @@
 
 | column | type | nullable | description |
 |---|---|---|---|
-| id | integer | NO |  |
-| drawing_number | character varying | NO |  |
-| material | text | YES | ????????, ?? ???????? ??????????? ??????. ????? ?????????? description. |
-| created_at | timestamp without time zone | YES |  |
+| id | integer | NO | PK |
+| drawing_number | character varying | NO | Уникальный номер чертежа |
+| material | text | YES | Legacy текстовое поле материала |
+| material_group_id | integer | YES | FK → material_groups.id — группа материала |
+| material_subgroup_id | integer | YES | FK → material_subgroups.id — подгруппа материала |
+| recommended_diameter | double precision | YES | Рекомендованный диаметр заготовки (мм) |
+| profile_type | character varying(20) | YES | Тип профиля (round/hex/square) |
+| part_length | double precision | YES | Длина детали (мм) |
+| drawing_url | text | YES | URL чертежа (Cloudinary) |
+| avg_cycle_time | integer | YES | Среднее время цикла (сек) |
+| pinned_machine_id | integer | YES | FK → machines.id — закреплённый станок |
+| created_at | timestamp without time zone | YES | Дата создания |
 
 ## roles
 
