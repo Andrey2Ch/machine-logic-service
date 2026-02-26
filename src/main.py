@@ -220,18 +220,16 @@ class PartUpdate(BaseModel):
     pinned_machine_id: Optional[int] = None
 
 class MaterialGroupInfo(BaseModel):
+    model_config = {"from_attributes": True}
     id: int
     code: str
     name: str
-    class Config:
-        orm_mode = True
 
 class MaterialSubgroupInfo(BaseModel):
+    model_config = {"from_attributes": True}
     id: int
     code: str
     name: str
-    class Config:
-        orm_mode = True
 
 class PartResponse(PartBase):
     id: int
@@ -348,8 +346,8 @@ async def get_parts(
                 "pinned_machine_id": p.pinned_machine_id,
                 "created_at": p.created_at,
                 "has_nc_program": getattr(p, "has_nc_program", None),
-                "material_group_info": MaterialGroupInfo.from_orm(p.material_group) if p.material_group else None,
-                "material_subgroup_info": MaterialSubgroupInfo.from_orm(p.material_subgroup) if p.material_subgroup else None,
+                "material_group_info": MaterialGroupInfo.model_validate(p.material_group) if p.material_group else None,
+                "material_subgroup_info": MaterialSubgroupInfo.model_validate(p.material_subgroup) if p.material_subgroup else None,
             }
             result.append(d)
         
@@ -756,8 +754,8 @@ async def get_part(part_id: int, db: Session = Depends(get_db_session)):
             "pinned_machine_id": part.pinned_machine_id,
             "created_at": part.created_at,
             "has_nc_program": None,
-            "material_group_info": MaterialGroupInfo.from_orm(part.material_group) if part.material_group else None,
-            "material_subgroup_info": MaterialSubgroupInfo.from_orm(part.material_subgroup) if part.material_subgroup else None,
+            "material_group_info": MaterialGroupInfo.model_validate(part.material_group) if part.material_group else None,
+            "material_subgroup_info": MaterialSubgroupInfo.model_validate(part.material_subgroup) if part.material_subgroup else None,
         }
         return d
     except HTTPException:
@@ -853,8 +851,8 @@ async def bind_part_material(part_id: int, body: PartMaterialBind, db: Session =
             "pinned_machine_id": part.pinned_machine_id,
             "created_at": part.created_at,
             "has_nc_program": None,
-            "material_group_info": MaterialGroupInfo.from_orm(part.material_group) if part.material_group else None,
-            "material_subgroup_info": MaterialSubgroupInfo.from_orm(part.material_subgroup) if part.material_subgroup else None,
+            "material_group_info": MaterialGroupInfo.model_validate(part.material_group) if part.material_group else None,
+            "material_subgroup_info": MaterialSubgroupInfo.model_validate(part.material_subgroup) if part.material_subgroup else None,
         }
     except HTTPException:
         raise
