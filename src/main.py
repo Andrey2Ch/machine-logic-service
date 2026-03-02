@@ -2547,16 +2547,17 @@ async def accept_batch_on_warehouse(batch_id: int, payload: AcceptWarehousePaylo
         db.commit()
         db.refresh(batch)
 
-        # --- Warehouse discrepancy → additional_quantity (delta pattern, same as defect_adjustment) ---
+        # --- Warehouse discrepancy → additional_quantity ---
+        # Calculate at LOT level (not setup) to match analytics "Принято X из Y"
         discrepancy_info = {}
-        if batch.setup_job_id:
+        if batch.setup_job_id and lot:
             try:
                 raw_disc = db.query(
                     func.coalesce(func.sum(
                         func.coalesce(BatchDB.current_quantity, 0) - BatchDB.recounted_quantity
                     ), 0)
                 ).filter(
-                    BatchDB.setup_job_id == batch.setup_job_id,
+                    BatchDB.lot_id == lot.id,
                     BatchDB.recounted_quantity.isnot(None),
                     BatchDB.parent_batch_id.is_(None),
                 ).scalar()
@@ -2570,22 +2571,42 @@ async def accept_batch_on_warehouse(batch_id: int, payload: AcceptWarehousePaylo
                     old_wh_disc = adj.warehouse_discrepancy_adjustment or 0
                     adj.warehouse_discrepancy_adjustment = new_wh_disc_total
 
+                    # Zero out warehouse_discrepancy on OTHER setups for this lot
+                    other_setup_ids = db.query(SetupDB.id).filter(
+                        SetupDB.lot_id == lot.id,
+                        SetupDB.id != batch.setup_job_id
+                    ).all()
+                    if other_setup_ids:
+                        other_ids = [s[0] for s in other_setup_ids]
+                        other_adjs = db.query(SetupQuantityAdjustmentDB).filter(
+                            SetupQuantityAdjustmentDB.setup_job_id.in_(other_ids),
+                            SetupQuantityAdjustmentDB.warehouse_discrepancy_adjustment != 0
+                        ).all()
+                        for oa in other_adjs:
+                            old_oa_disc = oa.warehouse_discrepancy_adjustment or 0
+                            oa.warehouse_discrepancy_adjustment = 0
+                            other_setup = db.query(SetupDB).filter(SetupDB.id == oa.setup_job_id).first()
+                            if other_setup:
+                                other_setup.additional_quantity = (other_setup.additional_quantity or 0) - old_oa_disc
+
                     setup = db.query(SetupDB).filter(SetupDB.id == batch.setup_job_id).first()
                     if setup:
                         current_additional = setup.additional_quantity or 0
                         setup.additional_quantity = current_additional - old_wh_disc + new_wh_disc_total
 
-                        if lot:
-                            lot.total_planned_quantity = (lot.initial_planned_quantity or 0) + setup.additional_quantity
+                        max_additional = db.query(func.max(SetupDB.additional_quantity)).filter(
+                            SetupDB.lot_id == lot.id
+                        ).scalar() or 0
+                        lot.total_planned_quantity = (lot.initial_planned_quantity or 0) + max_additional
 
                         db.commit()
                         discrepancy_info = {
                             'warehouse_discrepancy': new_wh_disc_total,
                             'additional_quantity': setup.additional_quantity,
-                            'total_planned_quantity': lot.total_planned_quantity if lot else None,
+                            'total_planned_quantity': lot.total_planned_quantity,
                         }
                         logger.info(
-                            f"[warehouse_discrepancy] batch={batch_id} setup={batch.setup_job_id} "
+                            f"[warehouse_discrepancy] batch={batch_id} lot={lot.id} "
                             f"wh_disc={new_wh_disc_total} additional={setup.additional_quantity}"
                         )
             except Exception as disc_err:
