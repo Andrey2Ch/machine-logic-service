@@ -259,13 +259,14 @@ def update_batch_quantity(batch_id: int, payload: UpdateQuantityPayload, db: Ses
                             initial_planned = lot.initial_planned_quantity or 0
                             lot.total_planned_quantity = initial_planned + setup.additional_quantity
 
-            if delta > 0 and batch.parent_batch_id:
+            if delta != 0 and batch.parent_batch_id:
                 good_sibling = db.query(BatchDB).filter(
                     BatchDB.parent_batch_id == batch.parent_batch_id,
                     BatchDB.current_location == 'good'
                 ).first()
                 if good_sibling:
-                    good_sibling.current_quantity = (good_sibling.current_quantity or 0) + delta
+                    new_good_qty = (good_sibling.current_quantity or 0) + delta
+                    good_sibling.current_quantity = max(0, new_good_qty)
     else:
         batch.recounted_quantity = payload.new_quantity
     
