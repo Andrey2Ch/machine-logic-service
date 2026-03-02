@@ -2548,20 +2548,41 @@ async def accept_batch_on_warehouse(batch_id: int, payload: AcceptWarehousePaylo
         db.refresh(batch)
 
         # --- Warehouse discrepancy → additional_quantity ---
-        # Calculate at LOT level (not setup) to match analytics "Принято X из Y"
+        # Formula matches analytics "Принято X из Y":
+        #   X = SUM(recounted_quantity) for warehouse-received parent batches
+        #   Y = machine counter reading at time of last warehouse acceptance
+        #   discrepancy = max(0, Y - X)
         discrepancy_info = {}
         if batch.setup_job_id and lot:
             try:
-                raw_disc = db.query(
-                    func.coalesce(func.sum(
-                        func.coalesce(BatchDB.current_quantity, 0) - BatchDB.recounted_quantity
-                    ), 0)
+                total_recounted = db.query(
+                    func.coalesce(func.sum(BatchDB.recounted_quantity), 0)
                 ).filter(
                     BatchDB.lot_id == lot.id,
                     BatchDB.recounted_quantity.isnot(None),
                     BatchDB.parent_batch_id.is_(None),
                 ).scalar()
-                new_wh_disc_total = max(0, raw_disc)
+
+                declared_result = db.execute(text("""
+                    SELECT COALESCE(
+                        (SELECT mr.reading 
+                         FROM machine_readings mr
+                         JOIN setup_jobs sj ON mr.setup_job_id = sj.id
+                         WHERE sj.lot_id = :lot_id 
+                           AND mr.setup_job_id IS NOT NULL
+                           AND mr.created_at <= (
+                               SELECT MAX(warehouse_received_at) 
+                               FROM batches 
+                               WHERE lot_id = :lot_id 
+                                 AND warehouse_received_at IS NOT NULL
+                           )
+                         ORDER BY mr.created_at DESC
+                         LIMIT 1), 
+                        0) as declared
+                """), {"lot_id": lot.id}).fetchone()
+                declared = declared_result.declared if declared_result else 0
+
+                new_wh_disc_total = max(0, declared - total_recounted)
 
                 adj = db.query(SetupQuantityAdjustmentDB).filter(
                     SetupQuantityAdjustmentDB.setup_job_id == batch.setup_job_id
@@ -2571,7 +2592,6 @@ async def accept_batch_on_warehouse(batch_id: int, payload: AcceptWarehousePaylo
                     old_wh_disc = adj.warehouse_discrepancy_adjustment or 0
                     adj.warehouse_discrepancy_adjustment = new_wh_disc_total
 
-                    # Zero out warehouse_discrepancy on OTHER setups for this lot
                     other_setup_ids = db.query(SetupDB.id).filter(
                         SetupDB.lot_id == lot.id,
                         SetupDB.id != batch.setup_job_id
@@ -2602,11 +2622,14 @@ async def accept_batch_on_warehouse(batch_id: int, payload: AcceptWarehousePaylo
                         db.commit()
                         discrepancy_info = {
                             'warehouse_discrepancy': new_wh_disc_total,
+                            'declared': declared,
+                            'total_recounted': total_recounted,
                             'additional_quantity': setup.additional_quantity,
                             'total_planned_quantity': lot.total_planned_quantity,
                         }
                         logger.info(
                             f"[warehouse_discrepancy] batch={batch_id} lot={lot.id} "
+                            f"declared={declared} recounted={total_recounted} "
                             f"wh_disc={new_wh_disc_total} additional={setup.additional_quantity}"
                         )
             except Exception as disc_err:
