@@ -43,7 +43,7 @@ from enum import Enum
 from sqlalchemy.orm import Session, aliased, selectinload
 from fastapi import Depends, Body
 from src.database import Base, initialize_database, get_db_session
-from src.models.models import SetupDB, ReadingDB, MachineDB, EmployeeDB, PartDB, LotDB, BatchDB, CardDB, MaterialGroupDB, MaterialSubgroupDB, WarehouseMovementDB, LotMaterialDB
+from src.models.models import SetupDB, ReadingDB, MachineDB, EmployeeDB, PartDB, LotDB, BatchDB, CardDB, MaterialGroupDB, MaterialSubgroupDB, WarehouseMovementDB, LotMaterialDB, SetupQuantityAdjustmentDB
 from datetime import datetime, timezone, date, timedelta
 from src.utils.sheets_handler import save_to_sheets
 import asyncio
@@ -2547,14 +2547,53 @@ async def accept_batch_on_warehouse(batch_id: int, payload: AcceptWarehousePaylo
         db.commit()
         db.refresh(batch)
 
-        # Если была создана задача уведомления, дожидаемся ее (опционально, но безопасно)
-        # Либо можно не ждать, если не критично, что запрос завершится до отправки уведомления
-        # if notification_task:
-        #     await notification_task 
+        # --- Warehouse discrepancy → additional_quantity (delta pattern, same as defect_adjustment) ---
+        discrepancy_info = {}
+        if batch.setup_job_id:
+            try:
+                new_wh_disc_total = db.query(
+                    func.coalesce(func.sum(
+                        func.greatest(0, func.coalesce(BatchDB.current_quantity, 0) - BatchDB.recounted_quantity)
+                    ), 0)
+                ).filter(
+                    BatchDB.setup_job_id == batch.setup_job_id,
+                    BatchDB.recounted_quantity.isnot(None),
+                    BatchDB.parent_batch_id.is_(None),
+                ).scalar()
+
+                adj = db.query(SetupQuantityAdjustmentDB).filter(
+                    SetupQuantityAdjustmentDB.setup_job_id == batch.setup_job_id
+                ).first()
+
+                if adj:
+                    old_wh_disc = adj.warehouse_discrepancy_adjustment or 0
+                    adj.warehouse_discrepancy_adjustment = new_wh_disc_total
+
+                    setup = db.query(SetupDB).filter(SetupDB.id == batch.setup_job_id).first()
+                    if setup:
+                        current_additional = setup.additional_quantity or 0
+                        setup.additional_quantity = current_additional - old_wh_disc + new_wh_disc_total
+
+                        if lot:
+                            lot.total_planned_quantity = (lot.initial_planned_quantity or 0) + setup.additional_quantity
+
+                        db.commit()
+                        discrepancy_info = {
+                            'warehouse_discrepancy': new_wh_disc_total,
+                            'additional_quantity': setup.additional_quantity,
+                            'total_planned_quantity': lot.total_planned_quantity if lot else None,
+                        }
+                        logger.info(
+                            f"[warehouse_discrepancy] batch={batch_id} setup={batch.setup_job_id} "
+                            f"wh_disc={new_wh_disc_total} additional={setup.additional_quantity}"
+                        )
+            except Exception as disc_err:
+                logger.error(f"[warehouse_discrepancy] Failed for batch {batch_id}: {disc_err}", exc_info=True)
+                db.rollback()
         
         logger.info(f"Batch {batch_id} accepted on warehouse by employee {payload.warehouse_employee_id} with quantity {payload.recounted_quantity}")
         
-        return {'success': True, 'message': 'Batch accepted successfully'}
+        return {'success': True, 'message': 'Batch accepted successfully', 'discrepancy': discrepancy_info}
 
     except HTTPException as http_exc:
         # Не откатываем здесь, так как db.commit() еще не было или ошибка до него

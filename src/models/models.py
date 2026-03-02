@@ -234,6 +234,7 @@ class SetupQuantityAdjustmentDB(Base):
     auto_adjustment = Column(Integer, nullable=True)
     manual_adjustment = Column(Integer, nullable=True)
     defect_adjustment = Column(Integer, nullable=True)
+    warehouse_discrepancy_adjustment = Column(Integer, nullable=True, default=0)
     total_adjustment = Column(Integer, nullable=True)
 
 class ReadingDB(Base):
