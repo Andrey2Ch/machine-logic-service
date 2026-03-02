@@ -2551,15 +2551,16 @@ async def accept_batch_on_warehouse(batch_id: int, payload: AcceptWarehousePaylo
         discrepancy_info = {}
         if batch.setup_job_id:
             try:
-                new_wh_disc_total = db.query(
+                raw_disc = db.query(
                     func.coalesce(func.sum(
-                        func.greatest(0, func.coalesce(BatchDB.current_quantity, 0) - BatchDB.recounted_quantity)
+                        func.coalesce(BatchDB.current_quantity, 0) - BatchDB.recounted_quantity
                     ), 0)
                 ).filter(
                     BatchDB.setup_job_id == batch.setup_job_id,
                     BatchDB.recounted_quantity.isnot(None),
                     BatchDB.parent_batch_id.is_(None),
                 ).scalar()
+                new_wh_disc_total = max(0, raw_disc)
 
                 adj = db.query(SetupQuantityAdjustmentDB).filter(
                     SetupQuantityAdjustmentDB.setup_job_id == batch.setup_job_id
