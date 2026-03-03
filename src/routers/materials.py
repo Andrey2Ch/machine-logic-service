@@ -1467,6 +1467,90 @@ def get_lot_materials(
         return []
 
 
+@router.get("/lot-materials/material-hours-bulk")
+def get_material_hours_bulk(
+    db: Session = Depends(get_db_session)
+):
+    """
+    Bulk-расчёт времени материала для всех активных (не закрытых) lot_materials.
+    MTConnect вызывается один раз, результат переиспользуется для всех записей.
+    """
+    active_lms = (
+        db.query(LotMaterialDB)
+        .filter(LotMaterialDB.closed_at == None)
+        .all()
+    )
+    if not active_lms:
+        return []
+
+    lot_ids = list({lm.lot_id for lm in active_lms})
+    lots = {lot.id: lot for lot in db.query(LotDB).filter(LotDB.id.in_(lot_ids)).all()}
+
+    part_ids = list({lots[lid].part_id for lid in lot_ids if lid in lots and lots[lid].part_id})
+    parts = {p.id: p for p in db.query(PartDB).filter(PartDB.id.in_(part_ids)).all()} if part_ids else {}
+
+    machine_ids = list({lm.machine_id for lm in active_lms if lm.machine_id})
+    machines = {m.id: m for m in db.query(MachineDB).filter(MachineDB.id.in_(machine_ids)).all()} if machine_ids else {}
+
+    mtconnect_counts = _fetch_mtconnect_counts()
+
+    results = []
+    for lm in active_lms:
+        lot = lots.get(lm.lot_id)
+        part = parts.get(lot.part_id) if lot and lot.part_id else None
+        machine = machines.get(lm.machine_id) if lm.machine_id else None
+
+        bar_length_mm = lm.bar_length_mm
+        blade_width_mm = lm.blade_width_mm or (machine.material_blade_width_mm if machine else None) or DEFAULT_BLADE_WIDTH_MM
+        facing_allowance_mm = lm.facing_allowance_mm or (machine.material_facing_allowance_mm if machine else None) or DEFAULT_FACING_ALLOWANCE_MM
+        min_remainder_mm = lm.min_remainder_mm or (machine.material_min_remainder_mm if machine else None) or DEFAULT_MIN_REMAINDER_MM
+        net_issued = (lm.issued_bars or 0) - (lm.returned_bars or 0) - (lm.defect_bars or 0)
+
+        cycle_time_sec = _get_cycle_time_seconds(
+            db=db,
+            lot_id=lm.lot_id,
+            machine_id=lm.machine_id,
+            part_id=lot.part_id if lot else None,
+        )
+        part_length_mm = part.part_length if part else None
+
+        produced = _get_produced_for_lot(
+            db=db,
+            lot_id=lm.lot_id,
+            fallback_machine_name=machine.name if machine else None,
+            mtconnect_counts=mtconnect_counts,
+        )
+
+        hours = None
+        if produced is not None:
+            hours = _calculate_hours_by_material(
+                net_issued_bars=net_issued,
+                part_length_mm=part_length_mm,
+                bar_length_mm=bar_length_mm,
+                blade_width_mm=blade_width_mm,
+                facing_allowance_mm=facing_allowance_mm,
+                min_remainder_mm=min_remainder_mm,
+                cycle_time_sec=cycle_time_sec,
+                produced_parts=produced,
+            )
+
+        results.append({
+            "lot_material_id": lm.id,
+            "lot_id": lm.lot_id,
+            "lot_number": lot.lot_number if lot else None,
+            "machine_id": lm.machine_id,
+            "machine_name": machine.name if machine else None,
+            "part_length_mm": part_length_mm,
+            "bar_length_mm": bar_length_mm,
+            "cycle_time_sec": cycle_time_sec,
+            "net_issued_bars": net_issued,
+            "produced_parts": produced,
+            "hours_remaining": hours,
+        })
+
+    return results
+
+
 @router.get("/lot-materials/{id}", response_model=LotMaterialDetailOut)
 def get_lot_material_detail(
     id: int,
@@ -1584,90 +1668,6 @@ def link_source_movement(
         "lot_material_id": lot_material.id,
         "source_movement_id": movement.movement_id,
     }
-
-
-@router.get("/lot-materials/material-hours-bulk")
-def get_material_hours_bulk(
-    db: Session = Depends(get_db_session)
-):
-    """
-    Bulk-расчёт времени материала для всех активных (не закрытых) lot_materials.
-    MTConnect вызывается один раз, результат переиспользуется для всех записей.
-    """
-    active_lms = (
-        db.query(LotMaterialDB)
-        .filter(LotMaterialDB.closed_at == None)
-        .all()
-    )
-    if not active_lms:
-        return []
-
-    lot_ids = list({lm.lot_id for lm in active_lms})
-    lots = {lot.id: lot for lot in db.query(LotDB).filter(LotDB.id.in_(lot_ids)).all()}
-
-    part_ids = list({lots[lid].part_id for lid in lot_ids if lid in lots and lots[lid].part_id})
-    parts = {p.id: p for p in db.query(PartDB).filter(PartDB.id.in_(part_ids)).all()} if part_ids else {}
-
-    machine_ids = list({lm.machine_id for lm in active_lms if lm.machine_id})
-    machines = {m.id: m for m in db.query(MachineDB).filter(MachineDB.id.in_(machine_ids)).all()} if machine_ids else {}
-
-    mtconnect_counts = _fetch_mtconnect_counts()
-
-    results = []
-    for lm in active_lms:
-        lot = lots.get(lm.lot_id)
-        part = parts.get(lot.part_id) if lot and lot.part_id else None
-        machine = machines.get(lm.machine_id) if lm.machine_id else None
-
-        bar_length_mm = lm.bar_length_mm
-        blade_width_mm = lm.blade_width_mm or (machine.material_blade_width_mm if machine else None) or DEFAULT_BLADE_WIDTH_MM
-        facing_allowance_mm = lm.facing_allowance_mm or (machine.material_facing_allowance_mm if machine else None) or DEFAULT_FACING_ALLOWANCE_MM
-        min_remainder_mm = lm.min_remainder_mm or (machine.material_min_remainder_mm if machine else None) or DEFAULT_MIN_REMAINDER_MM
-        net_issued = (lm.issued_bars or 0) - (lm.returned_bars or 0) - (lm.defect_bars or 0)
-
-        cycle_time_sec = _get_cycle_time_seconds(
-            db=db,
-            lot_id=lm.lot_id,
-            machine_id=lm.machine_id,
-            part_id=lot.part_id if lot else None,
-        )
-        part_length_mm = part.part_length if part else None
-
-        produced = _get_produced_for_lot(
-            db=db,
-            lot_id=lm.lot_id,
-            fallback_machine_name=machine.name if machine else None,
-            mtconnect_counts=mtconnect_counts,
-        )
-
-        hours = None
-        if produced is not None:
-            hours = _calculate_hours_by_material(
-                net_issued_bars=net_issued,
-                part_length_mm=part_length_mm,
-                bar_length_mm=bar_length_mm,
-                blade_width_mm=blade_width_mm,
-                facing_allowance_mm=facing_allowance_mm,
-                min_remainder_mm=min_remainder_mm,
-                cycle_time_sec=cycle_time_sec,
-                produced_parts=produced,
-            )
-
-        results.append({
-            "lot_material_id": lm.id,
-            "lot_id": lm.lot_id,
-            "lot_number": lot.lot_number if lot else None,
-            "machine_id": lm.machine_id,
-            "machine_name": machine.name if machine else None,
-            "part_length_mm": part_length_mm,
-            "bar_length_mm": bar_length_mm,
-            "cycle_time_sec": cycle_time_sec,
-            "net_issued_bars": net_issued,
-            "produced_parts": produced,
-            "hours_remaining": hours,
-        })
-
-    return results
 
 
 @router.get("/lot-materials/{id}/material-hours")
