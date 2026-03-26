@@ -20,7 +20,7 @@ from typing import List, Optional
 import json
 import httpx
 
-from src.database import get_ai_db_session, is_ai_database_available
+from src.database import get_ai_db_session, is_ai_database_available, get_db_session
 
 # Path to schema documentation
 SCHEMA_DOCS_PATH = Path(__file__).parent.parent / "text2sql" / "docs" / "schema_docs.md"
@@ -971,6 +971,157 @@ async def reseed_sql_examples(db: Session = Depends(get_ai_db_session)):
         "errors": errors,
         "results": results
     }
+
+
+# ============================================================================
+# Admin: Load Knowledge Base
+# ============================================================================
+
+def _sha256(content: str) -> str:
+    import hashlib as _hl
+    return _hl.sha256(content.encode()).hexdigest()
+
+
+async def _upsert_knowledge_doc(
+    ai_db: Session,
+    doc_type: str,
+    title: str,
+    content: str,
+    metadata: dict,
+) -> str:
+    """Upsert one knowledge document. Returns 'created'/'updated'/'unchanged'."""
+    content_hash = _sha256(content)
+
+    existing = ai_db.execute(
+        text("SELECT id, content_hash FROM ai_knowledge_documents WHERE document_type = :t AND title = :ti"),
+        {"t": doc_type, "ti": title}
+    ).fetchone()
+
+    if existing and existing.content_hash == content_hash:
+        return "unchanged"
+
+    embedding = await get_embedding(content[:8000])
+    embedding_str = f"[{','.join(map(str, embedding))}]"
+
+    if existing:
+        ai_db.execute(text("""
+            UPDATE ai_knowledge_documents
+            SET content = :c, content_hash = :ch, embedding = CAST(:e AS vector),
+                metadata = CAST(:m AS jsonb), updated_at = NOW()
+            WHERE id = :id
+        """), {"c": content, "ch": content_hash, "e": embedding_str, "m": json.dumps(metadata), "id": existing.id})
+        ai_db.commit()
+        return "updated"
+    else:
+        ai_db.execute(text("""
+            INSERT INTO ai_knowledge_documents (document_type, title, content, content_hash, embedding, metadata)
+            VALUES (:t, :ti, :c, :ch, CAST(:e AS vector), CAST(:m AS jsonb))
+        """), {"t": doc_type, "ti": title, "c": content, "ch": content_hash, "e": embedding_str, "m": json.dumps(metadata)})
+        ai_db.commit()
+        return "created"
+
+
+@router.post("/admin/load-knowledge")
+async def admin_load_knowledge(
+    ai_db: Session = Depends(get_ai_db_session),
+    main_db: Session = Depends(get_db_session),
+):
+    """
+    Загружает базу знаний AI в ai_knowledge_documents.
+    Запускать после деплоя или изменения schema_docs / stoppage_reasons.
+    - schema_docs.md  → document_type='schema_md'
+    - stoppage_reasons (из основной БД) → document_type='stoppage_reasons'
+    """
+    stats = {"schema_md": {}, "stoppage_reasons": {}}
+
+    # ------------------------------------------------------------------
+    # 1. schema_docs.md — разбиваем по ## на секции
+    # ------------------------------------------------------------------
+    schema_counts = {"created": 0, "updated": 0, "unchanged": 0}
+
+    if SCHEMA_DOCS_PATH.exists():
+        content_full = SCHEMA_DOCS_PATH.read_text(encoding="utf-8")
+        sections = []
+        current = {"title": "schema_docs", "lines": []}
+        for line in content_full.splitlines():
+            if line.startswith("## "):
+                if "\n".join(current["lines"]).strip():
+                    sections.append(current)
+                current = {"title": line[3:].strip(), "lines": [line]}
+            else:
+                current["lines"].append(line)
+        if "\n".join(current["lines"]).strip():
+            sections.append(current)
+
+        for sec in sections:
+            sec_content = "\n".join(sec["lines"]).strip()
+            if len(sec_content) < 50:
+                continue
+            result = await _upsert_knowledge_doc(
+                ai_db, "schema_md", sec["title"], sec_content,
+                {"source": "schema_docs.md"}
+            )
+            schema_counts[result] += 1
+    else:
+        schema_counts["error"] = "schema_docs.md not found"
+
+    stats["schema_md"] = schema_counts
+
+    # ------------------------------------------------------------------
+    # 2. stoppage_reasons из основной БД
+    # ------------------------------------------------------------------
+    try:
+        rows = main_db.execute(text("""
+            SELECT code, category, name_he, name_ru, name_en
+            FROM stoppage_reasons WHERE is_active = TRUE
+            ORDER BY category, code
+        """)).fetchall()
+
+        categories = {
+            "machine": ("Станок (machine)", "Причины простоя станка"),
+            "part": ("Брак (part)", "Причины брака деталей"),
+            "work_and_material": ("Работа и материал", "Начало/конец смены, материал"),
+        }
+
+        by_cat: dict = {}
+        for r in rows:
+            by_cat.setdefault(r.category, []).append(r)
+
+        content_parts = [
+            "# Справочник причин простоя и брака (stoppage_reasons)",
+            "",
+            "Таблица `stoppage_reasons`, колонка `code` — числовой код.",
+            "",
+        ]
+        for cat_key, (cat_title, cat_desc) in categories.items():
+            if cat_key not in by_cat:
+                continue
+            content_parts += [f"## {cat_title}", "", cat_desc, "", "| code | RU | EN |", "|------|-----|-----|"]
+            for r in by_cat[cat_key]:
+                content_parts.append(f"| {r.code} | {r.name_ru} | {r.name_en} |")
+            content_parts.append("")
+
+        sr_content = "\n".join(content_parts)
+        sr_result = await _upsert_knowledge_doc(
+            ai_db,
+            "stoppage_reasons",
+            "stoppage_reasons: коды причин простоя и брака",
+            sr_content,
+            {"source": "database", "table": "stoppage_reasons", "row_count": len(rows)},
+        )
+        stats["stoppage_reasons"] = {"status": sr_result, "rows": len(rows)}
+
+    except Exception as e:
+        stats["stoppage_reasons"] = {"error": str(e)}
+
+    # ------------------------------------------------------------------
+    # Summary
+    # ------------------------------------------------------------------
+    total = ai_db.execute(
+        text("SELECT COUNT(*) FROM ai_knowledge_documents WHERE is_active = TRUE")
+    ).scalar()
+
+    return {"status": "done", "stats": stats, "total_documents": total}
 
 
 # ============================================================================
