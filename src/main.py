@@ -120,6 +120,10 @@ async def startup_event():
     # Запуск SSE dashboard collector (фоновый сбор данных)
     from src.services.dashboard_collector import dashboard_collector_task
     asyncio.create_task(dashboard_collector_task(get_db_session))
+
+    # Запуск Downtime Supervisor (мониторинг простоев станков)
+    from src.services.downtime_supervisor import downtime_supervisor_task
+    asyncio.create_task(downtime_supervisor_task(get_db_session))
     
     # Настройка планировщика для автоматических выходов
     async def run_auto_checkout_task():
