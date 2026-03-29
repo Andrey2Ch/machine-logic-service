@@ -135,9 +135,17 @@ async def _check_once(get_db_session) -> None:
 async def downtime_supervisor_task(get_db_session) -> None:
     """Фоновая задача супервизора простоев. Запускается при старте приложения."""
     import os
-    # Запускаем только в одном воркере чтобы не дублировать сообщения
-    if os.getpid() % 8 != 1:
-        print(f"[DowntimeSupervisor] PID={os.getpid()} — супервизор пропущен (не главный воркер)")
+    import tempfile
+
+    # Используем файл-лок чтобы гарантировать запуск только в одном воркере
+    lock_path = os.path.join(tempfile.gettempdir(), "downtime_supervisor.lock")
+    try:
+        # Открываем файл для эксклюзивной записи (O_CREAT | O_EXCL — атомарно)
+        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+    except FileExistsError:
+        print(f"[DowntimeSupervisor] PID={os.getpid()} — супервизор уже запущен в другом воркере, пропускаем")
         return
 
     mode = "DRY RUN (сообщения не отправляются)" if DRY_RUN else "LIVE"
@@ -151,10 +159,17 @@ async def downtime_supervisor_task(get_db_session) -> None:
     # Первая проверка — через 30 сек после старта (даём приложению подняться)
     await asyncio.sleep(30)
 
-    while True:
-        try:
-            await _check_once(get_db_session)
-        except Exception as e:
-            logger.error(f"[DowntimeSupervisor] Ошибка в цикле проверки: {e}", exc_info=True)
+    try:
+        while True:
+            try:
+                await _check_once(get_db_session)
+            except Exception as e:
+                logger.error(f"[DowntimeSupervisor] Ошибка в цикле проверки: {e}", exc_info=True)
 
-        await asyncio.sleep(CHECK_INTERVAL_SEC)
+            await asyncio.sleep(CHECK_INTERVAL_SEC)
+    finally:
+        # Освобождаем лок при завершении задачи
+        try:
+            os.unlink(lock_path)
+        except OSError:
+            pass
