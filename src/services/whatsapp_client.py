@@ -57,6 +57,7 @@ WHATSAPP_GROUP_OPERATORS_B = os.getenv('WHATSAPP_GROUP_OPERATORS_B', '')  # См
 WHATSAPP_GROUP_QA = os.getenv('WHATSAPP_GROUP_QA', '')  # Бикорет (ОТК)
 WHATSAPP_GROUP_ADMIN = os.getenv('WHATSAPP_GROUP_ADMIN', '')  # Руководство (optional)
 WHATSAPP_GROUP_VIEWER = os.getenv('WHATSAPP_GROUP_VIEWER', '')  # Viewer (мониторинг)
+WHATSAPP_GROUP_AI_MANAGER = os.getenv('WHATSAPP_GROUP_AI_MANAGER', '')  # AI Downtime Monitor
 
 # Автоматически добавляем протокол, если отсутствует
 if WHATSAPP_ENABLED and WHATSAPP_API_URL and not WHATSAPP_API_URL.startswith(('http://', 'https://')):

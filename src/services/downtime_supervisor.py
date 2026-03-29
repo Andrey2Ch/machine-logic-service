@@ -86,15 +86,12 @@ async def _send_idle_alert(
         return
 
     try:
-        from src.services.whatsapp_client import send_whatsapp_to_role
-        db = next(get_db_session())
-        try:
-            sent = await send_whatsapp_to_role(
-                db, role_id=1, message=message, notification_type='downtime_idle'
-            )
-            logger.info(f"[DowntimeSupervisor] WhatsApp отправлен в {sent} группу(ы) для {machine_name}")
-        finally:
-            db.close()
+        from src.services.whatsapp_client import send_whatsapp_to_group, WHATSAPP_GROUP_AI_MANAGER
+        if not WHATSAPP_GROUP_AI_MANAGER:
+            logger.warning("[DowntimeSupervisor] WHATSAPP_GROUP_AI_MANAGER не задан — сообщение не отправлено")
+            return
+        await send_whatsapp_to_group(WHATSAPP_GROUP_AI_MANAGER, message)
+        logger.info(f"[DowntimeSupervisor] WhatsApp отправлен в AI Monitor для {machine_name}")
     except Exception as e:
         logger.error(f"[DowntimeSupervisor] Ошибка отправки WhatsApp: {e}", exc_info=True)
 
