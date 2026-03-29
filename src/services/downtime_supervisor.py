@@ -82,7 +82,7 @@ async def _send_idle_alert(
     )
 
     if DRY_RUN:
-        logger.info(f"[DowntimeSupervisor] DRY RUN — алерт НЕ отправлен: {message!r}")
+        print(f"[DowntimeSupervisor] DRY RUN — алерт НЕ отправлен: {message!r}")
         return
 
     try:
@@ -130,7 +130,7 @@ async def _check_once(get_db_session) -> None:
 async def downtime_supervisor_task(get_db_session) -> None:
     """Фоновая задача супервизора простоев. Запускается при старте приложения."""
     mode = "DRY RUN (сообщения не отправляются)" if DRY_RUN else "LIVE"
-    logger.info(
+    print(
         f"[DowntimeSupervisor] Запущен [{mode}] | "
         f"порог={IDLE_THRESHOLD_MIN}мин | "
         f"cooldown={ALERT_COOLDOWN_MIN}мин | "

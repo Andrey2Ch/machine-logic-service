@@ -124,6 +124,7 @@ async def startup_event():
     # Запуск Downtime Supervisor (мониторинг простоев станков)
     from src.services.downtime_supervisor import downtime_supervisor_task
     asyncio.create_task(downtime_supervisor_task(get_db_session))
+    print("[DowntimeSupervisor] Task created in startup_event")
     
     # Настройка планировщика для автоматических выходов
     async def run_auto_checkout_task():
