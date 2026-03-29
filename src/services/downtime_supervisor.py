@@ -108,6 +108,7 @@ async def _check_once(get_db_session) -> None:
     for machine in machines:
         data = machine.get('data', {})
         ui_mode = data.get('uiMode')
+        setup_status = data.get('setupStatus', 'idle')
         idle_min = data.get('idleTimeMinutes', 0) or 0
         name = machine.get('name', 'Unknown')
         operator = data.get('operatorName')
@@ -117,6 +118,10 @@ async def _check_once(get_db_session) -> None:
             if name in _last_alert_sent and ui_mode == 'working':
                 del _last_alert_sent[name]
                 logger.debug(f"[DowntimeSupervisor] {name} вернулся в работу — cooldown сброшен")
+            continue
+
+        # Пропускаем станки без активной наладки (серая рамка — нет работы)
+        if setup_status == 'idle':
             continue
 
         if _should_alert(name, idle_min):
@@ -129,6 +134,12 @@ async def _check_once(get_db_session) -> None:
 
 async def downtime_supervisor_task(get_db_session) -> None:
     """Фоновая задача супервизора простоев. Запускается при старте приложения."""
+    import os
+    # Запускаем только в одном воркере чтобы не дублировать сообщения
+    if os.getpid() % 8 != 1:
+        print(f"[DowntimeSupervisor] PID={os.getpid()} — супервизор пропущен (не главный воркер)")
+        return
+
     mode = "DRY RUN (сообщения не отправляются)" if DRY_RUN else "LIVE"
     print(
         f"[DowntimeSupervisor] Запущен [{mode}] | "
