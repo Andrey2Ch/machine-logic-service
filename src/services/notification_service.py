@@ -318,30 +318,19 @@ async def send_setup_approval_notifications(db: Session, setup_id: int, notifica
                 free_machine_message, 
                 notification_type="machine_free"
             )
-            # Viewer - личные (TG + WhatsApp)
-            viewer_free_counts = await _notify_viewer_personal(own_db, free_machine_message, notification_type="machine_free")
             summary["telegram_targets"] += (
                 machinist_counts["telegram_targets"]
                 + operator_free_counts["telegram_targets"]
-                + viewer_free_counts["telegram_targets"]
             )
             summary["telegram_sent"] += (
                 machinist_counts["telegram_sent"]
                 + operator_free_counts["telegram_sent"]
-                + viewer_free_counts["telegram_sent"]
             )
             summary["whatsapp_sent"] += (
                 machinist_counts["whatsapp_sent"]
                 + operator_free_counts["whatsapp_sent"]
-                + viewer_free_counts["whatsapp_sent"]
             )
-            logger.info(f"Sent 'machine free' notification to machinists + operators + viewers for machine {machine_name}")
-
-        # 🔔 Уведомляем Viewer'ов (личные TG + личные WhatsApp)
-        viewer_counts = await _notify_viewer_personal(own_db, base_message, notification_type=notif_type)
-        summary["telegram_targets"] += viewer_counts["telegram_targets"]
-        summary["telegram_sent"] += viewer_counts["telegram_sent"]
-        summary["whatsapp_sent"] += viewer_counts["whatsapp_sent"]
+            logger.info(f"Sent 'machine free' notification to machinists + operators for machine {machine_name}")
         
         logger.info(f"Successfully processed {notification_type} notifications for setup {setup_id}: {summary}")
         return summary
