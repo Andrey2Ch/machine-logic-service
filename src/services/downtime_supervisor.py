@@ -15,9 +15,13 @@ import asyncio
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import httpx
+import pytz
+
+_IL_TZ = pytz.timezone("Asia/Jerusalem")
+SHIFT_A_DAY_WEEK = int(os.getenv("SHIFT_A_DAY_WEEK", "2"))
 
 logger = logging.getLogger(__name__)
 
@@ -65,19 +69,66 @@ def _should_alert(machine_name: str, idle_minutes: float) -> bool:
     return True
 
 
+def _active_shift() -> Optional[str]:
+    """Определяет активную смену прямо сейчас (A или B), или None если нерабочее время."""
+    now = datetime.now(_IL_TZ)
+    hour = now.hour
+    iso_week = now.isocalendar()[1]
+    shift_a_is_day = ((iso_week - SHIFT_A_DAY_WEEK) % 2) == 0
+
+    # Дневная смена 6:00-18:00, ночная 18:00-6:00
+    is_day_time = 6 <= hour < 18
+    if is_day_time:
+        return "A" if shift_a_is_day else "B"
+    else:
+        return "B" if shift_a_is_day else "A"
+
+
+def _get_operator_for_machine(machine_name: str, shift: str, get_db_session) -> Optional[str]:
+    """Найти имя оператора закреплённого за станком в данную смену."""
+    try:
+        from sqlalchemy import text
+        db = next(get_db_session())
+        try:
+            row = db.execute(text("""
+                SELECT e.full_name
+                FROM employee_machine_assignments ema
+                JOIN employees e ON e.id = ema.employee_id
+                JOIN machines m ON m.id = ema.machine_id
+                WHERE m.name = :machine_name
+                  AND e.shift = :shift
+                  AND e.is_active = true
+                  AND e.role_id = 1
+                LIMIT 1
+            """), {"machine_name": machine_name, "shift": shift}).fetchone()
+            return row[0] if row else None
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning(f"[DowntimeSupervisor] Не удалось получить оператора для {machine_name}: {e}")
+        return None
+
+
 async def _send_idle_alert(
     machine_name: str,
     idle_minutes: float,
-    operator_name: Optional[str],
+    machinist_name: Optional[str],
     get_db_session,
 ) -> None:
     """Отправить уведомление о простое."""
     idle_rounded = round(idle_minutes)
+
+    # Получаем оператора из БД по смене
+    shift = _active_shift()
+    operator_name = _get_operator_for_machine(machine_name, shift, get_db_session) if shift else None
+
     operator_info = f"\n👤 Оператор: {operator_name}" if operator_name else ""
+    machinist_info = f"\n🔧 Наладчик: {machinist_name}" if machinist_name else ""
 
     message = (
         f"⚠️ *Станок {machine_name} простаивает уже {idle_rounded} мин.*"
-        f"{operator_info}\n"
+        f"{operator_info}"
+        f"{machinist_info}\n"
         f"Пожалуйста, укажи причину простоя."
     )
 
@@ -108,10 +159,9 @@ async def _check_once(get_db_session) -> None:
         setup_status = data.get('setupStatus', 'idle')
         idle_min = data.get('idleTimeMinutes', 0) or 0
         name = machine.get('name', 'Unknown')
-        operator = data.get('operatorName')
+        machinist = data.get('operatorName')
 
         if ui_mode != 'idle':
-            # Если станок вышел из idle — сбрасываем cooldown чтобы при следующем idle алерт пришёл сразу
             if name in _last_alert_sent and ui_mode == 'working':
                 del _last_alert_sent[name]
                 logger.debug(f"[DowntimeSupervisor] {name} вернулся в работу — cooldown сброшен")
@@ -122,8 +172,8 @@ async def _check_once(get_db_session) -> None:
             continue
 
         if _should_alert(name, idle_min):
-            logger.info(f"[DowntimeSupervisor] IDLE ALERT: {name} = {idle_min:.1f} мин, оператор={operator}")
-            await _send_idle_alert(name, idle_min, operator, get_db_session)
+            logger.info(f"[DowntimeSupervisor] IDLE ALERT: {name} = {idle_min:.1f} мин, наладчик={machinist}")
+            await _send_idle_alert(name, idle_min, machinist, get_db_session)
             _last_alert_sent[name] = datetime.now(timezone.utc)
         else:
             logger.debug(f"[DowntimeSupervisor] {name}: idle={idle_min:.1f} мин — пропущен (порог или cooldown)")
