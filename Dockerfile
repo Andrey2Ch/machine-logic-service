@@ -55,6 +55,8 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 
 # Copy application files
 COPY src/ ./src/
+COPY scripts/ ./scripts/
+COPY migrations/ ./migrations/
 COPY entrypoint.sh ./
 RUN dos2unix entrypoint.sh && chmod +x entrypoint.sh
 
