@@ -7,5 +7,12 @@ PORT=${PORT:-8000}
 mkdir -p /app/drawings
 chmod 777 /app/drawings
 
+# Применить новые миграции перед стартом
+python scripts/apply_migrations.py
+if [ $? -ne 0 ]; then
+    echo "Migration failed — aborting startup"
+    exit 1
+fi
+
 # Запустить uvicorn с несколькими workers для параллельной обработки
 exec uvicorn src.main:app --host 0.0.0.0 --port $PORT --workers 8 
