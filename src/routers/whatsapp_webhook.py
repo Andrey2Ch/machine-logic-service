@@ -1,16 +1,16 @@
 """
 WhatsApp incoming message webhook.
 
-GOWA (go-whatsapp-web-multidevice) posts incoming messages here.
-We handle operator/machinist replies to downtime alerts.
+GOWA posts incoming messages here.
+Handles operator/machinist replies to downtime alerts and follow-ups.
 
-Operator flow:
-  - Writes "8" → matched by phone → their assigned machine → reason recorded
+Operator:   writes "8"           → matched by phone → machine → reason recorded
+Machinist:  reply on alert + "8" → machine from quoted text → reason recorded
 
-Machinist flow:
-  - Replies (quoted reply) to an alert → machine extracted from quoted text → reason recorded
-
-Configure in GOWA: WHATSAPP_WEBHOOK=https://<host>/webhooks/whatsapp
+Follow-up responses (after LLM follow-up message):
+  "1" → yes, fixed  → monitoring continues
+  "0" → no, not yet → another follow-up in 15 min
+  code → new reason → recorded, follow-up rescheduled
 """
 
 import asyncio
@@ -28,52 +28,43 @@ from src.services.whatsapp_client import WHATSAPP_GROUP_AI_MANAGER, send_whatsap
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/webhooks", tags=["Webhooks"])
 
+# machine_name → True if we're waiting for a 0/1 follow-up response
+_awaiting_followup: Dict[str, bool] = {}
+
 
 # ─── helpers ────────────────────────────────────────────────────────────────
 
 def _normalize_phone(raw: str) -> str:
-    """'972501234567@s.whatsapp.net' → '972501234567'"""
     return re.sub(r'[^0-9]', '', raw.split('@')[0])
 
 
 def _parse_payload(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """
-    Parse go-whatsapp-web-multidevice webhook payload.
-    Returns dict with: sender_phone, group_jid, text, quoted_body (or None).
-    """
     if payload.get('event') != 'message':
         return None
-
     inner = payload.get('payload', {})
     if not isinstance(inner, dict):
         return None
-
     if inner.get('is_from_me', False):
         return None
-
     sender = inner.get('from', '')
     chat_id = inner.get('chat_id', '')
     body = inner.get('body', '').strip()
-
     if not sender or not body:
         return None
-
     return {
         'sender_phone': _normalize_phone(sender),
         'group_jid': chat_id,
         'text': body,
-        'quoted_body': inner.get('quoted_body'),  # None if not a reply
+        'quoted_body': inner.get('quoted_body'),
     }
 
 
 def _extract_machine_from_alert(text: str) -> Optional[str]:
-    """Extract machine name from alert message body e.g. 'Станок SR-10 простаивает'"""
     m = re.search(r'Станок\s+(\S+)\s+простаивает', text)
     return m.group(1) if m else None
 
 
 def _find_employee(phone: str, db: Session) -> Optional[Dict]:
-    """Find employee by normalized phone. Returns {id, full_name, role_id} or None."""
     row = db.execute(text("""
         SELECT id, full_name, role_id
         FROM employees
@@ -85,7 +76,6 @@ def _find_employee(phone: str, db: Session) -> Optional[Dict]:
 
 
 def _find_employee_machines(employee_id: int, db: Session) -> list[str]:
-    """Find all machines assigned to employee."""
     rows = db.execute(text("""
         SELECT m.name
         FROM employee_machine_assignments ema
@@ -96,7 +86,6 @@ def _find_employee_machines(employee_id: int, db: Session) -> list[str]:
 
 
 def _find_pending_alert(machine_name: str, db: Session) -> Optional[int]:
-    """Find most recent unresolved downtime log for machine (within 2 hours)."""
     row = db.execute(text("""
         SELECT id FROM machine_downtime_logs
         WHERE machine_name = :machine_name
@@ -109,119 +98,71 @@ def _find_pending_alert(machine_name: str, db: Session) -> Optional[int]:
 
 
 def _get_reason_name(code: int, db: Session) -> Optional[str]:
+    """Only returns name for active codes (inactive = reserved or duplicate)."""
     row = db.execute(
-        text("SELECT name_ru FROM stoppage_reasons WHERE code = :code"),
+        text("SELECT name_ru FROM stoppage_reasons WHERE code = :code AND is_active = true"),
         {"code": code}
     ).fetchone()
     return row[0] if row else None
 
 
-def _record_reason(
-    log_id: int,
-    reason_code: int,
-    reporter_phone: str,
-    reporter_name: str,
-    reporter_role: str,
-    db: Session,
-) -> None:
+def _record_reason(log_id: int, reason_code: int, reporter_phone: str,
+                   reporter_name: str, reporter_role: str, db: Session) -> None:
     db.execute(text("""
         UPDATE machine_downtime_logs
-        SET reason_code         = :code,
-            reason_reported_at  = NOW(),
-            reporter_phone      = :phone,
-            reporter_name       = :name,
-            reporter_role       = :role
+        SET reason_code        = :code,
+            reason_reported_at = NOW(),
+            reporter_phone     = :phone,
+            reporter_name      = :name,
+            reporter_role      = :role
         WHERE id = :id
-    """), {
-        "code": reason_code,
-        "phone": reporter_phone,
-        "name": reporter_name,
-        "role": reporter_role,
-        "id": log_id,
-    })
+    """), {"code": reason_code, "phone": reporter_phone,
+           "name": reporter_name, "role": reporter_role, "id": log_id})
     db.commit()
 
 
-# ─── LLM follow-up ──────────────────────────────────────────────────────────
+def _get_log_context(log_id: int, db: Session) -> Dict:
+    row = db.execute(text("""
+        SELECT operator_name, machinist_name, reason_code, machine_name,
+               EXTRACT(EPOCH FROM (NOW() - alert_sent_at))/60 AS idle_min
+        FROM machine_downtime_logs WHERE id = :id
+    """), {"id": log_id}).fetchone()
+    if not row:
+        return {}
+    return {
+        "operator_name": row[0],
+        "machinist_name": row[1],
+        "reason_code": row[2],
+        "machine_name": row[3],
+        "idle_minutes": int(row[4] or 0),
+    }
 
-async def _schedule_followup(
-    machine_name: str,
-    log_id: int,
-    reason_code: int,
-    reason_name: str,
-    operator_name: Optional[str],
-    delay_minutes: int = 20,
-) -> None:
-    """Wait delay_minutes, then check if machine is still idle and send LLM message."""
-    await asyncio.sleep(delay_minutes * 60)
 
-    # Check if machine is still idle via MTConnect
-    try:
-        import httpx
-        import os
-        mtc_url = os.getenv('MTCONNECT_API_URL', 'https://mtconnect-core-production.up.railway.app')
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(f"{mtc_url}/api/machines")
-            resp.raise_for_status()
-            data = resp.json()
-            machines = []
-            machines.extend(data.get('machines', {}).get('mtconnect', []))
-            machines.extend(data.get('machines', {}).get('adam', []))
-
-        still_idle = False
-        idle_minutes = 0
-        for m in machines:
-            if m.get('name') == machine_name:
-                if m.get('data', {}).get('uiMode') == 'idle':
-                    still_idle = True
-                    idle_minutes = m.get('data', {}).get('idleTimeMinutes', 0) or 0
-                break
-
-        if not still_idle:
-            logger.debug(f"[Followup] {machine_name} вернулся в работу — followup не нужен")
-            return
-
-    except Exception as e:
-        logger.warning(f"[Followup] Не удалось проверить статус {machine_name}: {e}")
-        return
-
-    # Generate contextual LLM message
-    message = await _generate_followup_message(
-        machine_name, reason_code, reason_name, operator_name, int(idle_minutes)
-    )
-
-    if WHATSAPP_GROUP_AI_MANAGER and message:
-        await send_whatsapp_to_group(WHATSAPP_GROUP_AI_MANAGER, message)
-        logger.info(f"[Followup] Отправлен followup для {machine_name}: {message!r}")
-
+# ─── LLM ────────────────────────────────────────────────────────────────────
 
 async def _generate_followup_message(
-    machine_name: str,
-    reason_code: int,
-    reason_name: str,
-    operator_name: Optional[str],
-    idle_minutes: int,
-) -> Optional[str]:
-    """Ask Claude to generate a contextual follow-up message."""
-    import os
-    import httpx
-
+    machine_name: str, reason_code: int, reason_name: str,
+    operator_name: Optional[str], idle_minutes: int,
+) -> str:
+    import os, httpx
     api_key = os.getenv("ANTHROPIC_API_KEY")
+    fallback = (
+        f"⏰ *{machine_name}* простаивает уже {idle_minutes} мин.\n"
+        f"Причина: *{reason_code}* — {reason_name}\n"
+        f"Устранили? *1* — да | *0* — нет | *код* — новая причина"
+    )
     if not api_key:
-        return f"⏰ *{machine_name}* простаивает уже {idle_minutes} мин. Причина была: {reason_code} — {reason_name}. Когда ожидается возобновление работы?"
+        return fallback
 
     operator_info = f"Оператор: {operator_name}." if operator_name else ""
-
-    prompt = f"""Ты — ИИ-менеджер производственной смены на заводе Isramat.
-
-Станок {machine_name} всё ещё простаивает уже {idle_minutes} минут.
-Ранее была зафиксирована причина: {reason_code} — {reason_name}.
-{operator_info}
-
-Напиши короткое (1-2 предложения) сообщение в WhatsApp-группу операторов.
-Спроси о статусе устранения проблемы — естественно, по-русски, без лишних формальностей.
-Используй WhatsApp форматирование (*жирный*). Начни с эмодзи ⏰ и имени станка."""
-
+    prompt = (
+        f"Ты — ИИ-менеджер производственной смены на заводе Isramat.\n"
+        f"Станок {machine_name} всё ещё простаивает {idle_minutes} мин.\n"
+        f"Ранее зафиксирована причина: {reason_code} — {reason_name}. {operator_info}\n\n"
+        f"Напиши короткое (1 предложение) сообщение в WhatsApp-группу — спроси устранили ли проблему.\n"
+        f"По-русски, без формальностей. Используй *жирный* для имени станка.\n"
+        f"В конце добавь новую строку: *1* — да, починили | *0* — ещё нет | *код* — новая причина"
+    )
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
             resp = await client.post(
@@ -233,7 +174,7 @@ async def _generate_followup_message(
                 },
                 json={
                     "model": "claude-haiku-4-5-20251001",
-                    "max_tokens": 150,
+                    "max_tokens": 200,
                     "messages": [{"role": "user", "content": prompt}],
                 }
             )
@@ -241,7 +182,53 @@ async def _generate_followup_message(
             return resp.json()["content"][0]["text"].strip()
     except Exception as e:
         logger.warning(f"[Followup] LLM ошибка: {e}")
-        return f"⏰ *{machine_name}* простаивает уже {idle_minutes} мин. (причина: {reason_name}). Когда ожидается возобновление?"
+        return fallback
+
+
+async def _check_machine_idle(machine_name: str) -> Optional[int]:
+    """Returns idle_minutes if still idle, None if working."""
+    import os, httpx
+    try:
+        mtc_url = os.getenv('MTCONNECT_API_URL', 'https://mtconnect-core-production.up.railway.app')
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{mtc_url}/api/machines")
+            resp.raise_for_status()
+            data = resp.json()
+            machines = data.get('machines', {}).get('mtconnect', []) + \
+                       data.get('machines', {}).get('adam', [])
+        for m in machines:
+            if m.get('name') == machine_name:
+                if m.get('data', {}).get('uiMode') == 'idle':
+                    return int(m.get('data', {}).get('idleTimeMinutes', 0) or 0)
+                return None
+    except Exception as e:
+        logger.warning(f"[Followup] MTConnect error: {e}")
+    return None
+
+
+async def _send_followup(
+    machine_name: str, log_id: int,
+    reason_code: int, reason_name: str,
+    operator_name: Optional[str], delay_minutes: int,
+) -> None:
+    """Wait, check machine, send follow-up if still idle."""
+    await asyncio.sleep(delay_minutes * 60)
+
+    idle_minutes = await _check_machine_idle(machine_name)
+    if idle_minutes is None:
+        _awaiting_followup.pop(machine_name, None)
+        logger.info(f"[Followup] {machine_name} вернулся в работу")
+        return
+
+    message = await _generate_followup_message(
+        machine_name, reason_code, reason_name, operator_name, idle_minutes
+    )
+
+    if WHATSAPP_GROUP_AI_MANAGER:
+        await send_whatsapp_to_group(WHATSAPP_GROUP_AI_MANAGER, message)
+
+    _awaiting_followup[machine_name] = True
+    logger.info(f"[Followup] Отправлен followup для {machine_name}")
 
 
 # ─── webhook endpoint ────────────────────────────────────────────────────────
@@ -251,7 +238,6 @@ async def whatsapp_incoming(
     request: Request,
     db: Session = Depends(get_db_session),
 ):
-    """Incoming webhook from GOWA — process operator/machinist replies to downtime alerts."""
     try:
         payload = await request.json()
     except Exception:
@@ -268,105 +254,122 @@ async def whatsapp_incoming(
     text_msg = parsed['text']
     quoted_body = parsed['quoted_body']
 
-    # Only process messages from our monitoring group
+    # Only our monitoring group
     if WHATSAPP_GROUP_AI_MANAGER:
         expected_id = WHATSAPP_GROUP_AI_MANAGER.split('@')[0]
         actual_id = group_jid.split('@')[0]
         if expected_id and actual_id and expected_id != actual_id:
             return {"ok": True, "detail": "not our group"}
 
-    # Must be a 1-3 digit reason code
+    # Must be 1-3 digits
     if not re.fullmatch(r'\d{1,3}', text_msg):
         return {"ok": True, "detail": "not a code"}
 
-    reason_code = int(text_msg)
-    reason_name = _get_reason_name(reason_code, db)
-    if reason_name is None:
-        logger.info(f"[WhatsAppWebhook] Unknown code {reason_code} from {sender_phone}")
-        if WHATSAPP_GROUP_AI_MANAGER:
-            await send_whatsapp_to_group(
-                WHATSAPP_GROUP_AI_MANAGER,
-                f"❌ Код *{reason_code}* не найден в справочнике. Проверьте список."
-            )
-        return {"ok": False, "detail": "unknown code"}
+    code = int(text_msg)
 
-    # Find the employee
+    # Find employee
     employee = _find_employee(sender_phone, db)
     if not employee:
-        logger.info(f"[WhatsAppWebhook] Employee not found for phone {sender_phone}")
         return {"ok": True, "detail": "employee not found"}
 
     role_id = employee["role_id"]
     reporter_name = employee["full_name"]
     reporter_role = "machinist" if role_id == 2 else "operator"
 
-    # ── Machinist: must use reply to identify machine ──
+    # Resolve machine name
     if role_id == 2:
+        # Machinist must reply to alert
         if not quoted_body:
             if WHATSAPP_GROUP_AI_MANAGER:
                 await send_whatsapp_to_group(
                     WHATSAPP_GROUP_AI_MANAGER,
-                    f"❌ {reporter_name}, используй *ответ на сообщение* (reply) чтобы указать причину для нужного станка."
+                    f"❌ {reporter_name}, используй *ответ на сообщение* (reply) чтобы указать станок."
                 )
             return {"ok": False, "detail": "machinist must use reply"}
-
         machine_name = _extract_machine_from_alert(quoted_body)
         if not machine_name:
-            logger.info(f"[WhatsAppWebhook] Could not extract machine from quoted: {quoted_body!r}")
             return {"ok": False, "detail": "machine not found in quoted message"}
-
-        log_id = _find_pending_alert(machine_name, db)
-        if not log_id:
-            return {"ok": True, "detail": "no pending alert for machine"}
-
-    # ── Operator: matched by phone → assigned machines ──
     else:
         machines = _find_employee_machines(employee["id"], db)
         if not machines:
-            logger.info(f"[WhatsAppWebhook] No machine assignment for {reporter_name}")
             return {"ok": True, "detail": "no machine assignment"}
+        machine_name = machines[0]  # operator assigned to one machine primarily
 
-        log_id = None
-        machine_name = None
-        for m in machines:
-            log_id = _find_pending_alert(m, db)
-            if log_id:
-                machine_name = m
-                break
+    # ── Follow-up response: 0 or 1 ──
+    if _awaiting_followup.get(machine_name) and code in (0, 1):
+        _awaiting_followup.pop(machine_name, None)
 
-        if not log_id:
-            return {"ok": True, "detail": "no pending alert"}
+        if code == 1:
+            # Fixed — just acknowledge
+            if WHATSAPP_GROUP_AI_MANAGER:
+                await send_whatsapp_to_group(
+                    WHATSAPP_GROUP_AI_MANAGER,
+                    f"👍 *{machine_name}* — отлично, следим за возобновлением работы."
+                )
+            return {"ok": True, "machine": machine_name, "followup": "resolved"}
 
-    # Record the reason
-    _record_reason(log_id, reason_code, sender_phone, reporter_name, reporter_role, db)
+        else:
+            # Not fixed — follow-up again in 15 min
+            # Find last log for context
+            row = db.execute(text("""
+                SELECT id, reason_code, operator_name,
+                       EXTRACT(EPOCH FROM (NOW() - alert_sent_at))/60
+                FROM machine_downtime_logs
+                WHERE machine_name = :m
+                ORDER BY alert_sent_at DESC LIMIT 1
+            """), {"m": machine_name}).fetchone()
+
+            if WHATSAPP_GROUP_AI_MANAGER:
+                await send_whatsapp_to_group(
+                    WHATSAPP_GROUP_AI_MANAGER,
+                    f"🔄 *{machine_name}* — понял, проверим снова через 15 мин."
+                )
+
+            if row:
+                rc = row[1]
+                rn = _get_reason_name(rc, db) or ""
+                asyncio.create_task(_send_followup(
+                    machine_name, row[0], rc, rn, row[2], delay_minutes=15
+                ))
+            return {"ok": True, "machine": machine_name, "followup": "pending"}
+
+    # ── Regular reason code ──
+    reason_name = _get_reason_name(code, db)
+    if reason_name is None:
+        if WHATSAPP_GROUP_AI_MANAGER:
+            await send_whatsapp_to_group(
+                WHATSAPP_GROUP_AI_MANAGER,
+                f"❌ Код *{code}* не найден в справочнике. Проверьте список."
+            )
+        return {"ok": False, "detail": "unknown code"}
+
+    # Find pending alert
+    log_id = _find_pending_alert(machine_name, db)
+    if not log_id:
+        return {"ok": True, "detail": "no pending alert"}
+
+    _record_reason(log_id, code, sender_phone, reporter_name, reporter_role, db)
 
     logger.info(
-        f"[WhatsAppWebhook] {reporter_role} {reporter_name} записал причину "
-        f"{reason_code} '{reason_name}' для {machine_name} (log_id={log_id})"
+        f"[WhatsAppWebhook] {reporter_role} {reporter_name} → "
+        f"{machine_name}: код {code} '{reason_name}' (log_id={log_id})"
     )
 
-    # Confirmation to group
+    # Confirmation
     if WHATSAPP_GROUP_AI_MANAGER:
         await send_whatsapp_to_group(
             WHATSAPP_GROUP_AI_MANAGER,
             f"✅ *{machine_name}* — причина зафиксирована ({reporter_name}):\n"
-            f"*{reason_code}* — {reason_name}"
+            f"*{code}* — {reason_name}"
         )
 
-    # Get operator name for follow-up context
-    operator_name_for_followup = None
-    try:
-        row = db.execute(text(
-            "SELECT operator_name FROM machine_downtime_logs WHERE id = :id"
-        ), {"id": log_id}).fetchone()
-        operator_name_for_followup = row[0] if row else None
-    except Exception:
-        pass
+    # Get operator name for follow-up
+    ctx = _get_log_context(log_id, db)
 
-    # Schedule LLM follow-up check in 20 minutes
-    asyncio.create_task(_schedule_followup(
-        machine_name, log_id, reason_code, reason_name,
-        operator_name_for_followup, delay_minutes=20
+    # Schedule LLM follow-up in 20 min
+    asyncio.create_task(_send_followup(
+        machine_name, log_id, code, reason_name,
+        ctx.get("operator_name"), delay_minutes=20
     ))
 
-    return {"ok": True, "machine": machine_name, "reason_code": reason_code, "reporter": reporter_name}
+    return {"ok": True, "machine": machine_name, "reason_code": code, "reporter": reporter_name}
