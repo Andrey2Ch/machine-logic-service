@@ -39,7 +39,8 @@ def main():
             f.write("| column | type | nullable | description |\n")
             f.write("|---|---|---|---|\n")
             for col, typ, nulls, descr in cols:
-                f.write(f"| {col} | {typ} | {nulls} | {descr.replace('|','\\|')} |\n")
+                safe_descr = descr.replace('|', '\\|')
+                f.write(f"| {col} | {typ} | {nulls} | {safe_descr} |\n")
             f.write("\n")
 
 if __name__ == '__main__':

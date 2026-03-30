@@ -293,6 +293,8 @@ GROUP BY current_location
 | factory_number | character varying | YES | Unique identifier |
 | default_area_id | integer | YES |  |
 | whatsapp_phone | character varying | YES |  |
+| shift | character varying | YES | Смена оператора: 'A' (06:00-18:00) или 'B' (18:00-06:00) |
+| assigned_machine_id | integer | YES | FK → machines.id — закреплённый станок оператора |
 
 ## face_embeddings
 
