@@ -873,3 +873,21 @@ Machine stoppage/fault reason codes (רשימת תקלות). Categories: machine
 | name_en | text | NO | English name |
 | is_active | boolean | NO | Soft-delete flag |
 | created_at | timestamp with time zone | NO |  |
+
+
+## machine_downtime_logs
+
+Log of downtime alerts sent by DowntimeSupervisor and operator reason-code replies via WhatsApp.
+
+| column | type | nullable | description |
+|---|---|---|---|
+| id | integer | NO | PK |
+| machine_name | text | NO | Machine name at time of alert |
+| alert_sent_at | timestamp with time zone | NO | When the alert was sent |
+| idle_minutes | real | NO | Idle duration in minutes at alert time |
+| operator_name | text | YES | Operator assigned to machine at alert time |
+| machinist_name | text | YES | Machinist from MTConnect at alert time |
+| reason_code | integer | YES | FK → stoppage_reasons.code (filled when operator replies) |
+| reason_reported_at | timestamp with time zone | YES | When the operator replied |
+| reporter_phone | text | YES | Normalized phone of the employee who replied |
+| created_at | timestamp with time zone | NO |  |

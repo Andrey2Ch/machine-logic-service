@@ -109,6 +109,39 @@ def _get_operator_for_machine(machine_name: str, shift: str, get_db_session) -> 
         return None
 
 
+def _save_downtime_log(
+    machine_name: str,
+    idle_minutes: float,
+    operator_name: Optional[str],
+    machinist_name: Optional[str],
+    get_db_session,
+) -> Optional[int]:
+    """Сохранить запись о простое в БД. Возвращает ID записи."""
+    try:
+        from sqlalchemy import text
+        db = next(get_db_session())
+        try:
+            row = db.execute(text("""
+                INSERT INTO machine_downtime_logs
+                    (machine_name, alert_sent_at, idle_minutes, operator_name, machinist_name)
+                VALUES
+                    (:machine_name, NOW(), :idle_minutes, :operator_name, :machinist_name)
+                RETURNING id
+            """), {
+                "machine_name": machine_name,
+                "idle_minutes": idle_minutes,
+                "operator_name": operator_name,
+                "machinist_name": machinist_name,
+            }).fetchone()
+            db.commit()
+            return row[0] if row else None
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning(f"[DowntimeSupervisor] Не удалось сохранить лог простоя для {machine_name}: {e}")
+        return None
+
+
 async def _send_idle_alert(
     machine_name: str,
     idle_minutes: float,
@@ -131,6 +164,9 @@ async def _send_idle_alert(
         f"{machinist_info}\n"
         f"Пожалуйста, укажи причину простоя."
     )
+
+    # Сохраняем лог в БД (независимо от DRY_RUN)
+    _save_downtime_log(machine_name, idle_minutes, operator_name, machinist_name, get_db_session)
 
     if DRY_RUN:
         print(f"[DowntimeSupervisor] DRY RUN — алерт НЕ отправлен: {message!r}")

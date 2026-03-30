@@ -32,6 +32,7 @@ from .routers import morning_dashboard as morning_dashboard_router
 from .routers import planning as planning_router
 from .routers import notification_settings as notification_settings_router
 from .routers import notifications as notifications_router
+from .routers import whatsapp_webhook as whatsapp_webhook_router
 from .routers import translate as translate_router
 from .routers import stream as stream_router  # SSE streaming
 from .routers import ai as ai_router  # AI assistant
@@ -5689,6 +5690,7 @@ app.include_router(morning_dashboard_router.router)
 app.include_router(planning_router.router)
 app.include_router(notification_settings_router.router)
 app.include_router(notifications_router.router)
+app.include_router(whatsapp_webhook_router.router)
 app.include_router(translate_router.router)
 from .text2sql.routers import router as text2sql_router, admin_router as text2sql_admin_router, examples_router as text2sql_examples_router
 app.include_router(text2sql_router)
