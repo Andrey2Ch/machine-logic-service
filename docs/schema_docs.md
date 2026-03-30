@@ -108,7 +108,13 @@
 | default_area_id | bigint | YES |  |
 | whatsapp_phone | character varying | YES |  |
 | shift | character varying | YES | Смена оператора: 'A' (06:00-18:00) или 'B' (18:00-06:00) |
-| assigned_machine_id | integer | YES | FK → machines.id — закреплённый станок оператора |
+
+## employee_machine_assignments
+
+| column | type | nullable | description |
+|---|---|---|---|
+| employee_id | integer | NO | FK → employees.id (CASCADE) |
+| machine_id | integer | NO | FK → machines.id (CASCADE) |
 
 ## lots
 
