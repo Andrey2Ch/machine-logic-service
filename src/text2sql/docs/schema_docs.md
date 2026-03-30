@@ -890,4 +890,6 @@ Log of downtime alerts sent by DowntimeSupervisor and operator reason-code repli
 | reason_code | integer | YES | FK → stoppage_reasons.code (filled when operator replies) |
 | reason_reported_at | timestamp with time zone | YES | When the operator replied |
 | reporter_phone | text | YES | Normalized phone of the employee who replied |
+| reporter_name | text | YES | Full name of employee who reported the reason |
+| reporter_role | text | YES | Role of reporter: operator or machinist |
 | created_at | timestamp with time zone | NO |  |
