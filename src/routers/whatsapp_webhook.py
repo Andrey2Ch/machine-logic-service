@@ -90,7 +90,7 @@ def _find_pending_alert(machine_name: str, db: Session) -> Optional[int]:
         SELECT id FROM machine_downtime_logs
         WHERE machine_name = :machine_name
           AND reason_code IS NULL
-          AND alert_sent_at > NOW() - INTERVAL '2 hours'
+          AND alert_sent_at > NOW() - INTERVAL '4 hours'
         ORDER BY alert_sent_at DESC
         LIMIT 1
     """), {"machine_name": machine_name}).fetchone()

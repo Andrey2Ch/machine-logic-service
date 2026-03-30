@@ -204,6 +204,27 @@ def _has_recent_reason(machine_name: str, get_db_session) -> bool:
         return False
 
 
+def _has_active_setup(machine_name: str, get_db_session) -> bool:
+    """Проверить есть ли у станка активный сетап в БД (allowed или started)."""
+    try:
+        from sqlalchemy import text
+        db = next(get_db_session())
+        try:
+            row = db.execute(text("""
+                SELECT 1 FROM setup_jobs sj
+                JOIN machines m ON m.id = sj.machine_id
+                WHERE m.name = :machine_name
+                  AND sj.status IN ('allowed', 'started')
+                LIMIT 1
+            """), {"machine_name": machine_name}).fetchone()
+            return row is not None
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning(f"[DowntimeSupervisor] _has_active_setup error for {machine_name}: {e}")
+        return True  # по умолчанию True чтобы не пропустить алерт при ошибке БД
+
+
 async def _check_once(get_db_session) -> None:
     """Одна итерация проверки всех станков."""
     machines = await _fetch_machines()
@@ -225,7 +246,8 @@ async def _check_once(get_db_session) -> None:
             continue
 
         # Пропускаем станки без активной наладки (серая рамка — нет работы)
-        if setup_status == 'idle':
+        # Проверяем БД: есть ли у станка активный сетап (allowed или started)
+        if not _has_active_setup(name, get_db_session):
             continue
 
         if _should_alert(name, idle_min):
