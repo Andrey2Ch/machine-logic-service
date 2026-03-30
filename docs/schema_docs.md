@@ -109,6 +109,20 @@
 | whatsapp_phone | character varying | YES |  |
 | shift | character varying | YES | Смена оператора: 'A' (06:00-18:00) или 'B' (18:00-06:00) |
 
+## week_schedule
+
+| column | type | nullable | description |
+|---|---|---|---|
+| week_start | date | NO | PK — воскресенье начала недели |
+| sun | smallint | NO | Код: 0=выходной, 1=полный, 2=короткий, 3=только ночь |
+| mon | smallint | NO | Код понедельника |
+| tue | smallint | NO | Код вторника |
+| wed | smallint | NO | Код среды |
+| thu | smallint | NO | Код четверга |
+| fri | smallint | NO | Код пятницы |
+| sat | smallint | NO | Код субботы |
+| notes | text | YES | Примечание |
+
 ## employee_machine_assignments
 
 | column | type | nullable | description |
