@@ -183,6 +183,27 @@ async def _send_idle_alert(
         logger.error(f"[DowntimeSupervisor] Ошибка отправки WhatsApp: {e}", exc_info=True)
 
 
+def _has_recent_reason(machine_name: str, get_db_session) -> bool:
+    """Проверить — записана ли уже причина простоя за последние 2 часа."""
+    try:
+        from sqlalchemy import text
+        db = next(get_db_session())
+        try:
+            row = db.execute(text("""
+                SELECT 1 FROM machine_downtime_logs
+                WHERE machine_name = :name
+                  AND reason_code IS NOT NULL
+                  AND reason_reported_at > NOW() - INTERVAL '2 hours'
+                LIMIT 1
+            """), {"name": machine_name}).fetchone()
+            return row is not None
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning(f"[DowntimeSupervisor] _has_recent_reason error: {e}")
+        return False
+
+
 async def _check_once(get_db_session) -> None:
     """Одна итерация проверки всех станков."""
     machines = await _fetch_machines()
@@ -208,6 +229,10 @@ async def _check_once(get_db_session) -> None:
             continue
 
         if _should_alert(name, idle_min):
+            # Не слать новый алерт если причина уже записана (follow-up система работает)
+            if _has_recent_reason(name, get_db_session):
+                logger.debug(f"[DowntimeSupervisor] {name}: причина уже записана — алерт пропущен")
+                continue
             logger.info(f"[DowntimeSupervisor] IDLE ALERT: {name} = {idle_min:.1f} мин, наладчик={machinist}")
             await _send_idle_alert(name, idle_min, machinist, get_db_session)
             _last_alert_sent[name] = datetime.now(timezone.utc)
