@@ -42,7 +42,16 @@ def main() -> int:
         cur.execute("SELECT version FROM schema_migrations;")
         applied = {row[0] for row in cur.fetchall()}
 
-        pending = [f for f in sql_files if f.stem not in applied]
+        def is_applied(stem: str) -> bool:
+            if stem in applied:
+                return True
+            # Совместимость: "021_ai_assistant_tables" совпадает с записью "021"
+            prefix = stem.split("_")[0]
+            if prefix.isdigit() and prefix in applied:
+                return True
+            return False
+
+        pending = [f for f in sql_files if not is_applied(f.stem)]
 
         if not pending:
             print(f"[migrations] All {len(sql_files)} migrations already applied.")
