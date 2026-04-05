@@ -9,6 +9,7 @@
 - `isramat-dashboard/src/lib/ai-assistant/knowledge/schema/tables.json` — дополнительная статическая справка (может отставать)
 - `isramat-dashboard/src/lib/ai-assistant/knowledge/domain/glossary.md` — глоссарий терминов
 - `isramat-dashboard/src/lib/ai-assistant/knowledge/domain/workflows.md` — бизнес-процессы
+- **stoppage_reasons** — загружается из БД (таблица `stoppage_reasons`, миграция 037). Источник правды — БД.
 
 ### 2. SQL миграция
 
@@ -58,6 +59,10 @@
 ### 6. Скрипт загрузки знаний
 
 **Файл:** `machine-logic-service/scripts/load_ai_knowledge.py`
+
+Загружает: schema, glossary, workflows, **stoppage_reasons (из БД)**, SQL примеры.
+
+**План развития:** [AI_KNOWLEDGE_LOAD_PLAN.md](AI_KNOWLEDGE_LOAD_PLAN.md)
 
 ---
 

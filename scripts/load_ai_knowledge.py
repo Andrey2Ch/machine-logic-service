@@ -7,8 +7,14 @@
 
 Требования:
     - OPENAI_API_KEY в environment
-    - DATABASE_URL в environment
+    - DATABASE_URL в environment (должны быть доступны ai_* таблицы и stoppage_reasons)
     - Установлен pgvector extension в PostgreSQL
+
+Загружает:
+    - schema (tables.json)
+    - glossary, workflows (markdown из knowledge/)
+    - stoppage_reasons — из БД (источник правды: таблица stoppage_reasons)
+    - SQL примеры (seed)
 """
 
 import os
@@ -221,6 +227,99 @@ async def load_markdown_knowledge(conn: asyncpg.Connection, doc_type: str, file_
             print(f"  [NEW] {title[:50]}... - создано")
 
 
+async def load_stoppage_reasons_from_db(conn: asyncpg.Connection):
+    """
+    Загружает справочник причин простоя и брака из таблицы stoppage_reasons.
+    Источник правды — БД (миграция 037_stoppage_reasons.sql).
+    """
+    print("[INFO] Загрузка stoppage_reasons из БД...")
+
+    try:
+        rows = await conn.fetch("""
+            SELECT code, category, name_he, name_ru, name_en
+            FROM stoppage_reasons
+            WHERE is_active = TRUE
+            ORDER BY category, code
+        """)
+    except Exception as e:
+        print(f"[WARN] stoppage_reasons не найдена или недоступна: {e}")
+        return
+
+    if not rows:
+        print("  [WARN] Нет записей в stoppage_reasons")
+        return
+
+    # Группируем по категориям
+    categories = {
+        "machine": ("Станок (machine)", "Причины простоя станка: настройка, поломки, инструмент"),
+        "part": ("Брак (part)", "Причины брака деталей: отклонения, калибры, резьба"),
+        "work_and_material": ("Работа и материал", "Начало/конец смены, материал"),
+    }
+
+    content_parts = [
+        "# Справочник причин простоя и брака (stoppage_reasons)",
+        "",
+        "Используется для классификации простоев станков и причин брака. "
+        "Таблица `stoppage_reasons`, колонка `code` — числовой код.",
+        "",
+    ]
+
+    by_cat: dict[str, list] = {}
+    for r in rows:
+        by_cat.setdefault(r["category"], []).append(r)
+
+    for cat_key, (cat_title, cat_desc) in categories.items():
+        if cat_key not in by_cat:
+            continue
+        content_parts.append(f"## {cat_title}")
+        content_parts.append("")
+        content_parts.append(cat_desc)
+        content_parts.append("")
+        content_parts.append("| code | RU | EN |")
+        content_parts.append("|------|-----|-----|")
+        for r in by_cat[cat_key]:
+            content_parts.append(f"| {r['code']} | {r['name_ru']} | {r['name_en']} |")
+        content_parts.append("")
+
+    content = "\n".join(content_parts)
+    content_hash = sha256_hash(content)
+    title = "stoppage_reasons: коды причин простоя и брака"
+
+    existing = await conn.fetchrow(
+        "SELECT id, content_hash FROM ai_knowledge_documents "
+        "WHERE document_type = 'stoppage_reasons' AND title = $1",
+        title,
+    )
+
+    if existing and existing["content_hash"] == content_hash:
+        print("  [OK] stoppage_reasons — без изменений")
+        return
+
+    print("  [GEN] stoppage_reasons — генерация embedding...")
+    embedding = await get_embedding(content)
+
+    metadata = {
+        "source": "database",
+        "table": "stoppage_reasons",
+        "row_count": len(rows),
+        "categories": list(by_cat.keys()),
+    }
+
+    if existing:
+        await conn.execute("""
+            UPDATE ai_knowledge_documents
+            SET content = $1, content_hash = $2, embedding = $3, metadata = $4, updated_at = NOW()
+            WHERE id = $5
+        """, content, content_hash, embedding, json.dumps(metadata), existing["id"])
+        print("  [UPD] stoppage_reasons — обновлено")
+    else:
+        await conn.execute("""
+            INSERT INTO ai_knowledge_documents (document_type, title, content, content_hash, embedding, metadata)
+            VALUES ('stoppage_reasons', $1, $2, $3, $4, $5)
+        """, title, content, content_hash, embedding, json.dumps(metadata))
+        print("  [NEW] stoppage_reasons — создано")
+
+
 async def load_sql_examples(conn: asyncpg.Connection):
     """Загружает примеры SQL запросов."""
     print("[INFO] Загрузка SQL примеров...")
@@ -423,8 +522,12 @@ async def main():
             KNOWLEDGE_BASE_PATH / "domain" / "workflows.md"
         )
         print()
+
+        # 4. Загружаем stoppage_reasons из БД (источник правды — таблица stoppage_reasons)
+        await load_stoppage_reasons_from_db(conn)
+        print()
         
-        # 4. Загружаем SQL примеры
+        # 5. Загружаем SQL примеры
         await load_sql_examples(conn)
         print()
         
@@ -434,7 +537,8 @@ async def main():
                 COUNT(*) as total,
                 COUNT(*) FILTER (WHERE document_type = 'schema') as schema_count,
                 COUNT(*) FILTER (WHERE document_type = 'glossary') as glossary_count,
-                COUNT(*) FILTER (WHERE document_type = 'workflow') as workflow_count
+                COUNT(*) FILTER (WHERE document_type = 'workflow') as workflow_count,
+                COUNT(*) FILTER (WHERE document_type = 'stoppage_reasons') as stoppage_count
             FROM ai_knowledge_documents
             WHERE is_active = TRUE
         """)
@@ -446,6 +550,7 @@ async def main():
         print(f"      - Схема БД: {stats['schema_count']}")
         print(f"      - Глоссарий: {stats['glossary_count']}")
         print(f"      - Workflows: {stats['workflow_count']}")
+        print(f"      - Stoppage reasons: {stats['stoppage_count']}")
         print(f"   SQL примеров: {sql_count}")
         
     finally:

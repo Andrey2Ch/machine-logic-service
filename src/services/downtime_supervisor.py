@@ -4,18 +4,23 @@ Downtime Supervisor — проактивный мониторинг просто
 Периодически опрашивает MTConnect API, находит станки с uiMode='idle'
 дольше порога и отправляет уведомление в WhatsApp операторам.
 
+Поток уведомлений:
+  1. Алерт → группа операторов текущей смены
+  2. Через 7 мин без ответа → эскалация наладчику (личное сообщение)
+
 Env vars:
     DOWNTIME_SUPERVISOR_DRY_RUN  — '1' (default) = только логи, '0' = реальная отправка
     DOWNTIME_SUPERVISOR_THRESHOLD_MIN — порог простоя в минутах (default: 10)
     DOWNTIME_SUPERVISOR_COOLDOWN_MIN  — минимум между повторными алертами (default: 30)
     DOWNTIME_SUPERVISOR_INTERVAL_SEC  — интервал проверки в секундах (default: 120)
+    DOWNTIME_ESCALATION_DELAY_MIN    — задержка эскалации наладчику (default: 7)
 """
 
 import asyncio
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import httpx
 import pytz
@@ -30,9 +35,12 @@ DRY_RUN = os.getenv('DOWNTIME_SUPERVISOR_DRY_RUN', '1').lower() not in ('0', 'fa
 IDLE_THRESHOLD_MIN = float(os.getenv('DOWNTIME_SUPERVISOR_THRESHOLD_MIN', '10'))
 ALERT_COOLDOWN_MIN = float(os.getenv('DOWNTIME_SUPERVISOR_COOLDOWN_MIN', '30'))
 CHECK_INTERVAL_SEC = float(os.getenv('DOWNTIME_SUPERVISOR_INTERVAL_SEC', '120'))
+ESCALATION_DELAY_MIN = float(os.getenv('DOWNTIME_ESCALATION_DELAY_MIN', '7'))
 
 # machine_name -> время последнего отправленного алерта
 _last_alert_sent: Dict[str, datetime] = {}
+# machine_name -> время когда супервизор впервые увидел станок idle
+_first_seen_idle: Dict[str, datetime] = {}
 
 
 async def _fetch_machines() -> list:
@@ -70,7 +78,11 @@ def _should_alert(machine_name: str, idle_minutes: float) -> bool:
 
 
 def _active_shift() -> Optional[str]:
-    """Определяет активную смену прямо сейчас (A или B), или None если нерабочее время."""
+    """Определяет активную смену прямо сейчас (A или B), или None если нерабочее время.
+
+    Не проверяет расписание — только время суток и чередование смен.
+    Используй _active_shift_from_schedule() для проверки с учётом week_schedule.
+    """
     now = datetime.now(_IL_TZ)
     hour = now.hour
     iso_week = now.isocalendar()[1]
@@ -82,6 +94,64 @@ def _active_shift() -> Optional[str]:
         return "A" if shift_a_is_day else "B"
     else:
         return "B" if shift_a_is_day else "A"
+
+
+def _active_shift_from_schedule(get_db_session) -> Optional[str]:
+    """Определяет активную смену с учётом week_schedule.
+
+    Возвращает 'A', 'B' или None (выходной / нерабочее время).
+    """
+    from datetime import date as date_cls
+    from sqlalchemy import text
+
+    now = datetime.now(_IL_TZ)
+    today = now.date()
+    hour = now.hour
+
+    # Воскресенье недели (начало недели в израильском календаре)
+    days_since_sunday = (today.weekday() + 1) % 7
+    week_start = today - __import__('datetime').timedelta(days=days_since_sunday)
+
+    # Колонка текущего дня: 0=вс,1=пн...6=сб
+    day_cols = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"]
+    dow = (today.weekday() + 1) % 7
+    col = day_cols[dow]
+
+    try:
+        db = next(get_db_session())
+        try:
+            row = db.execute(
+                text(f"SELECT {col} AS code FROM week_schedule WHERE week_start = :ws"),
+                {"ws": week_start}
+            ).fetchone()
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning(f"[DowntimeSupervisor] Не удалось прочитать расписание: {e}")
+        row = None
+
+    # Если записи нет — используем дефолт (пн-чт рабочие)
+    code = row.code if row else (1 if dow in (1, 2, 3, 4) else 0)
+
+    if code == 0:
+        return None  # выходной день
+
+    iso_week = week_start.isocalendar()[1]
+    shift_a_is_day = ((iso_week - SHIFT_A_DAY_WEEK) % 2) == 0
+
+    if code == 1:  # полный день: обе смены 6:00-6:00
+        is_day = 6 <= hour < 18
+        return ("A" if shift_a_is_day else "B") if is_day else ("B" if shift_a_is_day else "A")
+    elif code == 2:  # короткий день: только дневная смена 6:00-12:00
+        if 6 <= hour < 12:
+            return "A" if shift_a_is_day else "B"
+        return None
+    elif code == 3:  # только ночная смена 18:00-6:00
+        if hour >= 18 or hour < 6:
+            return "B" if shift_a_is_day else "A"
+        return None
+
+    return None
 
 
 def _get_operator_for_machine(machine_name: str, shift: str, get_db_session) -> Optional[str]:
@@ -142,24 +212,109 @@ def _save_downtime_log(
         return None
 
 
+def _format_duration(minutes: float) -> str:
+    """Форматирует минуты в 'X ч Y мин' или 'Y мин'."""
+    total = round(minutes)
+    if total >= 60:
+        h, m = divmod(total, 60)
+        return f"{h} ч {m} мин" if m else f"{h} ч"
+    return f"{total} мин"
+
+
+def _is_machinist_on_duty(employee_shift: Optional[str]) -> bool:
+    """Проверяет работает ли наладчик сейчас.
+    shift='A'/'B' — сменный, NULL — дневной (6:00-18:00 каждый день).
+    """
+    current_shift = _active_shift()
+    now_hour = datetime.now(_IL_TZ).hour
+    is_day = 6 <= now_hour < 18
+
+    if employee_shift is None:
+        return is_day
+    return employee_shift == current_shift
+
+
+def _find_machinist_by_name(machinist_name: str, get_db_session) -> Optional[dict]:
+    """Найти наладчика по имени. Возвращает {full_name, whatsapp_phone, shift}."""
+    if not machinist_name:
+        return None
+    try:
+        from sqlalchemy import text
+        db = next(get_db_session())
+        try:
+            row = db.execute(text("""
+                SELECT full_name, whatsapp_phone, shift
+                FROM employees
+                WHERE role_id = 2
+                  AND is_active = true
+                  AND full_name = :name
+                LIMIT 1
+            """), {"name": machinist_name}).fetchone()
+            if row and row[1]:
+                return {"full_name": row[0], "whatsapp_phone": row[1], "shift": row[2]}
+            return None
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning(f"[DowntimeSupervisor] _find_machinist_by_name error: {e}")
+        return None
+
+
+def _find_on_duty_machinists(get_db_session) -> List[dict]:
+    """Найти всех наладчиков которые сейчас на смене."""
+    try:
+        from sqlalchemy import text
+        db = next(get_db_session())
+        try:
+            rows = db.execute(text("""
+                SELECT full_name, whatsapp_phone, shift
+                FROM employees
+                WHERE role_id = 2
+                  AND is_active = true
+                  AND whatsapp_phone IS NOT NULL
+                  AND whatsapp_phone != ''
+            """)).fetchall()
+            return [
+                {"full_name": r[0], "whatsapp_phone": r[1], "shift": r[2]}
+                for r in rows
+                if _is_machinist_on_duty(r[2])
+            ]
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning(f"[DowntimeSupervisor] _find_on_duty_machinists error: {e}")
+        return []
+
+
+def _get_operator_group_for_shift(shift: Optional[str]) -> Optional[str]:
+    """Получить JID группы операторов для текущей смены."""
+    from src.services.whatsapp_client import WHATSAPP_GROUP_OPERATORS_A, WHATSAPP_GROUP_OPERATORS_B
+    if shift == 'A':
+        return WHATSAPP_GROUP_OPERATORS_A or None
+    elif shift == 'B':
+        return WHATSAPP_GROUP_OPERATORS_B or None
+    return None
+
+
 async def _send_idle_alert(
     machine_name: str,
     idle_minutes: float,
     machinist_name: Optional[str],
     get_db_session,
+    shift: Optional[str] = None,
 ) -> None:
-    """Отправить уведомление о простое."""
-    idle_rounded = round(idle_minutes)
+    """Отправить уведомление о простое в группу операторов текущей смены."""
+    duration = _format_duration(idle_minutes)
 
-    # Получаем оператора из БД по смене
-    shift = _active_shift()
+    if shift is None:
+        shift = _active_shift_from_schedule(get_db_session)
     operator_name = _get_operator_for_machine(machine_name, shift, get_db_session) if shift else None
 
     operator_info = f"\n👤 Оператор: {operator_name}" if operator_name else ""
     machinist_info = f"\n🔧 Наладчик: {machinist_name}" if machinist_name else ""
 
     message = (
-        f"⚠️ *Станок {machine_name} простаивает уже {idle_rounded} мин.*"
+        f"⚠️ *Станок {machine_name} простаивает уже {duration}.*"
         f"{operator_info}"
         f"{machinist_info}\n"
         f"Пожалуйста, укажи причину простоя."
@@ -173,14 +328,67 @@ async def _send_idle_alert(
         return
 
     try:
-        from src.services.whatsapp_client import send_whatsapp_to_group, WHATSAPP_GROUP_AI_MANAGER
-        if not WHATSAPP_GROUP_AI_MANAGER:
-            logger.warning("[DowntimeSupervisor] WHATSAPP_GROUP_AI_MANAGER не задан — сообщение не отправлено")
+        from src.services.whatsapp_client import send_whatsapp_to_group
+        group_jid = _get_operator_group_for_shift(shift)
+        if not group_jid:
+            logger.warning(f"[DowntimeSupervisor] Нет группы операторов для смены {shift}")
             return
-        await send_whatsapp_to_group(WHATSAPP_GROUP_AI_MANAGER, message)
-        logger.info(f"[DowntimeSupervisor] WhatsApp отправлен в AI Monitor для {machine_name}")
+        await send_whatsapp_to_group(group_jid, message)
+        logger.info(f"[DowntimeSupervisor] Алерт отправлен в группу операторов (смена {shift}) для {machine_name}")
     except Exception as e:
         logger.error(f"[DowntimeSupervisor] Ошибка отправки WhatsApp: {e}", exc_info=True)
+
+    # Запускаем эскалацию наладчику через ESCALATION_DELAY_MIN минут
+    asyncio.create_task(_escalate_to_machinist(
+        machine_name, idle_minutes, machinist_name, get_db_session
+    ))
+
+
+async def _escalate_to_machinist(
+    machine_name: str,
+    idle_minutes: float,
+    machinist_name: Optional[str],
+    get_db_session,
+) -> None:
+    """Через N минут проверить — ответил ли оператор. Если нет — написать наладчику лично."""
+    await asyncio.sleep(ESCALATION_DELAY_MIN * 60)
+
+    # Проверяем ответил ли уже оператор
+    if _has_recent_reason(machine_name, get_db_session):
+        logger.info(f"[Escalation] {machine_name}: оператор уже ответил — эскалация отменена")
+        return
+
+    duration = _format_duration(idle_minutes + ESCALATION_DELAY_MIN)
+    message = (
+        f"🔔 *{machine_name}* простаивает уже {duration}.\n"
+        f"Оператор не указал причину.\n"
+        f"Пожалуйста, разберись с ситуацией."
+    )
+
+    if DRY_RUN:
+        print(f"[Escalation] DRY RUN — эскалация НЕ отправлена: {message!r}")
+        return
+
+    from src.services.whatsapp_client import send_whatsapp_personal
+
+    # Пробуем отправить наладчику сетапа если он на смене
+    setup_machinist = _find_machinist_by_name(machinist_name, get_db_session)
+    if setup_machinist and _is_machinist_on_duty(setup_machinist['shift']):
+        await send_whatsapp_personal(setup_machinist['whatsapp_phone'], message)
+        logger.info(f"[Escalation] {machine_name}: личное сообщение наладчику сетапа {setup_machinist['full_name']}")
+        return
+
+    # Наладчик сетапа не на смене — шлём всем наладчикам на смене
+    on_duty = _find_on_duty_machinists(get_db_session)
+    if not on_duty:
+        logger.warning(f"[Escalation] {machine_name}: нет наладчиков на смене")
+        return
+
+    for m in on_duty:
+        await send_whatsapp_personal(m['whatsapp_phone'], message)
+
+    names = ', '.join(m['full_name'] for m in on_duty)
+    logger.info(f"[Escalation] {machine_name}: сообщение отправлено {len(on_duty)} наладчикам: {names}")
 
 
 def _has_recent_reason(machine_name: str, get_db_session) -> bool:
@@ -204,29 +412,14 @@ def _has_recent_reason(machine_name: str, get_db_session) -> bool:
         return False
 
 
-def _has_active_setup(machine_name: str, get_db_session) -> bool:
-    """Проверить есть ли у станка активный сетап в БД (allowed или started)."""
-    try:
-        from sqlalchemy import text
-        db = next(get_db_session())
-        try:
-            row = db.execute(text("""
-                SELECT 1 FROM setup_jobs sj
-                JOIN machines m ON m.id = sj.machine_id
-                WHERE m.name = :machine_name
-                  AND sj.status IN ('allowed', 'started')
-                LIMIT 1
-            """), {"machine_name": machine_name}).fetchone()
-            return row is not None
-        finally:
-            db.close()
-    except Exception as e:
-        logger.warning(f"[DowntimeSupervisor] _has_active_setup error for {machine_name}: {e}")
-        return True  # по умолчанию True чтобы не пропустить алерт при ошибке БД
-
-
 async def _check_once(get_db_session) -> None:
     """Одна итерация проверки всех станков."""
+    # Проверяем расписание — не отправляем алерты в нерабочее время
+    shift = _active_shift_from_schedule(get_db_session)
+    if shift is None:
+        logger.debug("[DowntimeSupervisor] Нерабочее время по расписанию — проверка пропущена")
+        return
+
     machines = await _fetch_machines()
     if not machines:
         return
@@ -234,8 +427,6 @@ async def _check_once(get_db_session) -> None:
     for machine in machines:
         data = machine.get('data', {})
         ui_mode = data.get('uiMode')
-        setup_status = data.get('setupStatus', 'idle')
-        idle_min = data.get('idleTimeMinutes', 0) or 0
         name = machine.get('name', 'Unknown')
         machinist = data.get('operatorName')
 
@@ -243,23 +434,35 @@ async def _check_once(get_db_session) -> None:
             if name in _last_alert_sent and ui_mode == 'working':
                 del _last_alert_sent[name]
                 logger.debug(f"[DowntimeSupervisor] {name} вернулся в работу — cooldown сброшен")
+            # Сбрасываем отслеживание idle при любом не-idle статусе
+            _first_seen_idle.pop(name, None)
             continue
 
-        # Пропускаем станки без активной наладки (серая рамка — нет работы)
-        # Проверяем БД: есть ли у станка активный сетап (allowed или started)
-        if not _has_active_setup(name, get_db_session):
+        # Пропускаем станки с серой рамкой (нет активного производства)
+        # Логика рамки дашборда: жёлтая = есть executionStatus + есть qaName
+        exec_status = (data.get('executionStatus') or data.get('execution') or '').upper()
+        qa_name = data.get('qaName') or data.get('qa') or ''
+        if not exec_status or not qa_name:
+            logger.debug(f"[DowntimeSupervisor] {name}: серая рамка (exec={exec_status!r}, qa={qa_name!r}) — пропущен")
             continue
 
-        if _should_alert(name, idle_min):
-            # Не слать новый алерт если причина уже записана (follow-up система работает)
+        # Отслеживаем время с момента когда МЫ впервые увидели станок idle
+        now = datetime.now(timezone.utc)
+        if name not in _first_seen_idle:
+            _first_seen_idle[name] = now
+            logger.debug(f"[DowntimeSupervisor] {name}: первый раз idle — запоминаем время")
+
+        our_idle_min = (now - _first_seen_idle[name]).total_seconds() / 60
+
+        if _should_alert(name, our_idle_min):
             if _has_recent_reason(name, get_db_session):
                 logger.debug(f"[DowntimeSupervisor] {name}: причина уже записана — алерт пропущен")
                 continue
-            logger.info(f"[DowntimeSupervisor] IDLE ALERT: {name} = {idle_min:.1f} мин, наладчик={machinist}")
-            await _send_idle_alert(name, idle_min, machinist, get_db_session)
-            _last_alert_sent[name] = datetime.now(timezone.utc)
+            logger.info(f"[DowntimeSupervisor] IDLE ALERT: {name} = {our_idle_min:.1f} мин, наладчик={machinist}")
+            await _send_idle_alert(name, our_idle_min, machinist, get_db_session, shift=shift)
+            _last_alert_sent[name] = now
         else:
-            logger.debug(f"[DowntimeSupervisor] {name}: idle={idle_min:.1f} мин — пропущен (порог или cooldown)")
+            logger.debug(f"[DowntimeSupervisor] {name}: idle={our_idle_min:.1f} мин — пропущен (порог или cooldown)")
 
 
 async def downtime_supervisor_task(get_db_session) -> None:
@@ -270,7 +473,6 @@ async def downtime_supervisor_task(get_db_session) -> None:
     # Используем файл-лок чтобы гарантировать запуск только в одном воркере
     lock_path = os.path.join(tempfile.gettempdir(), "downtime_supervisor.lock")
     try:
-        # Открываем файл для эксклюзивной записи (O_CREAT | O_EXCL — атомарно)
         fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         os.write(fd, str(os.getpid()).encode())
         os.close(fd)
@@ -283,10 +485,11 @@ async def downtime_supervisor_task(get_db_session) -> None:
         f"[DowntimeSupervisor] Запущен [{mode}] | "
         f"порог={IDLE_THRESHOLD_MIN}мин | "
         f"cooldown={ALERT_COOLDOWN_MIN}мин | "
-        f"интервал={CHECK_INTERVAL_SEC}с"
+        f"интервал={CHECK_INTERVAL_SEC}с | "
+        f"эскалация={ESCALATION_DELAY_MIN}мин"
     )
 
-    # Первая проверка — через 30 сек после старта (даём приложению подняться)
+    # Первая проверка — через 30 сек после старта
     await asyncio.sleep(30)
 
     try:
@@ -298,7 +501,6 @@ async def downtime_supervisor_task(get_db_session) -> None:
 
             await asyncio.sleep(CHECK_INTERVAL_SEC)
     finally:
-        # Освобождаем лок при завершении задачи
         try:
             os.unlink(lock_path)
         except OSError:

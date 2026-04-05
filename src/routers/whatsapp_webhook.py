@@ -9,8 +9,8 @@ Machinist:  reply on alert + "8" → machine from quoted text → reason recorde
 
 Follow-up responses (after LLM follow-up message):
   "1" → yes, fixed  → monitoring continues
-  "0" → no, not yet → another follow-up in 15 min
-  code → new reason → recorded, follow-up rescheduled
+  "0" → no, not yet → another follow-up in 7 min
+  code → new reason → recorded, follow-up in 10 min
 """
 
 import asyncio
@@ -23,7 +23,18 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from src.database import get_db_session
-from src.services.whatsapp_client import WHATSAPP_GROUP_AI_MANAGER, send_whatsapp_to_group
+from src.services.whatsapp_client import (
+    WHATSAPP_GROUP_AI_MANAGER,
+    WHATSAPP_GROUP_OPERATORS_A,
+    WHATSAPP_GROUP_OPERATORS_B,
+    send_whatsapp_to_group,
+)
+
+# All group JIDs we accept messages from (operator groups + AI manager)
+_ALLOWED_GROUPS = set()
+for _jid in (WHATSAPP_GROUP_OPERATORS_A, WHATSAPP_GROUP_OPERATORS_B, WHATSAPP_GROUP_AI_MANAGER):
+    if _jid:
+        _ALLOWED_GROUPS.add(_jid.split('@')[0])
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/webhooks", tags=["Webhooks"])
@@ -60,7 +71,11 @@ def _parse_payload(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def _extract_machine_from_alert(text: str) -> Optional[str]:
+    # Matches both operator alert "Станок SR-26 простаивает" and escalation "*SR-26* простаивает"
     m = re.search(r'Станок\s+(\S+)\s+простаивает', text)
+    if m:
+        return m.group(1)
+    m = re.search(r'\*(\S+?)\*\s+простаивает', text)
     return m.group(1) if m else None
 
 
@@ -224,8 +239,11 @@ async def _send_followup(
         machine_name, reason_code, reason_name, operator_name, idle_minutes
     )
 
-    if WHATSAPP_GROUP_AI_MANAGER:
-        await send_whatsapp_to_group(WHATSAPP_GROUP_AI_MANAGER, message)
+    # Send follow-up to operator group of current shift
+    from src.services.downtime_supervisor import _active_shift, _get_operator_group_for_shift
+    group = _get_operator_group_for_shift(_active_shift()) or WHATSAPP_GROUP_AI_MANAGER
+    if group:
+        await send_whatsapp_to_group(group, message)
 
     _awaiting_followup[machine_name] = True
     logger.info(f"[Followup] Отправлен followup для {machine_name}")
@@ -254,11 +272,11 @@ async def whatsapp_incoming(
     text_msg = parsed['text']
     quoted_body = parsed['quoted_body']
 
-    # Only our monitoring group
-    if WHATSAPP_GROUP_AI_MANAGER:
-        expected_id = WHATSAPP_GROUP_AI_MANAGER.split('@')[0]
+    # Accept from operator groups, AI manager group, or personal messages (no group_jid)
+    is_group = '@g.us' in group_jid
+    if is_group:
         actual_id = group_jid.split('@')[0]
-        if expected_id and actual_id and expected_id != actual_id:
+        if _ALLOWED_GROUPS and actual_id not in _ALLOWED_GROUPS:
             return {"ok": True, "detail": "not our group"}
 
     # Must be 1-3 digits
@@ -276,13 +294,16 @@ async def whatsapp_incoming(
     reporter_name = employee["full_name"]
     reporter_role = "machinist" if role_id == 2 else "operator"
 
+    # Determine reply destination: same group or AI manager fallback
+    reply_jid = group_jid if is_group else WHATSAPP_GROUP_AI_MANAGER
+
     # Resolve machine name
     if role_id == 2:
-        # Machinist must reply to alert
+        # Machinist must reply to alert (works from group or personal message)
         if not quoted_body:
-            if WHATSAPP_GROUP_AI_MANAGER:
+            if reply_jid:
                 await send_whatsapp_to_group(
-                    WHATSAPP_GROUP_AI_MANAGER,
+                    reply_jid,
                     f"❌ {reporter_name}, используй *ответ на сообщение* (reply) чтобы указать станок."
                 )
             return {"ok": False, "detail": "machinist must use reply"}
@@ -301,15 +322,15 @@ async def whatsapp_incoming(
 
         if code == 1:
             # Fixed — just acknowledge
-            if WHATSAPP_GROUP_AI_MANAGER:
+            if reply_jid:
                 await send_whatsapp_to_group(
-                    WHATSAPP_GROUP_AI_MANAGER,
+                    reply_jid,
                     f"👍 *{machine_name}* — отлично, следим за возобновлением работы."
                 )
             return {"ok": True, "machine": machine_name, "followup": "resolved"}
 
         else:
-            # Not fixed — follow-up again in 15 min
+            # Not fixed — follow-up again in 7 min
             # Find last log for context
             row = db.execute(text("""
                 SELECT id, reason_code, operator_name,
@@ -319,26 +340,26 @@ async def whatsapp_incoming(
                 ORDER BY alert_sent_at DESC LIMIT 1
             """), {"m": machine_name}).fetchone()
 
-            if WHATSAPP_GROUP_AI_MANAGER:
+            if reply_jid:
                 await send_whatsapp_to_group(
-                    WHATSAPP_GROUP_AI_MANAGER,
-                    f"🔄 *{machine_name}* — понял, проверим снова через 15 мин."
+                    reply_jid,
+                    f"🔄 *{machine_name}* — понял, проверим снова через 7 мин."
                 )
 
             if row:
                 rc = row[1]
                 rn = _get_reason_name(rc, db) or ""
                 asyncio.create_task(_send_followup(
-                    machine_name, row[0], rc, rn, row[2], delay_minutes=15
+                    machine_name, row[0], rc, rn, row[2], delay_minutes=7
                 ))
             return {"ok": True, "machine": machine_name, "followup": "pending"}
 
     # ── Regular reason code ──
     reason_name = _get_reason_name(code, db)
     if reason_name is None:
-        if WHATSAPP_GROUP_AI_MANAGER:
+        if reply_jid:
             await send_whatsapp_to_group(
-                WHATSAPP_GROUP_AI_MANAGER,
+                reply_jid,
                 f"❌ Код *{code}* не найден в справочнике. Проверьте список."
             )
         return {"ok": False, "detail": "unknown code"}
@@ -356,9 +377,9 @@ async def whatsapp_incoming(
     )
 
     # Confirmation
-    if WHATSAPP_GROUP_AI_MANAGER:
+    if reply_jid:
         await send_whatsapp_to_group(
-            WHATSAPP_GROUP_AI_MANAGER,
+            reply_jid,
             f"✅ *{machine_name}* — причина зафиксирована ({reporter_name}):\n"
             f"*{code}* — {reason_name}"
         )
@@ -366,10 +387,10 @@ async def whatsapp_incoming(
     # Get operator name for follow-up
     ctx = _get_log_context(log_id, db)
 
-    # Schedule LLM follow-up in 20 min
+    # Schedule LLM follow-up in 10 min
     asyncio.create_task(_send_followup(
         machine_name, log_id, code, reason_name,
-        ctx.get("operator_name"), delay_minutes=20
+        ctx.get("operator_name"), delay_minutes=10
     ))
 
     return {"ok": True, "machine": machine_name, "reason_code": code, "reporter": reporter_name}
