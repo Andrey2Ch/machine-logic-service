@@ -618,5 +618,6 @@ Log of downtime alerts sent by DowntimeSupervisor and operator reason-code repli
 | reporter_phone | text | YES | Normalized phone of the employee who replied |
 | reporter_name | text | YES | Full name of employee who reported the reason |
 | reporter_role | text | YES | Role of reporter: operator or machinist |
+| resolved_at | timestamp with time zone | YES | When machine returned to working state (set by DowntimeSupervisor). NULL = still idle or unknown |
 | created_at | timestamp with time zone | NO |  |
 

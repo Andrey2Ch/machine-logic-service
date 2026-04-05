@@ -391,6 +391,26 @@ async def _escalate_to_machinist(
     logger.info(f"[Escalation] {machine_name}: сообщение отправлено {len(on_duty)} наладчикам: {names}")
 
 
+def _resolve_downtime_log(machine_name: str, get_db_session) -> None:
+    """Записать resolved_at для последнего открытого лога простоя."""
+    try:
+        from sqlalchemy import text
+        db = next(get_db_session())
+        try:
+            db.execute(text("""
+                UPDATE machine_downtime_logs
+                SET resolved_at = NOW()
+                WHERE machine_name = :name
+                  AND resolved_at IS NULL
+                  AND alert_sent_at > NOW() - INTERVAL '24 hours'
+            """), {"name": machine_name})
+            db.commit()
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning(f"[DowntimeSupervisor] _resolve_downtime_log error for {machine_name}: {e}")
+
+
 def _has_recent_reason(machine_name: str, get_db_session) -> bool:
     """Проверить — записана ли уже причина простоя за последние 2 часа."""
     try:
@@ -431,9 +451,10 @@ async def _check_once(get_db_session) -> None:
         machinist = data.get('operatorName')
 
         if ui_mode != 'idle':
-            if name in _last_alert_sent and ui_mode == 'working':
+            if name in _last_alert_sent:
                 del _last_alert_sent[name]
-                logger.debug(f"[DowntimeSupervisor] {name} вернулся в работу — cooldown сброшен")
+                logger.info(f"[DowntimeSupervisor] {name} вернулся в работу — cooldown сброшен, resolved_at записан")
+                _resolve_downtime_log(name, get_db_session)
             # Сбрасываем отслеживание idle при любом не-idle статусе
             _first_seen_idle.pop(name, None)
             continue
