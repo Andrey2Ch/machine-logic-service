@@ -26,7 +26,7 @@ import httpx
 import pytz
 
 _IL_TZ = pytz.timezone("Asia/Jerusalem")
-SHIFT_A_DAY_WEEK = int(os.getenv("SHIFT_A_DAY_WEEK", "2"))
+SHIFT_A_DAY_WEEK = int(os.getenv("SHIFT_A_DAY_WEEK", "1"))
 
 logger = logging.getLogger(__name__)
 

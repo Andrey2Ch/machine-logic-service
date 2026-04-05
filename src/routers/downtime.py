@@ -35,8 +35,8 @@ def get_downtime_logs(
     params: dict = {"limit": limit, "offset": offset}
 
     if machine_name:
-        filters.append("l.machine_name = :machine_name")
-        params["machine_name"] = machine_name
+        filters.append("LOWER(l.machine_name) LIKE LOWER(:machine_name)")
+        params["machine_name"] = f"%{machine_name}%"
 
     if from_dt:
         filters.append("l.alert_sent_at >= :from_dt")
@@ -73,7 +73,7 @@ def get_downtime_logs(
             l.resolved_at,
             CASE
                 WHEN l.resolved_at IS NOT NULL
-                THEN EXTRACT(EPOCH FROM (l.resolved_at - l.alert_sent_at)) / 60
+                THEN EXTRACT(EPOCH FROM (l.resolved_at - (l.alert_sent_at - l.idle_minutes * INTERVAL '1 minute'))) / 60
             END              AS total_downtime_minutes
         FROM machine_downtime_logs l
         LEFT JOIN stoppage_reasons r ON r.code = l.reason_code
