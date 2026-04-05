@@ -25,108 +25,57 @@ def get_downtime_logs(
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db_session),
 ):
-    """
-    Список событий простоя — по одной строке на событие (machine + resolved_at).
-
-    Несколько алертов одного простоя (follow-up, эскалация) группируются в одну строку.
-    Длительность = resolved_at - first_alert_at. NULL если не разрешён.
-    """
+    """Одна строка на алерт. Длительность = resolved_at - alert_sent_at."""
     filters = ["1=1"]
     params: dict = {"limit": limit, "offset": offset}
 
     if machine_name:
-        filters.append("LOWER(e.machine_name) LIKE LOWER(:machine_name)")
+        filters.append("LOWER(l.machine_name) LIKE LOWER(:machine_name)")
         params["machine_name"] = f"%{machine_name}%"
-
     if from_dt:
-        filters.append("e.first_alert_at >= :from_dt")
+        filters.append("l.alert_sent_at >= :from_dt")
         params["from_dt"] = from_dt
-
     if to_dt:
-        filters.append("e.first_alert_at <= :to_dt")
+        filters.append("l.alert_sent_at <= :to_dt")
         params["to_dt"] = to_dt
-
     if category:
-        filters.append("sr.category = :category")
+        filters.append("r.category = :category")
         params["category"] = category
-
     if unanswered_only:
-        filters.append("e.reason_code IS NULL")
+        filters.append("l.reason_code IS NULL")
 
     where = " AND ".join(filters)
 
-    # events — одна строка на событие (machine + resolved_at)
-    # first_alert — берём id первого алерта (для уникальности строки)
-    # reporter — кто ответил (берём из строки где есть reason_code)
-    base_cte = """
-        WITH events AS (
-            SELECT
-                l.machine_name,
-                l.resolved_at,
-                MIN(l.alert_sent_at)      AS first_alert_at,
-                COUNT(*)                  AS alert_count,
-                MAX(l.reason_code)        AS reason_code,
-                MAX(l.reason_reported_at) AS reason_reported_at,
-                MIN(l.operator_name)      AS operator_name,
-                MIN(l.machinist_name)     AS machinist_name
-            FROM machine_downtime_logs l
-            GROUP BY l.machine_name, l.resolved_at
-        ),
-        first_alert AS (
-            SELECT DISTINCT ON (machine_name, resolved_at)
-                machine_name, resolved_at, id
-            FROM machine_downtime_logs
-            ORDER BY machine_name, resolved_at NULLS LAST, alert_sent_at ASC
-        ),
-        reporter AS (
-            SELECT DISTINCT ON (machine_name, resolved_at)
-                machine_name, resolved_at, reporter_name, reporter_role
-            FROM machine_downtime_logs
-            WHERE reason_code IS NOT NULL
-            ORDER BY machine_name, resolved_at NULLS LAST, alert_sent_at ASC
-        )
-    """
-
     rows = db.execute(text(f"""
-        {base_cte}
         SELECT
-            fa.id,
-            e.machine_name,
-            e.first_alert_at                                          AS alert_sent_at,
-            e.alert_count,
-            e.operator_name,
-            e.machinist_name,
-            e.reason_code,
-            sr.name_ru                                                AS reason_name,
-            sr.category                                               AS reason_category,
-            sr.is_long_term                                           AS reason_is_long_term,
-            e.reason_reported_at,
-            rp.reporter_name,
-            rp.reporter_role,
-            e.resolved_at,
-            CASE WHEN e.resolved_at IS NOT NULL
-            THEN EXTRACT(EPOCH FROM (e.resolved_at - e.first_alert_at)) / 60
-            END                                                       AS total_downtime_minutes
-        FROM events e
-        JOIN first_alert fa ON fa.machine_name = e.machine_name
-            AND fa.resolved_at IS NOT DISTINCT FROM e.resolved_at
-        LEFT JOIN reporter rp ON rp.machine_name = e.machine_name
-            AND rp.resolved_at IS NOT DISTINCT FROM e.resolved_at
-        LEFT JOIN stoppage_reasons sr ON sr.code = e.reason_code
+            l.id,
+            l.machine_name,
+            l.alert_sent_at,
+            l.idle_minutes,
+            l.operator_name,
+            l.machinist_name,
+            l.reason_code,
+            r.name_ru       AS reason_name,
+            r.category      AS reason_category,
+            r.is_long_term  AS reason_is_long_term,
+            l.reason_reported_at,
+            l.reporter_name,
+            l.reporter_role,
+            l.resolved_at,
+            CASE WHEN l.resolved_at IS NOT NULL
+            THEN EXTRACT(EPOCH FROM (l.resolved_at - l.alert_sent_at)) / 60
+            END             AS total_downtime_minutes
+        FROM machine_downtime_logs l
+        LEFT JOIN stoppage_reasons r ON r.code = l.reason_code
         WHERE {where}
-        ORDER BY e.first_alert_at DESC
+        ORDER BY l.alert_sent_at DESC
         LIMIT :limit OFFSET :offset
     """), params).fetchall()
 
     total = db.execute(text(f"""
-        {base_cte}
         SELECT COUNT(*)
-        FROM events e
-        JOIN first_alert fa ON fa.machine_name = e.machine_name
-            AND fa.resolved_at IS NOT DISTINCT FROM e.resolved_at
-        LEFT JOIN reporter rp ON rp.machine_name = e.machine_name
-            AND rp.resolved_at IS NOT DISTINCT FROM e.resolved_at
-        LEFT JOIN stoppage_reasons sr ON sr.code = e.reason_code
+        FROM machine_downtime_logs l
+        LEFT JOIN stoppage_reasons r ON r.code = l.reason_code
         WHERE {where}
     """), {k: v for k, v in params.items() if k not in ("limit", "offset")}).scalar()
 
@@ -137,7 +86,7 @@ def get_downtime_logs(
                 "id": r.id,
                 "machine_name": r.machine_name,
                 "alert_sent_at": r.alert_sent_at.isoformat() if r.alert_sent_at else None,
-                "alert_count": r.alert_count,
+                "idle_minutes_at_alert": round(float(r.idle_minutes or 0), 1),
                 "operator_name": r.operator_name,
                 "machinist_name": r.machinist_name,
                 "reason_code": r.reason_code,
@@ -148,7 +97,7 @@ def get_downtime_logs(
                 "reporter_name": r.reporter_name,
                 "reporter_role": r.reporter_role,
                 "resolved_at": r.resolved_at.isoformat() if r.resolved_at else None,
-                "total_downtime_minutes": round(r.total_downtime_minutes, 1) if r.total_downtime_minutes is not None else None,
+                "total_downtime_minutes": round(float(r.total_downtime_minutes), 1) if r.total_downtime_minutes is not None else None,
             }
             for r in rows
         ],
