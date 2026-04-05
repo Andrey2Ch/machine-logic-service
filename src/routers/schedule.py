@@ -21,7 +21,7 @@ from src.database import get_db_session
 
 router = APIRouter(prefix="/schedule", tags=["schedule"])
 
-SHIFT_A_DAY_WEEK = int(os.getenv("SHIFT_A_DAY_WEEK", "14"))
+SHIFT_A_DAY_WEEK = int(os.getenv("SHIFT_A_DAY_WEEK", "13"))
 
 
 def _shift_for_week(week_start: date) -> str:
