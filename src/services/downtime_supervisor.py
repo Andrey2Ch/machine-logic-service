@@ -7,6 +7,9 @@ Downtime Supervisor — проактивный мониторинг просто
 Поток уведомлений:
   1. Алерт → группа операторов текущей смены
   2. Через 7 мин без ответа → эскалация наладчику (личное сообщение)
+  3. Ещё cooldown → повторный алерт (макс MAX_UNANSWERED_ALERTS=3 без ответа)
+  4. Если ответ с is_long_term=true → молчим до возврата станка в работу
+  5. Если ответ с is_long_term=false → follow-up через webhook
 
 Env vars:
     DOWNTIME_SUPERVISOR_DRY_RUN  — '1' (default) = только логи, '0' = реальная отправка
@@ -14,6 +17,7 @@ Env vars:
     DOWNTIME_SUPERVISOR_COOLDOWN_MIN  — минимум между повторными алертами (default: 30)
     DOWNTIME_SUPERVISOR_INTERVAL_SEC  — интервал проверки в секундах (default: 120)
     DOWNTIME_ESCALATION_DELAY_MIN    — задержка эскалации наладчику (default: 7)
+    DOWNTIME_MAX_UNANSWERED_ALERTS   — макс алертов без ответа (default: 3)
 """
 
 import asyncio
@@ -41,6 +45,10 @@ ESCALATION_DELAY_MIN = float(os.getenv('DOWNTIME_ESCALATION_DELAY_MIN', '7'))
 _last_alert_sent: Dict[str, datetime] = {}
 # machine_name -> время когда супервизор впервые увидел станок idle
 _first_seen_idle: Dict[str, datetime] = {}
+# machine_name -> кол-во отправленных алертов без ответа (сбрасывается при ответе или возврате в работу)
+_alert_count: Dict[str, int] = {}
+
+MAX_UNANSWERED_ALERTS = int(os.getenv('DOWNTIME_MAX_UNANSWERED_ALERTS', '3'))
 
 
 async def _fetch_machines() -> list:
@@ -354,7 +362,7 @@ async def _escalate_to_machinist(
     await asyncio.sleep(ESCALATION_DELAY_MIN * 60)
 
     # Проверяем ответил ли уже оператор
-    if _has_recent_reason(machine_name, get_db_session):
+    if _is_suppressed(machine_name, get_db_session):
         logger.info(f"[Escalation] {machine_name}: оператор уже ответил — эскалация отменена")
         return
 
@@ -411,24 +419,38 @@ def _resolve_downtime_log(machine_name: str, get_db_session) -> None:
         logger.warning(f"[DowntimeSupervisor] _resolve_downtime_log error for {machine_name}: {e}")
 
 
-def _has_recent_reason(machine_name: str, get_db_session) -> bool:
-    """Проверить — записана ли уже причина простоя за последние 2 часа."""
+def _is_suppressed(machine_name: str, get_db_session) -> bool:
+    """Проверить — нужно ли подавить алерты для этого станка.
+
+    Подавляем если:
+    - Есть открытый лог с is_long_term=true → молчим до возврата станка
+    - Есть ответ с причиной за последние 2 часа → молчим (follow-up через webhook)
+    """
     try:
         from sqlalchemy import text
         db = next(get_db_session())
         try:
             row = db.execute(text("""
-                SELECT 1 FROM machine_downtime_logs
-                WHERE machine_name = :name
-                  AND reason_code IS NOT NULL
-                  AND reason_reported_at > NOW() - INTERVAL '2 hours'
-                LIMIT 1
+                SELECT
+                    EXISTS(
+                        SELECT 1 FROM machine_downtime_logs l
+                        JOIN stoppage_reasons r ON r.code = l.reason_code
+                        WHERE l.machine_name = :name
+                          AND l.resolved_at IS NULL
+                          AND r.is_long_term = true
+                    ) AS has_long_term,
+                    EXISTS(
+                        SELECT 1 FROM machine_downtime_logs
+                        WHERE machine_name = :name
+                          AND reason_code IS NOT NULL
+                          AND reason_reported_at > NOW() - INTERVAL '2 hours'
+                    ) AS has_recent_reason
             """), {"name": machine_name}).fetchone()
-            return row is not None
+            return row.has_long_term or row.has_recent_reason
         finally:
             db.close()
     except Exception as e:
-        logger.warning(f"[DowntimeSupervisor] _has_recent_reason error: {e}")
+        logger.warning(f"[DowntimeSupervisor] _is_suppressed error: {e}")
         return False
 
 
@@ -455,8 +477,9 @@ async def _check_once(get_db_session) -> None:
                 del _last_alert_sent[name]
                 logger.info(f"[DowntimeSupervisor] {name} вернулся в работу — cooldown сброшен, resolved_at записан")
                 _resolve_downtime_log(name, get_db_session)
-            # Сбрасываем отслеживание idle при любом не-idle статусе
+            # Сбрасываем всё отслеживание при возврате в работу
             _first_seen_idle.pop(name, None)
+            _alert_count.pop(name, None)
             continue
 
         # Пропускаем станки с серой рамкой (нет активного производства)
@@ -476,12 +499,17 @@ async def _check_once(get_db_session) -> None:
         our_idle_min = (now - _first_seen_idle[name]).total_seconds() / 60
 
         if _should_alert(name, our_idle_min):
-            if _has_recent_reason(name, get_db_session):
-                logger.debug(f"[DowntimeSupervisor] {name}: причина уже записана — алерт пропущен")
+            if _is_suppressed(name, get_db_session):
+                _alert_count.pop(name, None)  # сброс счётчика — при окончании подавления начнём заново
+                logger.debug(f"[DowntimeSupervisor] {name}: подавлен (причина записана или long-term)")
+                continue
+            if _alert_count.get(name, 0) >= MAX_UNANSWERED_ALERTS:
+                logger.debug(f"[DowntimeSupervisor] {name}: лимит алертов ({MAX_UNANSWERED_ALERTS}) без ответа — молчим")
                 continue
             logger.info(f"[DowntimeSupervisor] IDLE ALERT: {name} = {our_idle_min:.1f} мин, наладчик={machinist}")
             await _send_idle_alert(name, our_idle_min, machinist, get_db_session, shift=shift)
             _last_alert_sent[name] = now
+            _alert_count[name] = _alert_count.get(name, 0) + 1
         else:
             logger.debug(f"[DowntimeSupervisor] {name}: idle={our_idle_min:.1f} мин — пропущен (порог или cooldown)")
 

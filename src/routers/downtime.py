@@ -63,6 +63,12 @@ def get_downtime_logs(
             l.reporter_role,
             l.resolved_at,
             CASE WHEN l.resolved_at IS NOT NULL
+            AND l.alert_sent_at = (
+                SELECT MIN(l2.alert_sent_at)
+                FROM machine_downtime_logs l2
+                WHERE l2.machine_name = l.machine_name
+                  AND l2.resolved_at = l.resolved_at
+            )
             THEN EXTRACT(EPOCH FROM (l.resolved_at - l.alert_sent_at)) / 60
             END             AS total_downtime_minutes
         FROM machine_downtime_logs l
