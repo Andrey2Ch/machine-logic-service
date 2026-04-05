@@ -112,13 +112,19 @@ def _find_pending_alert(machine_name: str, db: Session) -> Optional[int]:
     return row[0] if row else None
 
 
-def _get_reason_name(code: int, db: Session) -> Optional[str]:
-    """Only returns name for active codes (inactive = reserved or duplicate)."""
+def _get_reason_info(code: int, db: Session) -> Optional[Dict]:
+    """Returns {name, is_long_term, category} for active codes, or None if not found."""
     row = db.execute(
-        text("SELECT name_ru FROM stoppage_reasons WHERE code = :code AND is_active = true"),
+        text("SELECT name_ru, is_long_term, category FROM stoppage_reasons WHERE code = :code AND is_active = true"),
         {"code": code}
     ).fetchone()
-    return row[0] if row else None
+    return {"name": row[0], "is_long_term": row[1], "category": row[2]} if row else None
+
+
+def _get_reason_name(code: int, db: Session) -> Optional[str]:
+    """Only returns name for active codes (inactive = reserved or duplicate)."""
+    info = _get_reason_info(code, db)
+    return info["name"] if info else None
 
 
 def _record_reason(log_id: int, reason_code: int, reporter_phone: str,
@@ -355,14 +361,18 @@ async def whatsapp_incoming(
             return {"ok": True, "machine": machine_name, "followup": "pending"}
 
     # ── Regular reason code ──
-    reason_name = _get_reason_name(code, db)
-    if reason_name is None:
+    reason_info = _get_reason_info(code, db)
+    if reason_info is None:
         if reply_jid:
             await send_whatsapp_to_group(
                 reply_jid,
                 f"❌ Код *{code}* не найден в справочнике. Проверьте список."
             )
         return {"ok": False, "detail": "unknown code"}
+
+    reason_name = reason_info["name"]
+    is_long_term = reason_info["is_long_term"]
+    reason_category = reason_info["category"]
 
     # Find pending alert
     log_id = _find_pending_alert(machine_name, db)
@@ -373,7 +383,7 @@ async def whatsapp_incoming(
 
     logger.info(
         f"[WhatsAppWebhook] {reporter_role} {reporter_name} → "
-        f"{machine_name}: код {code} '{reason_name}' (log_id={log_id})"
+        f"{machine_name}: код {code} '{reason_name}' long_term={is_long_term} (log_id={log_id})"
     )
 
     # Confirmation
@@ -384,10 +394,25 @@ async def whatsapp_incoming(
             f"*{code}* — {reason_name}"
         )
 
-    # Get operator name for follow-up
-    ctx = _get_log_context(log_id, db)
+    # Notify warehouse group for material/work reasons (if group is configured)
+    if reason_category == "work_and_material":
+        from src.services.whatsapp_client import WHATSAPP_GROUP_WAREHOUSE
+        if WHATSAPP_GROUP_WAREHOUSE:
+            ctx_w = _get_log_context(log_id, db)
+            asyncio.create_task(send_whatsapp_to_group(
+                WHATSAPP_GROUP_WAREHOUSE,
+                f"📦 *{machine_name}* простаивает — материальная причина:\n"
+                f"*{code}* — {reason_name}\n"
+                f"Оператор: {ctx_w.get('operator_name') or '—'}"
+            ))
+
+    # Skip follow-up for long-term reasons
+    if is_long_term:
+        logger.info(f"[WhatsAppWebhook] {machine_name}: причина долгосрочная — follow-up не планируется")
+        return {"ok": True, "machine": machine_name, "reason_code": code, "reporter": reporter_name}
 
     # Schedule LLM follow-up in 10 min
+    ctx = _get_log_context(log_id, db)
     asyncio.create_task(_send_followup(
         machine_name, log_id, code, reason_name,
         ctx.get("operator_name"), delay_minutes=10

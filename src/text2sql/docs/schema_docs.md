@@ -872,6 +872,7 @@ Machine stoppage/fault reason codes (רשימת תקלות). Categories: machine
 | name_ru | text | NO | Russian name |
 | name_en | text | NO | English name |
 | is_active | boolean | NO | Soft-delete flag |
+| is_long_term | boolean | NO | TRUE = reason won't resolve in minutes; skip WhatsApp follow-up. Codes: 1,4,6 (machine) + all work_and_material |
 | created_at | timestamp with time zone | NO |  |
 
 
