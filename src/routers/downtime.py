@@ -1,8 +1,8 @@
 """
-Downtime logs API — просмотр журнала простоев станков.
+Downtime logs API — просмотр журнала и отчёты по простоям станков.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
@@ -110,5 +110,147 @@ def get_downtime_logs(
                 "total_downtime_minutes": round(r.total_downtime_minutes, 1) if r.total_downtime_minutes is not None else None,
             }
             for r in rows
+        ],
+    }
+
+
+@router.get("/report")
+def get_downtime_report(
+    from_dt: datetime = Query(..., description="Начало периода (ISO datetime)"),
+    to_dt: datetime = Query(..., description="Конец периода (ISO datetime)"),
+    db: Session = Depends(get_db_session),
+):
+    """
+    Агрегированный отчёт по простоям за период.
+
+    Возвращает сводку + разбивку по операторам, станкам и причинам.
+    """
+    p = {"from_dt": from_dt, "to_dt": to_dt}
+
+    # ── Сводка ────────────────────────────────────────────────────────────────
+    summary_row = db.execute(text("""
+        SELECT
+            COUNT(*)                                                        AS total_count,
+            COUNT(*) FILTER (
+                WHERE EXTRACT(EPOCH FROM (resolved_at - alert_sent_at))/60 > 15
+                   OR (resolved_at IS NULL AND idle_minutes > 15)
+            )                                                               AS significant_count,
+            COUNT(*) FILTER (WHERE reason_code IS NULL)                     AS unanswered_count,
+            COALESCE(SUM(
+                EXTRACT(EPOCH FROM (resolved_at - alert_sent_at))/60
+            ), 0)                                                           AS total_minutes
+        FROM machine_downtime_logs
+        WHERE alert_sent_at >= :from_dt
+          AND alert_sent_at <= :to_dt
+    """), p).fetchone()
+
+    # ── По операторам ─────────────────────────────────────────────────────────
+    operator_rows = db.execute(text("""
+        SELECT
+            COALESCE(operator_name, '(не указан)')  AS operator_name,
+            COUNT(*)                                AS stop_count,
+            COALESCE(SUM(
+                EXTRACT(EPOCH FROM (resolved_at - alert_sent_at))/60
+            ), 0)                                   AS total_minutes
+        FROM machine_downtime_logs
+        WHERE alert_sent_at >= :from_dt
+          AND alert_sent_at <= :to_dt
+        GROUP BY COALESCE(operator_name, '(не указан)')
+        ORDER BY total_minutes DESC
+    """), p).fetchall()
+
+    # ── По станкам + топ-причина ──────────────────────────────────────────────
+    machine_rows = db.execute(text("""
+        WITH per_machine AS (
+            SELECT
+                machine_name,
+                COUNT(*)                                          AS stop_count,
+                COALESCE(SUM(
+                    EXTRACT(EPOCH FROM (resolved_at - alert_sent_at))/60
+                ), 0)                                            AS total_minutes
+            FROM machine_downtime_logs
+            WHERE alert_sent_at >= :from_dt
+              AND alert_sent_at <= :to_dt
+            GROUP BY machine_name
+        ),
+        top_reason AS (
+            SELECT DISTINCT ON (l.machine_name)
+                l.machine_name,
+                r.name_ru   AS top_reason_name,
+                r.category  AS top_reason_category
+            FROM machine_downtime_logs l
+            JOIN stoppage_reasons r ON r.code = l.reason_code
+            WHERE l.alert_sent_at >= :from_dt
+              AND l.alert_sent_at <= :to_dt
+            GROUP BY l.machine_name, r.name_ru, r.category
+            ORDER BY l.machine_name, COUNT(*) DESC
+        )
+        SELECT
+            pm.machine_name,
+            pm.stop_count,
+            pm.total_minutes,
+            tr.top_reason_name,
+            tr.top_reason_category
+        FROM per_machine pm
+        LEFT JOIN top_reason tr USING (machine_name)
+        ORDER BY pm.total_minutes DESC
+    """), p).fetchall()
+
+    # ── По причинам ───────────────────────────────────────────────────────────
+    reason_rows = db.execute(text("""
+        SELECT
+            r.code      AS reason_code,
+            r.name_ru   AS reason_name,
+            r.category  AS reason_category,
+            COUNT(*)    AS stop_count,
+            COALESCE(SUM(
+                EXTRACT(EPOCH FROM (l.resolved_at - l.alert_sent_at))/60
+            ), 0)       AS total_minutes
+        FROM machine_downtime_logs l
+        JOIN stoppage_reasons r ON r.code = l.reason_code
+        WHERE l.alert_sent_at >= :from_dt
+          AND l.alert_sent_at <= :to_dt
+        GROUP BY r.code, r.name_ru, r.category
+        ORDER BY total_minutes DESC
+    """), p).fetchall()
+
+    return {
+        "period": {
+            "from_dt": from_dt.isoformat(),
+            "to_dt": to_dt.isoformat(),
+        },
+        "summary": {
+            "total_count": summary_row.total_count,
+            "significant_count": summary_row.significant_count,
+            "unanswered_count": summary_row.unanswered_count,
+            "total_minutes": round(float(summary_row.total_minutes or 0), 1),
+        },
+        "by_operator": [
+            {
+                "operator_name": r.operator_name,
+                "stop_count": r.stop_count,
+                "total_minutes": round(float(r.total_minutes or 0), 1),
+            }
+            for r in operator_rows
+        ],
+        "by_machine": [
+            {
+                "machine_name": r.machine_name,
+                "stop_count": r.stop_count,
+                "total_minutes": round(float(r.total_minutes or 0), 1),
+                "top_reason_name": r.top_reason_name,
+                "top_reason_category": r.top_reason_category,
+            }
+            for r in machine_rows
+        ],
+        "by_reason": [
+            {
+                "reason_code": r.reason_code,
+                "reason_name": r.reason_name,
+                "reason_category": r.reason_category,
+                "stop_count": r.stop_count,
+                "total_minutes": round(float(r.total_minutes or 0), 1),
+            }
+            for r in reason_rows
         ],
     }
