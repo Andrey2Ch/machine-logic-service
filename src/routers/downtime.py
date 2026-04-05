@@ -79,7 +79,14 @@ def get_downtime_logs(
                     WHERE l2.machine_name = l.machine_name
                       AND l2.resolved_at = l.resolved_at
                 )
-                THEN EXTRACT(EPOCH FROM (l.resolved_at - (l.alert_sent_at - l.idle_minutes * INTERVAL '1 minute'))) / 60
+                THEN (
+                    SELECT EXTRACT(EPOCH FROM (l.resolved_at - (l3.alert_sent_at - l3.idle_minutes * INTERVAL '1 minute'))) / 60
+                    FROM machine_downtime_logs l3
+                    WHERE l3.machine_name = l.machine_name
+                      AND l3.resolved_at = l.resolved_at
+                    ORDER BY l3.alert_sent_at ASC
+                    LIMIT 1
+                )
             END              AS total_downtime_minutes
         FROM machine_downtime_logs l
         LEFT JOIN stoppage_reasons r ON r.code = l.reason_code
