@@ -64,12 +64,19 @@ def get_downtime_logs(
             l.resolved_at,
             CASE WHEN l.resolved_at IS NOT NULL
             AND l.alert_sent_at = (
-                SELECT MIN(l2.alert_sent_at)
+                SELECT MAX(l2.alert_sent_at)
                 FROM machine_downtime_logs l2
                 WHERE l2.machine_name = l.machine_name
                   AND l2.resolved_at = l.resolved_at
             )
-            THEN EXTRACT(EPOCH FROM (l.resolved_at - l.alert_sent_at)) / 60
+            THEN EXTRACT(EPOCH FROM (
+                l.resolved_at - (
+                    SELECT MIN(l3.alert_sent_at)
+                    FROM machine_downtime_logs l3
+                    WHERE l3.machine_name = l.machine_name
+                      AND l3.resolved_at = l.resolved_at
+                )
+            )) / 60
             END             AS total_downtime_minutes
         FROM machine_downtime_logs l
         LEFT JOIN stoppage_reasons r ON r.code = l.reason_code
